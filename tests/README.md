@@ -3,18 +3,30 @@
 Each integration test case tests a different type of expected functionality of
 cratetorrent.
 
-In general all test files use Docker containers and Docker networks to simulate
-a primitive network of peers (later on this may be expanded so that peers are
-not on a LAN), and one or more of the containers will run established torrent
-clients to test cratetorrent's protocol compliance against.
+In general all tests use Docker containers and a Docker virtual network to
+simulate a primitive network of peers (later on this may be expanded so that
+peers are not on a LAN), and one or more of the containers will run established
+torrent clients against which to test cratetorrent's protocol compliance, i.e.
+to make sure that cratetorrent works with torrent clients used in the wild.
+
+To ensure reproducible test results, it is always the same file that is going to
+be downloaded or seeded, and external clients are not going to be involved, and
+the client is going to connect to the seed directly, without the involvement of
+BitTorrent trackers or the DHT, that may introduce variable test runs. These are
+supposed to be tested separately at a later time point, when functionality is
+added.
+
+Moreover, various file sizes are going to be tested to ensure that
+cratetorrent works correctly with small and large files, with different piece
+sizes and other parameters.
 
 
 ## Single file download
 
 The test [script](test_single_connection_download.sh) creates a local Docker
 network of two BitTorrent peer containers, in which one container runs the well
-established Transmission torrent client, that has a
-[CLI](https://manpages.ubuntu.com/manpages/bionic/man1/transmission-cli.1.html),
+established Transmission torrent client that has a
+[CLI](https://manpages.ubuntu.com/manpages/bionic/man1/transmission-cli.1.html)
 as well as a pre-packaged [Docker
 image](https://hub.docker.com/r/linuxserver/transmission/). Another container
 runs the cratetorrent test binary.

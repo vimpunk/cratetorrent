@@ -17,6 +17,10 @@ C++.
 4. Download a torrent using multiple connections.
 5. Seed a torrent.
 
+And more milestones to be added later. Eventually, I hope to develop
+cratetorrent into a full-fledged BitTorrent engine library that can be used as
+the engine underneath torrent clients.
+
 
 ## Integration tests
 
