@@ -1,4 +1,4 @@
-# `cratetorrent`
+# cratetorrent
 
 Cratetorrent is an experimental Torrent client written in Rust.
 
@@ -55,7 +55,7 @@ seeding.
 1. `cd assets`
 2. Truncate the file to the desired size:
   ```bash
-  truncate -s 1M 1M-test.txt
+  truncate -s 1M 1mb-test.txt
   ```
 3. Use python 3 to fill it with random printable characters:
   ```python
@@ -78,7 +78,7 @@ seeding.
     linuxserver/transmission
   ```
 5. After running the Transmission container for the first time, it will set up
-   the expected directory structures in the `assets/transmission`
+   the expected directory structure in the `assets/transmission`
    subdirectories.
 
 #### Create torrent file to seed
@@ -89,20 +89,21 @@ seeding.
   ```
 7. Create symbolic link for the file so that it's also in the assets directory
    (as a convenience for our test runner so that we don't have to hard-code the
-   Transmission folder structure into the test):
+   Transmission folder structure in the tests):
   ```bash
   ln -s transmission/downloads/complete/1mb-test.txt 1mb-test.txt
   ```
-8. Create a shell session in the running Transmission container:
+8. Create a shell session for the running Transmission container:
   ```bash
   docker exec -ti transmission bash
   ```
 9. Inside the container, create the torrent metainfo file. **NOTE**: the file is
    not created not with the `.torrent` suffix on purpose! This is so that the
-   Transmission daemon doesn't pick up the file, as we have a root session in
+   Transmission daemon doesn't pick it up, as we have a root session in
    container and thus the file created will be owned by root, but the docker
-   container was specified the `UID` and `GID` of the host user (most likely not
-   root), so the process would fail to read in the torrent file.
+   container was specified to run the daemon with the `UID` and `GID` of the host
+   user (most likely not root), so the process would fail to read in the torrent
+   file.
   ```bash
   transmission-create -o /watch/1mb-test.txt /downloads/complete/1mb-test.txt
   ```
