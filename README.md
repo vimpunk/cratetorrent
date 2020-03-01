@@ -8,10 +8,10 @@ C++.
 
 ## Goals
 
-1. Perform a single download of a file with a single BitTorrent client if given
-   the address of a seed and the necessary torrent meta-information. No multiple
-   torrents, no seeding, no optimizations, or any other feature you might expect
-   from a full-fledged BitTorrent library.
+1. Perform a single download of a file with a single peer connection if given
+   the address of a seed and the necessary torrent meta-information. No
+   multiple torrents, no seeding, no optimizations, or any other feature
+   you might expect from a full-fledged BitTorrent library.
 2. Implement metainfo parsing.
 3. Download an directory of files using a single peer connection.
 4. Download a torrent using multiple connections.
@@ -22,13 +22,31 @@ cratetorrent into a full-fledged BitTorrent engine library that can be used as
 the engine underneath torrent clients.
 
 
-## Integration tests
+## Tests
 
-There is a whole suite of integration tests to ensure that cratetorrent works as
-expected, with various test cases for various use cases. To see more, please see
-the tests folder [readme](tests/README.md).
+Cratetorrent is well tested to ensure correct functionality. It includes an
+exhaustive suite of unit tests verifying the correctness of each part of the
+code base, defined inline in the Rust source code.
+
+There is also a host of integration tests for verifying the functionality of the
+whole engine, ranging from testing the download of a single file through a single
+connection, through downloading a torrent from several peers, to seeding to
+other peers, stress testing, and others. To see more, please see the
+[integration tests folder](tests).
 
 
 ## Design
 
-To be expanded.
+The design and development of cratetorrent is, as much as possible, documented
+in the [design doc](DESIGN.md). You will find (fairly low-level) information
+about the _current_ he architecture of the code and rationale for the design
+decisions that have been taken. It is continuously updated as development, as
+much as possible, is driven by well-defined feature specification and subsequent
+(code) design specification before any code is written.
+
+
+## Research
+
+While the thoughts behind the current state of the implementation are stored
+in the design doc, thoughts and research on future functionality is stored in
+the [research doc](RESEARCH.md).
