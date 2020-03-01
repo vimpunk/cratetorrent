@@ -6,6 +6,13 @@ from which many lessons were learned when I first wrote my torrent engine in
 C++.
 
 
+## Project structure
+
+The project is split up in two:
+- the `cratetorrent` library, that defines most of the functionality,
+- and a `cratetortent-cli` binary for downloading torrents via the CLI.
+
+
 ## Goals
 
 1. Perform a single download of a file with a single peer connection if given
