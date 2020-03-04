@@ -20,7 +20,7 @@ The project is split up in two:
    multiple torrents, no seeding, no optimizations, or any other feature
    you might expect from a full-fledged BitTorrent library.
 2. Implement metainfo parsing.
-3. Download an directory of files using a single peer connection.
+3. Download a directory of files using a single peer connection.
 4. Download a torrent using multiple connections.
 5. Seed a torrent.
 

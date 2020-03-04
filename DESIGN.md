@@ -177,7 +177,7 @@ be accessed at a glance.
 
 #### **`handshake`**
 ```
-<1: len=68>
+<1: prot len=19>
 <19: prot="BitTorrent protocol">
 <8: reserved>
 <20: info hash>
