@@ -16,13 +16,12 @@ The project is split up in two:
 ## Goals
 
 1. Perform a single download of a file with a single peer connection if given
-   the address of a seed and the necessary torrent meta-information. No
-   multiple torrents, no seeding, no optimizations, or any other feature
-   you might expect from a full-fledged BitTorrent library.
-2. Implement metainfo parsing.
-3. Download a directory of files using a single peer connection.
-4. Download a torrent using multiple connections.
-5. Seed a torrent.
+   the address of a seed and the path to the torrent metainfo. No multiple
+   torrents, no seeding, no optimizations, or any other feature you might expect
+   from a full-fledged BitTorrent library.
+2. Download a directory of files using a single peer connection.
+3. Download a torrent using multiple connections.
+4. Seed a torrent.
 
 And more milestones to be added later. Eventually, I hope to develop
 cratetorrent into a full-fledged BitTorrent engine library that can be used as

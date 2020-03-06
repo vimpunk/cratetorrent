@@ -7,3 +7,11 @@ edition = "2018"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+clap = "2.33"
+cratetorrent = { path = "../cratetorrent" }
+env_logger = "0.7"
+futures = "0.3"
+hex = "0.4"
+log = "0.4"
+# TODO: specify exact features to use to cut down build times
+tokio = { version = "0.2", features = ["full"] }

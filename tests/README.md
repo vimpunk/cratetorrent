@@ -23,6 +23,10 @@ sizes and other parameters.
 
 ## Single file download
 
+```
+./test_single_connection_download.sh
+```
+
 The test [script](test_single_connection_download.sh) creates a local Docker
 network of two BitTorrent peer containers, in which one container runs the well
 established Transmission torrent client that has a

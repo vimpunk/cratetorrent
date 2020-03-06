@@ -45,9 +45,8 @@ A torrent's metadata is described in the metainfo file. Starting a download or
   extract relevant information from it about the torrent and start the
   upload/download. The contents of the metainfo file must be UTF-8 encoded.
 
-However, cratetorrent doesn't currently implement this, so the relevant
-parameters from the metainfo file are passed as _command line arguments_ to the
-test binary.
+There is an easy way to parse metainfo files using the [`serde` bencode
+extension](https://github.com/toby/serde-bencode).
 
 The metainfo is a dictionary of key values. It has the following two top-level
 keys:
@@ -89,7 +88,13 @@ To be added.
 ## Torrent
 
 - The hash of the torrent is the SHA1 hash of the raw (bencoded) string of the
-  metainfo's `info` key's value.
+  metainfo's `info` key's value. Note that this can be problematic as some
+  metainfo files define non-standard fields, but currently the way we generate
+  this hash is by encoding the parsed metainfo struct again into its raw
+  representation, and this way we may not serialize fields originally present in
+  the source metainfo. A better approach would be to keep the underlying raw
+  source (as in Tide), but this is not currently possible with the current
+  solution of using `serde`.
 - Contains the piece picker and a set of connections (for now only one).
 - Torrent tick: periodically loops through all its peer connections and
   performs actions like stats collections, later choking/unchoking, resume
@@ -139,6 +144,18 @@ currently only TCP is supported.
 [tasks](https://doc.rust-lang.org/std/task/index.html): one for socket read and
 one for socket write. This is necessary as sending and receiving messages is a
 mostly separate operation.
+
+
+### Startup
+
+1. Connect to TCP socket of peer.
+2. We're in the handshake exchange state.
+3. If this is an outbound connection, start by sending a handshake, otherwise
+   just start receiving and wait for incoming handshake.
+4. Receive handshake, and if it is valid and the torrent info hash checks out,
+   send our own handshake.
+5. The connected peers may now optionally exchange their piece availability.
+6. After this step, peers start exchanging normal messages.
 
 
 ### Messages
