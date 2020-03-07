@@ -1,6 +1,9 @@
 pub mod codec;
 
+use crate::piece_picker::PiecePicker;
 use crate::*;
+use futures_locks::RwLock;
+use std::sync::Arc;
 use codec::*;
 use futures::{SinkExt, StreamExt};
 use std::net::SocketAddr;
@@ -10,14 +13,28 @@ use tokio_util::codec::{Framed, FramedParts};
 
 #[derive(Clone, Copy, Debug)]
 pub enum State {
+    /// The peer connection has not yet been connected or it had been connected
+    /// before but has been stopped.
     Disconnected,
+    /// The state during which the TCP connection is established.
     Connecting,
+    /// The state after establishing the TCP connection and exchanging the
+    /// initial BitTorrent handshake.
     Handshaking,
+    /// This state is optional, it is used to verify that the bitfield exchange
+    /// occurrs after the handshake and not later. It is set once the handshakes
+    /// are exchanged and changed as soon as we receive the bitfield or the the
+    /// first message that is not a bitfield. Any subsequent bitfield messages
+    /// are rejected and the connection is dropped, as per the standard.
     AvailabilityExchange,
+    /// This is the normal state of a peer session, in which any messages, apart
+    /// from the 'handshake' and 'bitfield', may be exchanged.
     Connected,
+    /// The state during which the TCP is being closed.
     Disconnecting,
 }
 
+/// The default (and initial) state of a peer session is `Disconnected`.
 impl Default for State {
     fn default() -> Self {
         Self::Disconnected
@@ -25,7 +42,7 @@ impl Default for State {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct Status {
+struct Status {
     is_choked: bool,
     is_interested: bool,
     is_peer_choked: bool,
@@ -45,6 +62,7 @@ impl Default for Status {
 
 pub struct PeerSession {
     state: State,
+    piece_picker: Arc<RwLock<PiecePicker>>,
     addr: SocketAddr,
     is_outbound: bool,
     socket: Option<TcpStream>,
@@ -55,11 +73,13 @@ pub struct PeerSession {
 
 impl PeerSession {
     pub fn outbound(
+        piece_picker: Arc<RwLock<PiecePicker>>,
         addr: SocketAddr,
         peer_id: PeerId,
         info_hash: Sha1Hash,
     ) -> Self {
         Self {
+            piece_picker,
             state: State::default(),
             addr,
             socket: None,

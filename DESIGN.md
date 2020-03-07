@@ -1,11 +1,18 @@
 # cratetorrent design doc
 
 This document contains notes on the *current* design of the implementation of
-cratetorrent. It serves as a high-level documentation of the code and
-documenting design decisions that may not be self-evident. It is continuously
-expanded as more features are added. It is important to note that this document
-only reflects the current state of the code and does not include future
-features, unless otherwise noted.
+both the cratetorrent library as well as the CLI cratetorrent binary. It serves
+as a high-level documentation of the code and documenting design decisions that
+may not be self-evident. It is continuously expanded as more features are added.
+It is important to note that this document only reflects the current state of
+the code and does not include future features, unless otherwise noted.
+
+The library can be found in the [`cratetorrent`](./cratetorrent) folder, while
+the binary is in [`cratetorrent-cli`](./cratetorrent-cli). The rationale for
+developing a library and a binary simultaneously is because big emphasis is
+placed on the usability of the cratetorrent library API, and testing the API, as
+it is developed, in a near real world scenario helps to integrate feedback
+immediately.
 
 
 ## Sources
@@ -21,7 +28,8 @@ Currently the "engine" is simplified to perform only a download of a single
 file for a single connection. Still, such a simple goal requires quite a few
 components (each detailed in its own section):
 
-- [metainfo](#metainfo), which contains torrent information;
+- [metainfo](#metainfo), which contains necessary information to start the
+  torrent;
 - [disk IO](#disk-io), which saves downloaded file pieces;
 - [torrents](#torrent), which coordinates the download of a torrent;
 - a [piece picker](#piece-picker) per torrent, that selects the next piece to
@@ -79,26 +87,35 @@ Trackers are not implemented so this is disregarded for now.
     - **`path`**: The UTF-8 encoded full path of the file, relative to the
       download root.
 
+### Torrent info hash
+
+The hash of the torrent is the SHA1 hash of the raw (bencoded) string of the
+metainfo's `info` key's value.
+
+Note that this can be problematic as some metainfo files define fields not
+supported or used by cratetorrent, and currently the way we generate this hash
+is by encoding the parsed metainfo struct again into its raw bencoded
+representation, and this way we may not serialize fields originally present in
+the source metainfo.
+A better approach would be to keep the underlying raw source (as in Tide), but
+  this is not currently possible with the current solution of using `serde`.
+
 
 ## Disk IO
 
-To be added.
+Currently, due to the experimental state of the crate, downloaded blocks are not
+saved to disk. This section is to be added when the functionality is implemented.
 
 
 ## Torrent
 
-- The hash of the torrent is the SHA1 hash of the raw (bencoded) string of the
-  metainfo's `info` key's value. Note that this can be problematic as some
-  metainfo files define non-standard fields, but currently the way we generate
-  this hash is by encoding the parsed metainfo struct again into its raw
-  representation, and this way we may not serialize fields originally present in
-  the source metainfo. A better approach would be to keep the underlying raw
-  source (as in Tide), but this is not currently possible with the current
-  solution of using `serde`.
-- Contains the piece picker and a set of connections (for now only one).
-- Torrent tick: periodically loops through all its peer connections and
-  performs actions like stats collections, later choking/unchoking, resume
-  state saving, and others.
+- Contains the piece picker and a single connection to a seed from which to
+  download the file.
+- Also contains other metadata relevant to the torrent, such as its info hash,
+  the files it needs to download, the destination directory, and others.
+- Torrent tick: periodically loops through all its peer connections and performs
+  actions like stats collections, later choking/unchoking, resume state saving,
+  and others.
 
 ## Piece picker
 
@@ -108,6 +125,13 @@ decision on what piece to pick next. For now though, pieces are downloaded
 sequentially and more complex algorithms will be implemented later (see research
 notes).
 
+The piece picker holds a vector pre-allocated to the number of pieces in the
+torrent and each element in this vector contains metadata about the piece:
+whether we have it or not and its frequency in the swarm.
+
+Later the internal data structures of the piece picker will most likely be
+changed to be more optimal for the rarest-pieces-first algorithm (the default
+defined by the standard).
 
 ## Peer connection
 

@@ -42,7 +42,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     client_id.copy_from_slice(PEER_ID.as_bytes());
 
     let mut rt = Runtime::new()?;
-    let torrent_fut = connect_to_peer(client_id, seed, metainfo);
+    let torrent_fut = run_torrent(client_id, metainfo, seed);
     rt.block_on(torrent_fut)?;
 
     Ok(())

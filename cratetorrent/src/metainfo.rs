@@ -13,6 +13,10 @@ impl Metainfo {
         serde_bencode::from_bytes(buf)
     }
 
+    pub fn piece_count(&self) -> usize {
+        self.info.pieces.len() / 20
+    }
+
     pub fn create_info_hash(&self) -> Result<Sha1Hash, Error> {
         let info = serde_bencode::to_bytes(&self.info)?;
         let digest = Sha1::digest(&info);
