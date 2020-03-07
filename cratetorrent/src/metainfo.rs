@@ -1,6 +1,5 @@
+use crate::error::*;
 use crate::Sha1Hash;
-use serde_bencode::Error;
-use serde_bytes::ByteBuf;
 use sha1::{Digest, Sha1};
 
 #[derive(Debug, Deserialize)]
@@ -9,15 +8,21 @@ pub struct Metainfo {
 }
 
 impl Metainfo {
-    pub fn from_bytes(buf: &[u8]) -> Result<Self, Error> {
-        serde_bencode::from_bytes(buf)
+    pub fn from_bytes(buf: &[u8]) -> Result<Self> {
+        let metainfo: Self = serde_bencode::from_bytes(buf)?;
+        // the pieces field is a concatenation of 20 byte SHA-1 hashes, so it
+        // must be a multiple of 20
+        if metainfo.info.pieces.len() % 20 != 0 {
+            return Err(Error::InvalidPieces);
+        }
+        Ok(metainfo)
     }
 
     pub fn piece_count(&self) -> usize {
         self.info.pieces.len() / 20
     }
 
-    pub fn create_info_hash(&self) -> Result<Sha1Hash, Error> {
+    pub fn create_info_hash(&self) -> Result<Sha1Hash> {
         let info = serde_bencode::to_bytes(&self.info)?;
         let digest = Sha1::digest(&info);
         let mut info_hash = [0; 20];
@@ -47,4 +52,6 @@ pub struct File {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // TODO: add metainfo parsing tests
 }

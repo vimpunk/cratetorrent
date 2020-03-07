@@ -1,13 +1,14 @@
-pub mod codec;
+mod codec;
 
+use crate::error::*;
 use crate::piece_picker::PiecePicker;
-use crate::*;
-use futures_locks::RwLock;
-use std::sync::Arc;
+use crate::torrent::TorrentInfo;
 use codec::*;
 use futures::{SinkExt, StreamExt};
+use futures_locks::RwLock;
 use std::net::SocketAddr;
-use tokio::io::Error;
+use std::rc::Rc;
+use std::sync::Arc;
 use tokio::net::TcpStream;
 use tokio_util::codec::{Framed, FramedParts};
 
@@ -30,8 +31,6 @@ pub enum State {
     /// This is the normal state of a peer session, in which any messages, apart
     /// from the 'handshake' and 'bitfield', may be exchanged.
     Connected,
-    /// The state during which the TCP is being closed.
-    Disconnecting,
 }
 
 /// The default (and initial) state of a peer session is `Disconnected`.
@@ -60,37 +59,34 @@ impl Default for Status {
     }
 }
 
-pub struct PeerSession {
+pub(crate) struct PeerSession {
     state: State,
+    torrent_info: Rc<TorrentInfo>,
     piece_picker: Arc<RwLock<PiecePicker>>,
     addr: SocketAddr,
-    is_outbound: bool,
     socket: Option<TcpStream>,
-    peer_id: PeerId,
-    info_hash: Sha1Hash,
     status: Status,
 }
 
 impl PeerSession {
     pub fn outbound(
+        torrent_info: Rc<TorrentInfo>,
         piece_picker: Arc<RwLock<PiecePicker>>,
         addr: SocketAddr,
-        peer_id: PeerId,
-        info_hash: Sha1Hash,
     ) -> Self {
         Self {
-            piece_picker,
             state: State::default(),
+            torrent_info,
+            piece_picker,
             addr,
             socket: None,
-            is_outbound: true,
             status: Status::default(),
-            peer_id,
-            info_hash,
         }
     }
 
-    pub async fn start(&mut self) -> Result<(), Error> {
+    pub async fn start(&mut self) -> Result<()> {
+        log::info!("Starting peer {} session", self.addr);
+
         log::info!("Connecting to peer {}", self.addr);
         self.state = State::Connecting;
         let socket = TcpStream::connect(self.addr).await?;
@@ -101,7 +97,10 @@ impl PeerSession {
         // this is an outbound connection, so we have to send the first
         // handshake
         self.state = State::Handshaking;
-        let handshake = Handshake::new(self.info_hash, self.peer_id);
+        let handshake = Handshake::new(
+            self.torrent_info.info_hash,
+            self.torrent_info.client_id,
+        );
         log::info!("Sending handshake to peer {}", self.addr);
         socket.send(handshake).await?;
 
@@ -116,17 +115,11 @@ impl PeerSession {
             debug_assert_eq!(peer_handshake.prot, PROTOCOL_STRING.as_bytes());
 
             // verify that the advertised torrent info hash is the same as ours
-            if peer_handshake.info_hash != self.info_hash {
+            if peer_handshake.info_hash != self.torrent_info.info_hash {
                 log::info!("Peer {} handshake invalid info hash", self.addr);
-                // TODO: abort session, invalid peer id
+                // abort session, info hash is invalid
+                return Err(Error::InvalidInfoHash);
             }
-
-            // TODO: enter the piece availability exchange state until peer
-            // sends a bitfield (we don't send one as we currently only
-            // implement downloading so we cannot have piece availability until
-            // resuming a torrent is implemented)
-            self.state = State::Connected;
-            log::info!("Peer {} session state: {:?}", self.addr, self.state);
 
             // now that we have the handshake, we need to switch to the peer
             // message codec
@@ -136,6 +129,16 @@ impl PeerSession {
             parts.read_buf = parts.read_buf;
             parts.write_buf = parts.write_buf;
             let mut socket = Framed::from_parts(parts);
+
+            // TODO: enter the piece availability exchange state until peer
+            // sends a bitfield (we don't send one as we currently only
+            // implement downloading so we cannot have piece availability until
+            // resuming a torrent is implemented)
+            self.state = State::AvailabilityExchange;
+            log::info!("Peer {} session state: {:?}", self.addr, self.state);
+
+            self.state = State::Connected;
+            log::info!("Peer {} session state: {:?}", self.addr, self.state);
 
             // start receiving and sending messages
             while let Some(msg) = socket.next().await {
