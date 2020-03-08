@@ -1,12 +1,4 @@
-use bitvec::prelude::{BitVec, Lsb0};
-
-/// The bitfield represents the piece availability of a peer. It is a compact
-/// bool vector of least significant bits to most significants bits, that is,
-/// where the first element represents the first piece, the second element the
-/// second piece, and so on, and a truthy boolean value of a piece's position in
-/// this vector means that the peer has the piece, while a falsy value means it
-/// doesn't have the piece.
-pub type Bitfield = BitVec<Lsb0, u8>;
+use crate::Bitfield;
 
 // Metadata about a piece relevant for the piece picker.
 #[derive(Clone, Copy, Default)]
@@ -80,6 +72,16 @@ impl PiecePicker {
                 self.pieces[index].frequency += 1;
             }
         }
+    }
+
+    /// Registers the avilability of a single new piece of a peer.
+    pub fn register_piece_availability(&mut self, index: usize) {
+        log::trace!("Registering piece {} availability", index);
+        // TODO: this should possibly not be a debug assert and we should return
+        // an error
+        debug_assert!(index < self.own_pieces.len());
+        // increase frequency count for this piece
+        self.pieces[index].frequency += 1;
     }
 
     /// Tells the piece picker that we have downloaded the piece at the given

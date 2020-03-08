@@ -1,3 +1,4 @@
+use crate::Bitfield;
 use bytes::{Buf, BufMut, BytesMut};
 use std::convert::TryFrom;
 use std::io;
@@ -70,7 +71,7 @@ impl TryFrom<u8> for MessageId {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Message {
     KeepAlive,
-    Bitfield(Vec<u8>),
+    Bitfield(Bitfield),
     Choke,
     Unchoke,
     Interested,
@@ -196,12 +197,15 @@ impl Encoder for PeerCodec {
             }
             Bitfield(bitfield) => {
                 // message length prefix: 1 byte message id and n byte bitfield
-                let msg_len = 1 + bitfield.len();
+                //
+                // NOTE: take the length of the underlying storage to get the number
+                // of _bytes_, as `bitfield.len()` returns the number of _bits_
+                let msg_len = 1 + bitfield.as_slice().len();
                 buf.put_u32(msg_len as u32);
                 // message id
                 buf.put_u8(MessageId::Bitfield as u8);
                 // payload
-                buf.extend_from_slice(&bitfield);
+                buf.extend_from_slice(bitfield.as_slice());
             }
             Choke => {
                 // message length prefix: 1 byte message id
@@ -307,8 +311,6 @@ impl Decoder for PeerCodec {
     type Error = io::Error;
 
     fn decode(&mut self, buf: &mut BytesMut) -> io::Result<Option<Self::Item>> {
-        use MessageId::*;
-
         // the message length header must be present at the minimum, otherwise
         // we can't determine the message type
         if buf.len() < 4 {
@@ -330,22 +332,22 @@ impl Decoder for PeerCodec {
 
         let msg_id = MessageId::try_from(buf.get_u8())?;
         let msg = match msg_id {
-            Choke => Message::Choke,
-            Unchoke => Message::Unchoke,
-            Interested => Message::Interested,
-            NotInterested => Message::NotInterested,
-            Have => {
+            MessageId::Choke => Message::Choke,
+            MessageId::Unchoke => Message::Unchoke,
+            MessageId::Interested => Message::Interested,
+            MessageId::NotInterested => Message::NotInterested,
+            MessageId::Have => {
                 let piece_index = buf.get_u32();
                 Message::Have { piece_index }
             }
-            Bitfield => {
+            MessageId::Bitfield => {
                 // preallocate buffer to the length of bitfield, by subtracting
                 // the id from the message length
                 let mut bitfield = vec![0; msg_len - 1];
                 buf.copy_to_slice(&mut bitfield);
-                Message::Bitfield(bitfield)
+                Message::Bitfield(Bitfield::from_vec(bitfield))
             }
-            Request => {
+            MessageId::Request => {
                 let piece_index = buf.get_u32();
                 let offset = buf.get_u32();
                 let length = buf.get_u32();
@@ -355,7 +357,7 @@ impl Decoder for PeerCodec {
                     length,
                 }
             }
-            Block => {
+            MessageId::Block => {
                 let piece_index = buf.get_u32();
                 let offset = buf.get_u32();
                 // TODO: here we would want to copy into a pre-allocated buffer
@@ -373,7 +375,7 @@ impl Decoder for PeerCodec {
                     block,
                 }
             }
-            Cancel => {
+            MessageId::Cancel => {
                 let piece_index = buf.get_u32();
                 let offset = buf.get_u32();
                 let length = buf.get_u32();
@@ -393,7 +395,6 @@ impl Decoder for PeerCodec {
 mod tests {
     use super::*;
     use bytes::Bytes;
-    use Message::*;
 
     // Tests a stream of arbitrary messages to ensure that not only do they
     // encode and then decode correctly (like the individual test cases
@@ -617,18 +618,24 @@ mod tests {
 
     // Returns `Choke` and its expected encoded variant.
     fn make_choke() -> (Message, Bytes) {
-        (Choke, make_empty_msg_encoded_payload(MessageId::Choke))
+        (
+            Message::Choke,
+            make_empty_msg_encoded_payload(MessageId::Choke),
+        )
     }
 
     // Returns `Unchoke` and its expected encoded variant.
     fn make_unchoke() -> (Message, Bytes) {
-        (Unchoke, make_empty_msg_encoded_payload(MessageId::Unchoke))
+        (
+            Message::Unchoke,
+            make_empty_msg_encoded_payload(MessageId::Unchoke),
+        )
     }
 
     // Returns `Interested` and its expected encoded variant.
     fn make_interested() -> (Message, Bytes) {
         (
-            Interested,
+            Message::Interested,
             make_empty_msg_encoded_payload(MessageId::Interested),
         )
     }
@@ -636,7 +643,7 @@ mod tests {
     // Returns `NotInterested` and its expected encoded variant.
     fn make_not_interested() -> (Message, Bytes) {
         (
-            NotInterested,
+            Message::NotInterested,
             make_empty_msg_encoded_payload(MessageId::NotInterested),
         )
     }
@@ -656,26 +663,30 @@ mod tests {
 
     // Returns `Bitfield` and its expected encoded variant.
     fn make_bitfield() -> (Message, Bytes) {
-        let bitfield: Vec<u8> = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
+        let bitfield =
+            Bitfield::from_slice(&[0b11001001, 0b10000011, 0b11111011]);
         let encoded = {
             // 1 byte message id and n byte f bitfield
-            let msg_len = 1 + bitfield.len();
+            //
+            // NOTE: take the length of the underlying storage to get the number
+            // of _bytes_, as `bitfield.len()` returns the number of _bits_
+            let msg_len = 1 + bitfield.as_slice().len();
             // 4 byte message length prefix and message length
             let buf_len = 4 + msg_len;
             let mut buf = BytesMut::with_capacity(buf_len);
             buf.put_u32(msg_len as u32);
             buf.put_u8(MessageId::Bitfield as u8);
-            buf.extend_from_slice(&bitfield);
+            buf.extend_from_slice(bitfield.as_slice());
             buf
         };
-        let msg = Bitfield(bitfield);
+        let msg = Message::Bitfield(bitfield);
         (msg, encoded.into())
     }
 
     // Returns `Have` and its expected encoded variant.
     fn make_have() -> (Message, Bytes) {
         let piece_index = 42;
-        let msg = Have { piece_index };
+        let msg = Message::Have { piece_index };
         let encoded = {
             // 1 byte message id and 4 byte piece index
             let msg_len = 1 + 4;
@@ -695,7 +706,7 @@ mod tests {
         let piece_index = 42;
         let offset = 0x4000;
         let length = 4 * 0x4000;
-        let msg = Request {
+        let msg = Message::Request {
             piece_index,
             offset,
             length,
@@ -729,7 +740,7 @@ mod tests {
             buf.extend_from_slice(&block);
             buf
         };
-        let msg = Block {
+        let msg = Message::Block {
             piece_index,
             offset,
             block,
@@ -742,7 +753,7 @@ mod tests {
         let piece_index = 42;
         let offset = 0x4000;
         let length = 4 * 0x4000;
-        let msg = Cancel {
+        let msg = Message::Cancel {
             piece_index,
             offset,
             length,

@@ -40,10 +40,10 @@ if ! docker inspect --format '{{.State.Running}}' "${seed_cont_name}" > /dev/nul
         --ip "${seed_ip}" \
         --detach \
         linuxserver/transmission
-fi
 
-# wait for seed to come online
-sleep 5
+    # wait for seed to come online
+    sleep 5
+fi
 
 # start cratetorrent leech container
 docker run \

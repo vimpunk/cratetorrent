@@ -164,10 +164,9 @@ currently only TCP is supported.
   within pieces. This is almost always **2^14 bytes**, or **16 KiB**, some
   clients even rejecting to service requests for piece blocks larger than this
   value.
-- All IO is asynchronous, and there will be two
-[tasks](https://doc.rust-lang.org/std/task/index.html): one for socket read and
-one for socket write. This is necessary as sending and receiving messages is a
-mostly separate operation.
+- All IO is asynchronous, and the "session loop" (that runs the peer session) is
+  going to multiplex several event sources (futures): receiving of messages from
+  peer, saving of a block to disk, updates from owning torrent.
 
 
 ### Startup
@@ -245,9 +244,9 @@ Only ever sent as the first message after the handshake. The payload of this
 message is a bitfield whose indices represent the file pieces in the torrent and
 is used to tell the other peer which pieces the sender has available (each
 available piece's bitfield value is 1). Byte 0 corresponds to indices 0-7, from
-high bit to low bit, respectively, byte 1 corresponds to indices 8-15, and so
-on. E.g. given the first byte `0b1100'0001` in the bitfield means we have pieces
-0, 1, and 7.
+most significant bit to least significant bit, respectively, byte 1 corresponds
+to indices 8-15, and so on. E.g. given the first byte `0b1100'0001` in the
+bitfield means we have pieces 0, 1, and 7.
 
 If a peer doesn't have any pieces downloaded, they need not send
 this message.

@@ -10,7 +10,6 @@ edition = "2018"
 bitvec = "0.17"
 bytes = "0.5"
 futures = "0.3"
-futures-locks = "0.5"
 log = "0.4"
 # TODO: specify exact features to use to cut down build times
 tokio = { version = "0.2", features = ["full"] }
