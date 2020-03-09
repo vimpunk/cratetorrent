@@ -21,6 +21,12 @@ cratetorrent works correctly with small and large files, with different piece
 sizes and other parameters.
 
 
+## Prerequisites
+
+To run the tests, you first first need to build the `cratetorrent-cli` binary
+and its corresponding docker image. For instructions, see the project readme.
+
+
 ## Single file download
 
 ```
