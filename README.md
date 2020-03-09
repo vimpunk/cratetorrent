@@ -13,6 +13,38 @@ The project is split up in two:
 - and a `cratetortent-cli` binary for downloading torrents via the CLI.
 
 
+## How to run
+
+The CLI binary is currently very basic, but you can connect to a seed by
+running the following from the repo root:
+```
+cargo run --release -p cratetorrent-cli
+```
+
+A Dockerfile is also provided for the CLI. To build the docker image, first
+  build the binary (also from the repo root):
+```
+cargo build --release -p cratetorrent-cli
+```
+Then build the image:
+```
+docker build --tag cratetorrent-cli .
+```
+And finally run it:
+```
+docker run \
+    -ti \
+    --env SEED="${seed_addr}" \
+    --env METAINFO_PATH="${metainfo_cont_path}" \
+    --env RUST_LOG=cratetorrent=trace,cratetorrent_cli=trace \
+    --mount type=bind,src="${metainfo_path}",dst="${metainfo_cont_path}" \
+    cratetorrent-cli
+```
+where `seed_addr` is the IP and port pair of a seed, `metainfo_path` is the path
+of the torrent file on the host, and `metainfo_cont_path` is the
+path of the torrent file mapped into the container.
+
+
 ## Goals
 
 1. Perform a single download of a file with a single peer connection if given
