@@ -26,6 +26,19 @@ pub type Sha1Hash = [u8; 20];
 /// doesn't have the piece.
 pub type Bitfield = BitVec<Msb0, u8>;
 
+/// A block is a fixed size chunk of a piece, which in turn is a fixed size
+/// chunk of a torrent. Downloading torrents happen at this block level
+/// granularity.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct BlockInfo {
+    /// The index of the piece of which this is a block.
+    pub piece_index: u32,
+    /// The byte offset into the piece.
+    pub offset: u32,
+    /// The length in bytes of this block. Almost always 4KiB (0x4000 bytes).
+    pub length: u32
+}
+
 /// Connect to a single seed and download the torrent.
 pub fn run_torrent(
     client_id: PeerId,

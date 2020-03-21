@@ -1,5 +1,6 @@
 mod codec;
 
+use crate::{PeerId, Bitfield, BlockInfo};
 use crate::error::*;
 use crate::piece_picker::PiecePicker;
 use crate::torrent::SharedTorrentInfo;
@@ -40,16 +41,36 @@ impl Default for State {
     }
 }
 
-/// The choke and interest status of a peer session.
-///
-/// By default, both sides of the connection start off as choked and not
-/// interested in the other.
+// The status of a peer session.
+//
+// By default, both sides of the connection start off as choked and not
+// interested in the other.
 #[derive(Clone, Copy, Debug)]
 struct Status {
+    // If we're cohked, peer doesn't allow us to download pieces from them.
     is_choked: bool,
+    // If we're interested, peer has pieces that we don't have.
     is_interested: bool,
+    // If peer is choked, we don't allow them to download pieces from us.
     is_peer_choked: bool,
+    // If peer is interested in us, they mean to download pieces that we have.
     is_peer_interested: bool,
+    // The request queue size, which is the number of block requests we keep
+    // outstanding to fully saturate the link.
+    //
+    // each peer session needs to maintain an "optimal request queue size" value
+    // (approximately the bandwidth-delay product), which is the  number of
+    // block requests it keeps outstanding to fully saturate the link.
+    //
+    // This value is derived by collecting a running average of the downloaded
+    // bytes per second, as well as the average request latency, to arrive at
+    // the bandwidth-delay product B x D. This value is recalculated every time
+    // we receive a block, in order to always keep the link fully saturated.
+    //
+    // https://en.wikipedia.org/wiki/Bandwidth-delay_product
+    //
+    // Only set once we start downloading.
+    best_request_queue_size: Option<usize>,
 }
 
 impl Default for Status {
@@ -59,8 +80,16 @@ impl Default for Status {
             is_interested: false,
             is_peer_choked: true,
             is_peer_interested: false,
+            best_request_queue_size: None,
         }
     }
+}
+
+struct PeerInfo {
+    // Peer's 20 byte BitTorrent id.
+    peer_id: PeerId,
+    // All pieces peer has, updated when it announces to us a new piece.
+    pieces: Option<Bitfield>,
 }
 
 pub(crate) struct PeerSession {
@@ -73,6 +102,20 @@ pub(crate) struct PeerSession {
     addr: SocketAddr,
     // Session related information.
     status: Status,
+    // These are the active piece downloads in which this `peer_session` is
+    // participating.
+    //downloads: Vec<PieceDownload>,
+    // Our pending requests that we sent to peer. It represents the blocks that
+    // we are expecting. Thus, if we receive a block that is not in this list,
+    // it is dropped.  If we receive a block whose request entry is in here, the
+    // request entry is removed.
+    //
+    // Since the Fast extension is not supported (yet), this is emptied when
+    // we're choked, as in that case we don't expect outstanding requests to be
+    // served.
+    outgoing_requests: Vec<BlockInfo>,
+    // Information about a peer that is set after a successful handshake.
+    peer_info: Option<PeerInfo>,
 }
 
 impl PeerSession {
@@ -91,6 +134,8 @@ impl PeerSession {
             piece_picker,
             addr,
             status: Status::default(),
+            outgoing_requests: Vec::new(),
+            peer_info: None,
         }
     }
 
@@ -130,6 +175,12 @@ impl PeerSession {
                 // abort session, info hash is invalid
                 return Err(Error::InvalidPeerInfoHash);
             }
+
+            // set basic peer information
+            self.peer_info = Some(PeerInfo {
+                peer_id: handshake.peer_id,
+                pieces: None,
+            });
 
             // now that we have the handshake, we need to switch to the peer
             // message codec and save the socket in self (note that we need to
@@ -186,6 +237,10 @@ impl PeerSession {
                     let mut piece_picker = self.piece_picker.write().await;
                     piece_picker.register_availability(&bitfield);
                     self.status.is_interested = piece_picker.is_interested(&bitfield);
+                    debug_assert!(self.status.is_interested);
+                    if let Some(peer_info) = &mut self.peer_info {
+                        peer_info.pieces = Some(bitfield);
+                    }
 
                     // enter connected state
                     //
@@ -197,6 +252,10 @@ impl PeerSession {
                         self.addr,
                         self.state
                     );
+
+                    // send interested message to peer
+                    log::info!("Interested in peer {}", self.addr);
+                    socket.send(Message::Interested).await?;
 
                     // go to the next message (the message is consumed in this
                     // branch)
@@ -232,8 +291,10 @@ impl PeerSession {
                 }
                 Message::Unchoke => {
                     log::info!("Peer {} unchoked us", self.addr);
-                    // TODO: here we'd set up the download pipeline future
-                    self.status.is_choked = false;
+                    // TODO: start the download pipeline if we're interested
+                    if !self.status.is_choked {
+                        self.status.is_choked = false;
+                    }
                 }
                 Message::Interested => {
                     log::info!("Peer {} is interested", self.addr);

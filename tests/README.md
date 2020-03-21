@@ -29,7 +29,7 @@ and its corresponding docker image. For instructions, see the project readme.
 
 ## Single file download
 
-```
+```bash
 ./test_single_connection_download.sh
 ```
 

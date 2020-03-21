@@ -180,6 +180,132 @@ currently only TCP is supported.
 5. The connected peers may now optionally exchange their piece availability.
 6. After this step, peers start exchanging normal messages.
 
+### Download pipeline
+
+After receiving an unchoke message from our seed, we can start making requests.
+In order to download blocks in the fastest way, we always need to keep the
+number of requests outstanding that saturates the link to the peer we're
+downloading from.
+
+From a relevant [libtorrent
+blog post](https://blog.libtorrent.org/2011/11/requesting-pieces/):
+
+> Deciding how many outstanding requests to keep to peers typically is based on
+  the bandwidth delay product, or a simplified model thereof.
+
+> The bandwidth delay product is the bandwidth capacity of a link multiplied by
+  the latency of the link. It represents the number of bytes that fit in the
+  wire and buffers along the path. In order to fully utilize a link, one needs
+  to keep at least the bandwidth delay product worth of bytes outstanding
+  requests at any given time. If fewer bytes than that are kept in outstanding
+  requests, the other end will satisfy all the requests and then have to wait
+  (wasting bandwidth) until it receives more requests.
+
+> If many more requests than the bandwidth delay product is kept outstanding,
+  more blocks than necessary will be marked as requested, and waste potential to
+  request them from other peers, completing a piece sooner. Typically, keeping
+  too few outstanding requests has a much more severe impact on performance than
+  keeping too many.
+
+> On machines running at max disk capacity, the actual disk-job that a request
+  result in may take longer to be satisfied by the drive than the network
+  latency. It’s important to take the disk latency into account, as to not under
+  estimate the latency of the link. i.e. the link could be considered to go all
+  the way down to the disk [...] This is another reason to rather
+  over-estimate the latency of the network connection than to under-estimate it.
+
+> A simple way to determine the number of outstanding block requests to keep to
+  a peer is to take the current download rate (in bytes per second) we see from
+  that peer and divide it by the block size (16 kiB). That assumes the latency
+  of the link to be 1 second.
+> num_pending = download_rate / 0x4000;
+> It might make sense to increase the assumed latency to 1.5 or 2 seconds, in
+  order to take into account the case where the other ends disk latency is the
+  dominant factor. Keep in mind that over-estimating is cheaper than
+  under-estimating.
+
+Based on the above, each peer session needs to maintain an "optimal request
+queue size" value (approximately the bandwidth-delay product), which is the
+number of block requests it keeps outstanding to fully saturate the link.
+
+This value is derived by collecting a running average of the downloaded bytes
+per second, as well as the average request latency, to arrive at the
+bandwidth-delay product B x D. This value is recalculated every time we receive
+a block, in order to always keep the link fully saturated. See
+[wikipedia](https://en.wikipedia.org/wiki/Bandwidth-delay_product) for more.
+
+To emphasize the value of this optimization, let's see a visual example of
+comparing two connections each downloading two blocks on a link with the same
+capacity, where one pair of peers' link is not kept saturated and another pair
+of peers whose is:
+```
+Legend
+------
+R: request
+B: block
+{A,B,C,D}: peers
+
+  A             B        C             D
+R |             |      R |             |
+  |\            |        |\            |
+  | \           |      R | \           |
+  |  \          |        |\ \          |
+  |   \         |        | \ \         |
+  |    \        |        |  \ \        |
+  |     \       |        |   \ \       |
+  |      \      |        |    \ \      |
+  |       \     |        |     \ \     |
+  |        \    |        |      \ \    |
+  |         \   |        |       \ \   |
+  |          \  |        |        \ \  |
+  |           \ |        |         \ \ |
+  |            \|        |          \ \|
+  |             | B      |           \ | B
+  |            /|        |            \|
+  |           / |        |           / | B
+  |          /  |        |          / /|
+  |         /   |        |         / / |
+  |        /    |        |        / /  |
+  |       /     |        |       / /   |
+  |      /      |        |      / /    |
+  |     /       |        |     / /     |
+  |    /        |        |    / /      |
+  |   /         |        |   / /       |
+  |  /          |        |  / /        |
+  | /           |        | / /         |
+  |/            |        |/ /          |
+R |             |        | /           |
+  |\            |        |/            |
+  | \           |
+  |  \          |
+  |   \         |
+  |    \        |
+  |     \       |
+  |      \      |
+  |       \     |
+  |        \    |
+  |         \   |
+  |          \  |
+  |           \ |
+  |            \|
+  |             | B
+  |            /|
+  |           / |
+  |          /  |
+  |         /   |
+  |        /    |
+  |       /     |
+  |      /      |
+  |     /       |
+  |    /        |
+  |   /         |
+  |  /          |
+  | /           |
+  |/            |
+```
+
+And even from such a simple example as this, it can be concluded as a feature and not
+premature optimization.
 
 ### Messages
 
