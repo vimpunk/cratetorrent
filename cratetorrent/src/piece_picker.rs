@@ -41,7 +41,7 @@ impl PiecePicker {
 
     /// Returns the first piece that we don't yet have and isn't already being
     /// downloaded, or None, if no piece can be picked at this time.
-    pub fn pick_piece(&mut self) -> Option<u32> {
+    pub fn pick_piece(&mut self) -> Option<usize> {
         log::trace!("Picking next piece");
         for (index, have_piece) in self.own_pieces.iter().enumerate() {
             // only consider this piece if we don't have it and if we are not
@@ -53,7 +53,7 @@ impl PiecePicker {
                 // again (see note on field)
                 piece.is_pending = true;
                 log::trace!("Picked piece {}", index);
-                return Some(index as u32);
+                return Some(index);
             }
         }
         // no piece could be picked
@@ -66,12 +66,26 @@ impl PiecePicker {
         // TODO: this should possibly not be a debug assert and we should return
         // an error
         debug_assert!(pieces.len() == self.own_pieces.len());
-        for (index, has_piece) in pieces.iter().enumerate() {
+        for (index, peer_has_piece) in pieces.iter().enumerate() {
             // increase frequency count for this piece if peer has it
-            if *has_piece {
+            if *peer_has_piece {
                 self.pieces[index].frequency += 1;
             }
         }
+    }
+
+    /// Determines if we are interested in the given pieces. This happens if the
+    /// pieces contain at least one piece that we don't have.
+    pub fn is_interested(&self, pieces: &Bitfield) -> bool {
+        for (index, (has_piece, peer_has_piece)) in
+            self.own_pieces.iter().zip(pieces.iter()).enumerate()
+            {
+                // if we don't have a piece that peer has, we are interested
+                if !has_piece && *peer_has_piece {
+                    return true;
+                }
+            }
+        false
     }
 
     /// Registers the avilability of a single new piece of a peer.
@@ -115,12 +129,14 @@ mod tests {
         let available_pieces = Bitfield::repeat(true, piece_count);
         piece_picker.register_availability(&available_pieces);
 
+        // save picked pieces
         let mut picked = HashSet::with_capacity(piece_count);
+
         for index in 0..piece_count {
             let pick = piece_picker.pick_piece();
             // for now we assert that we pick pieces in sequential order, but
             // later, when we add different algorithms, this line has to change
-            assert_eq!(pick, Some(index as u32));
+            assert_eq!(pick, Some(index));
             let pick = pick.unwrap();
             // assert that this piece hasn't been picked before
             assert!(!picked.contains(&pick));
@@ -130,5 +146,81 @@ mod tests {
 
         // assert that we picked all pieces
         assert_eq!(picked.len(), piece_count);
+    }
+
+    // Tests registering a received piece causes the piece picker to not pick
+    // that piece again.
+    #[test]
+    fn test_received_piece() {
+        let piece_count = 15;
+        let mut piece_picker = PiecePicker::new(piece_count);
+        let available_pieces = Bitfield::repeat(true, piece_count);
+        piece_picker.register_availability(&available_pieces);
+        assert!(piece_picker.own_pieces.not_any());
+
+        // mark pieces as received
+        let owned_pieces = [3, 10, 5];
+        for index in owned_pieces.iter() {
+            piece_picker.received_piece(*index);
+            assert!(piece_picker.own_pieces[*index]);
+        }
+        assert!(!piece_picker.own_pieces.is_empty());
+
+        // request pieces to pick next and make sure the ones we already have
+        // are not picked
+        for index in 0..piece_count - owned_pieces.len() {
+            let pick = piece_picker.pick_piece().unwrap();
+            // assert that it's not a piece we already have
+            assert!(owned_pieces.iter().all(|owned| *owned != pick));
+        }
+    }
+
+    // Tests that the piece picker correctly determines whether we are
+    // interested in a variety of piece sets.
+    #[test]
+    fn test_is_interested() {
+        // empty piece picker
+        let piece_count = 15;
+        let mut piece_picker = PiecePicker::new(piece_count);
+
+        // we are interested if peer has all pieces
+        let available_pieces = Bitfield::repeat(true, piece_count);
+        assert!(piece_picker.is_interested(&available_pieces));
+
+        // we are also interested if peer has at least a single piece
+        let mut available_pieces = Bitfield::repeat(false, piece_count);
+        available_pieces.set(0, true);
+        assert!(piece_picker.is_interested(&available_pieces));
+
+        // half full piece picker
+        let piece_count = 15;
+        let mut piece_picker = PiecePicker::new(piece_count);
+        for index in 0..8 {
+            piece_picker.received_piece(index);
+        }
+
+        // we are not interested in peer that has the same pieces we do
+        let mut available_pieces = Bitfield::repeat(false, piece_count);
+        for index in 0..8 {
+            available_pieces.set(index, true);
+        }
+        assert!(!piece_picker.is_interested(&available_pieces));
+
+        // we are interested in peer that has at least a single piece we don't
+        let mut available_pieces = Bitfield::repeat(false, piece_count);
+        for index in 0..9 {
+            available_pieces.set(index, true);
+        }
+        assert!(piece_picker.is_interested(&available_pieces));
+
+        // full piece picker
+        let piece_count = 15;
+        let mut piece_picker = PiecePicker::new(piece_count);
+        for index in 0..piece_count {
+            piece_picker.received_piece(index);
+        }
+
+        // we are not interested in any pieces since we own all of them
+        assert!(!piece_picker.is_interested(&available_pieces));
     }
 }

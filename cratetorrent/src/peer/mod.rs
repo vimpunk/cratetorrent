@@ -40,6 +40,10 @@ impl Default for State {
     }
 }
 
+/// The choke and interest status of a peer session.
+///
+/// By default, both sides of the connection start off as choked and not
+/// interested in the other.
 #[derive(Clone, Copy, Debug)]
 struct Status {
     is_choked: bool,
@@ -166,7 +170,7 @@ impl PeerSession {
             if self.state == State::AvailabilityExchange {
                 // handle bitfield message separately as it may only be received
                 // directly after the handshake
-                if let Message::Bitfield(bitfield) = &msg {
+                if let Message::Bitfield(bitfield) = msg {
                     // if peer is not a seed, we abort the connection as we only
                     // support downloading and for that we must be connected to
                     // a seed
@@ -179,10 +183,9 @@ impl PeerSession {
                     }
 
                     // register peer's pieces with piece picker
-                    self.piece_picker
-                        .write()
-                        .await
-                        .register_availability(bitfield);
+                    let mut piece_picker = self.piece_picker.write().await;
+                    piece_picker.register_availability(&bitfield);
+                    self.status.is_interested = piece_picker.is_interested(&bitfield);
 
                     // enter connected state
                     //
@@ -195,18 +198,19 @@ impl PeerSession {
                         self.state
                     );
 
-                    // go to the next message
+                    // go to the next message (the message is consumed in this
+                    // branch)
                     continue;
                 } else {
                     // since we expect peer to be a seed, we *must* get
                     // a bitfield message, as otherwise we assume the peer to be
                     // a leech with no pieces to share (which is not good for
                     // our purposes of downloading a file)
-                        log::warn!(
-                            "Peer {} hasn't sent bitfield, cannot download",
-                            self.addr
-                        );
-                        return Err(Error::PeerNotSeed);
+                    log::warn!(
+                        "Peer {} hasn't sent bitfield, cannot download",
+                        self.addr
+                    );
+                    return Err(Error::PeerNotSeed);
                 }
             }
 

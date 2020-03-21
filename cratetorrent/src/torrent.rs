@@ -3,13 +3,13 @@ use crate::metainfo::Metainfo;
 use crate::peer::PeerSession;
 use crate::piece_picker::PiecePicker;
 use crate::{PeerId, Sha1Hash};
+use futures::StreamExt;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use tokio::task;
 use tokio::time;
-use std::time::{Instant, Duration};
-use futures::StreamExt;
 
 struct TorrentInfo {
     // Information that is shared with peer sessions.
@@ -70,7 +70,10 @@ impl Torrent {
     ) -> Result<Self> {
         let info_hash = metainfo.create_info_hash()?;
         let info = TorrentInfo {
-            shared: Arc::new(SharedTorrentInfo { info_hash, client_id }),
+            shared: Arc::new(SharedTorrentInfo {
+                info_hash,
+                client_id,
+            }),
             start_time: None,
             run_duration: Duration::default(),
         };
@@ -122,7 +125,10 @@ impl Torrent {
                 self.info.run_duration += elapsed;
                 prev_instant = Some(instant);
 
-                log::debug!("Torrent running for {}s", self.info.run_duration.as_secs());
+                log::debug!(
+                    "Torrent running for {}s",
+                    self.info.run_duration.as_secs()
+                );
             }
         };
         update_loop.await
