@@ -37,20 +37,20 @@ pub(crate) const BLOCK_LEN: u32 = 0x4000;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct BlockInfo {
     /// The index of the piece of which this is a block.
-    pub piece_index: u32,
+    pub piece_index: usize,
     /// The zero-based byte offset into the piece.
     pub offset: u32,
     /// The block's length in bytes. Always 4KiB (0x4000 bytes), for now.
-    pub length: u32,
+    pub len: u32,
 }
 
 impl BlockInfo {
-    /// Createas a new `BlockInfo` instance with the default length of 4 KiB.
-    pub fn new(piece_index: u32, offset: u32) -> Self {
+    /// Createas a `BlockInfo` instance with the default length of 4 KiB.
+    pub fn new(piece_index: usize, offset: u32) -> Self {
         Self {
             piece_index,
             offset,
-            length: BLOCK_LEN,
+            len: BLOCK_LEN,
         }
     }
 
@@ -62,6 +62,9 @@ impl BlockInfo {
 
 /// Returns the number of blocks in a piece of the given length.
 pub(crate) fn block_count(piece_len: u32) -> usize {
+    // all but the last piece are a multiple of the block length, but the
+    // last piece may be shorter so we need to account for this by rounding
+    // up before dividing to get the number of blocks in piece
     (piece_len as usize + (BLOCK_LEN as usize - 1)) / BLOCK_LEN as usize
 }
 

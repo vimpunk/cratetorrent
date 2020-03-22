@@ -1,4 +1,4 @@
-use crate::{BlockInfo, BLOCK_LEN};
+use crate::{block_count, BlockInfo, BLOCK_LEN};
 
 #[derive(Clone, Copy, Debug)]
 enum Block {
@@ -17,9 +17,9 @@ impl Default for Block {
 /// used to request the next block in piece.
 pub(crate) struct PieceDownload {
     // The piece's index.
-    index: u32,
+    index: usize,
     // The piece's length in bytes.
-    length: u32,
+    len: u32,
     // The blocks in this piece, tracking which are downloaded, pending, or
     // received. The vec is preallocated to the number of blocks in piece.
     blocks: Vec<Block>,
@@ -27,18 +27,16 @@ pub(crate) struct PieceDownload {
 
 impl PieceDownload {
     /// Creates a new piece download instance for the given piece.
-    pub fn new(index: u32, length: u32) -> Self {
-        // all but the last piece are a multiple of the block length, but the
-        // last piece may be shorter so we need to account for this by rounding
-        // up before dividing to get the number of blocks in piece
-        let blocks_count = (length + (BLOCK_LEN - 1)) / BLOCK_LEN;
+    pub fn new(index: usize, len: u32) -> Self {
+        let block_count = block_count(len);
         let mut blocks = Vec::new();
-        blocks.resize_with(blocks_count as usize, Default::default);
-        Self {
-            index,
-            length,
-            blocks,
-        }
+        blocks.resize_with(block_count, Default::default);
+        Self { index, len, blocks }
+    }
+
+    /// Returns the index of the piece that is downloaded.
+    pub fn piece_index(&self) -> usize {
+        self.index
     }
 
     /// Picks the requested number of blocks or fewer, if fewer are remaining.
@@ -47,7 +45,7 @@ impl PieceDownload {
             "Picking {} block(s) in piece {} with length {} and {} blocks",
             count,
             self.index,
-            self.length,
+            self.len,
             self.blocks.len(),
         );
 
@@ -85,8 +83,8 @@ impl PieceDownload {
         // TODO: this information is sanitized in PeerSession but maybe we want
         // to return a Result anyway
         debug_assert_eq!(block.piece_index, self.index);
-        debug_assert!(block.offset < self.length);
-        debug_assert!(block.length <= self.length);
+        debug_assert!(block.offset < self.len);
+        debug_assert!(block.len <= self.len);
 
         // we should only receive blocks that we have requested before
         debug_assert!(matches!(self.blocks[block.index()], Block::Requested));
@@ -100,14 +98,16 @@ impl PieceDownload {
     pub fn free_block_count(&self) -> usize {
         // TODO: we could optimize this by caching this value in
         // a `free_block_count` field in self that is updated in pick_blocks
-        self.blocks.iter().filter(|b| matches!(b, Block::Free)).count()
+        self.blocks
+            .iter()
+            .filter(|b| matches!(b, Block::Free))
+            .count()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::block_count;
     use std::collections::HashSet;
 
     // Tests that repeatedly requesting as many blocks as are in the piece
@@ -205,7 +205,10 @@ mod tests {
 
         let block_count = block_count(piece_len);
 
-        assert_eq!(download.free_block_count(), block_count - picked_block_indices.len());
+        assert_eq!(
+            download.free_block_count(),
+            block_count - picked_block_indices.len()
+        );
 
         // pick all remaining free blocks
         let blocks = download.pick_blocks(block_count);

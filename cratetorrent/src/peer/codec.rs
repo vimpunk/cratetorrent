@@ -1,11 +1,11 @@
-use crate::Bitfield;
+use crate::{Bitfield, BlockInfo, BLOCK_LEN};
 use bytes::{Buf, BufMut, BytesMut};
-use std::convert::TryFrom;
+use std::convert::{TryFrom, TryInto};
 use std::io;
 use tokio_util::codec::{Decoder, Encoder};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Handshake {
+pub(crate) struct Handshake {
     /// The protocol string, which must equal "BitTorrent protocol", as
     /// otherwise the connetion is aborted.
     pub prot: [u8; 19],
@@ -34,7 +34,7 @@ impl Handshake {
 
 #[repr(u8)]
 #[derive(Copy, Clone, Debug)]
-pub enum MessageId {
+pub(crate) enum MessageId {
     Choke = 0,
     Unchoke = 1,
     Interested = 2,
@@ -69,7 +69,7 @@ impl TryFrom<u8> for MessageId {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub enum Message {
+pub(crate) enum Message {
     KeepAlive,
     Bitfield(Bitfield),
     Choke,
@@ -77,28 +77,20 @@ pub enum Message {
     Interested,
     NotInterested,
     Have {
-        piece_index: u32,
+        piece_index: usize,
     },
-    Request {
-        piece_index: u32,
-        offset: u32,
-        length: u32,
-    },
+    Request(BlockInfo),
     Block {
-        piece_index: u32,
+        piece_index: usize,
         offset: u32,
-        block: Vec<u8>,
+        data: Vec<u8>,
     },
-    Cancel {
-        piece_index: u32,
-        offset: u32,
-        length: u32,
-    },
+    Cancel(BlockInfo),
 }
 
 pub(crate) const PROTOCOL_STRING: &str = "BitTorrent protocol";
 
-pub struct HandshakeCodec;
+pub(crate) struct HandshakeCodec;
 
 impl Encoder for HandshakeCodec {
     type Item = Handshake;
@@ -176,7 +168,40 @@ impl Decoder for HandshakeCodec {
     }
 }
 
-pub struct PeerCodec;
+impl BlockInfo {
+    /// Encodes the block info in the etwork binary protocol's format into the
+    /// given buffer.
+    fn encode(&self, buf: &mut BytesMut) -> io::Result<()> {
+        let piece_index = self
+            .piece_index
+            .try_into()
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+        buf.put_u32(piece_index);
+        buf.put_u32(self.offset);
+        buf.put_u32(self.len);
+        Ok(())
+    }
+
+    /// Creates a `BlockInfo` instance from an untrusted source and fails if the
+    /// length is not 4 KiB.
+    fn from_untrusted(
+        piece_index: usize,
+        offset: u32,
+        len: u32,
+    ) -> io::Result<Self> {
+        if len == BLOCK_LEN {
+            Ok(Self::new(piece_index, offset))
+        } else {
+            // TODO: consider using own error type here as well
+            Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Block length must be 4 KiB",
+            ))
+        }
+    }
+}
+
+pub(crate) struct PeerCodec;
 
 impl Encoder for PeerCodec {
     type Item = Message;
@@ -247,13 +272,12 @@ impl Encoder for PeerCodec {
                 // message id
                 buf.put_u8(MessageId::Have as u8);
                 // payload
+                let piece_index = piece_index.try_into().map_err(|e| {
+                    io::Error::new(io::ErrorKind::InvalidInput, e)
+                })?;
                 buf.put_u32(piece_index);
             }
-            Request {
-                piece_index,
-                offset,
-                length,
-            } => {
+            Request(block) => {
                 // message length prefix:
                 // 1 byte message id, 4 byte piece index, 4 byte offset, 4 byte
                 // length
@@ -262,32 +286,29 @@ impl Encoder for PeerCodec {
                 // message id
                 buf.put_u8(MessageId::Request as u8);
                 // payload
-                buf.put_u32(piece_index);
-                buf.put_u32(offset);
-                buf.put_u32(length);
+                block.encode(buf)?;
             }
             Block {
                 piece_index,
                 offset,
-                block,
+                data,
             } => {
                 // message length prefix:
                 // 1 byte message id, 4 byte piece index, 4 byte offset, and n byte
                 // block
-                let msg_len = 1 + 4 + 4 + block.len() as u32;
+                let msg_len = 1 + 4 + 4 + data.len() as u32;
                 buf.put_u32(msg_len);
                 // message id
                 buf.put_u8(MessageId::Block as u8);
                 // payload
+                let piece_index = piece_index.try_into().map_err(|e| {
+                    io::Error::new(io::ErrorKind::InvalidInput, e)
+                })?;
                 buf.put_u32(piece_index);
                 buf.put_u32(offset);
-                buf.put(&block[..]);
+                buf.put(&data[..]);
             }
-            Cancel {
-                piece_index,
-                offset,
-                length,
-            } => {
+            Cancel(block) => {
                 // message length prefix:
                 // 1 byte message id, 4 byte piece index, 4 byte offset, 4 byte
                 // length
@@ -296,9 +317,7 @@ impl Encoder for PeerCodec {
                 // message id
                 buf.put_u8(MessageId::Cancel as u8);
                 // payload
-                buf.put_u32(piece_index);
-                buf.put_u32(offset);
-                buf.put_u32(length);
+                block.encode(buf)?;
             }
         }
 
@@ -338,6 +357,9 @@ impl Decoder for PeerCodec {
             MessageId::NotInterested => Message::NotInterested,
             MessageId::Have => {
                 let piece_index = buf.get_u32();
+                let piece_index = piece_index.try_into().map_err(|e| {
+                    io::Error::new(io::ErrorKind::InvalidInput, e)
+                })?;
                 Message::Have { piece_index }
             }
             MessageId::Bitfield => {
@@ -350,15 +372,21 @@ impl Decoder for PeerCodec {
             MessageId::Request => {
                 let piece_index = buf.get_u32();
                 let offset = buf.get_u32();
-                let length = buf.get_u32();
-                Message::Request {
+                let len = buf.get_u32();
+                let piece_index = piece_index.try_into().map_err(|e| {
+                    io::Error::new(io::ErrorKind::InvalidInput, e)
+                })?;
+                Message::Request(BlockInfo::from_untrusted(
                     piece_index,
                     offset,
-                    length,
-                }
+                    len,
+                )?)
             }
             MessageId::Block => {
                 let piece_index = buf.get_u32();
+                let piece_index = piece_index.try_into().map_err(|e| {
+                    io::Error::new(io::ErrorKind::InvalidInput, e)
+                })?;
                 let offset = buf.get_u32();
                 // TODO: here we would want to copy into a pre-allocated buffer
                 // rather than create a new buffer, created outside the message
@@ -367,23 +395,26 @@ impl Decoder for PeerCodec {
                 // preallocate the vector to the block length, by subtracting
                 // the id, piece index and offset lengths from the message
                 // length
-                let mut block = vec![0; msg_len - 9];
-                buf.copy_to_slice(&mut block);
+                let mut data = vec![0; msg_len - 9];
+                buf.copy_to_slice(&mut data);
                 Message::Block {
                     piece_index,
                     offset,
-                    block,
+                    data,
                 }
             }
             MessageId::Cancel => {
                 let piece_index = buf.get_u32();
+                let piece_index = piece_index.try_into().map_err(|e| {
+                    io::Error::new(io::ErrorKind::InvalidInput, e)
+                })?;
                 let offset = buf.get_u32();
                 let length = buf.get_u32();
-                Message::Cancel {
+                Message::Cancel(BlockInfo::from_untrusted(
                     piece_index,
                     offset,
                     length,
-                }
+                )?)
             }
         };
 
@@ -695,7 +726,8 @@ mod tests {
             let mut buf = BytesMut::with_capacity(buf_len);
             buf.put_u32(msg_len as u32);
             buf.put_u8(MessageId::Have as u8);
-            buf.put_u32(piece_index);
+            // ok to unwrap, only used in tests
+            buf.put_u32(piece_index.try_into().unwrap());
             buf
         };
         (msg, encoded.into())
@@ -705,17 +737,17 @@ mod tests {
     fn make_request() -> (Message, Bytes) {
         let piece_index = 42;
         let offset = 0x4000;
-        let length = 4 * 0x4000;
-        let msg = Message::Request {
+        let len = BLOCK_LEN;
+        let msg = Message::Request(BlockInfo {
             piece_index,
             offset,
-            length,
-        };
+            len,
+        });
         let encoded = make_block_info_encoded_msg_payload(
             MessageId::Request,
             piece_index,
             offset,
-            length,
+            len,
         );
         (msg, encoded)
     }
@@ -724,26 +756,27 @@ mod tests {
     fn make_block() -> (Message, Bytes) {
         let piece_index = 42;
         let offset = 0x4000;
-        let block = vec![0; 4 * 0x4000];
+        let data = vec![0; 4 * 0x4000];
         // TODO: fill the block with random values
         let encoded = {
             // 1 byte message id, 4 byte piece index, 4 byte offset, and n byte
             // block
-            let msg_len = 1 + 4 + 4 + block.len();
+            let msg_len = 1 + 4 + 4 + data.len();
             // 4 byte message length prefix and message length
             let buf_len = 4 + msg_len;
             let mut buf = BytesMut::with_capacity(buf_len);
             buf.put_u32(msg_len as u32);
             buf.put_u8(MessageId::Block as u8);
-            buf.put_u32(piece_index);
+            // ok to unwrap, only used in tests
+            buf.put_u32(piece_index.try_into().unwrap());
             buf.put_u32(offset);
-            buf.extend_from_slice(&block);
+            buf.extend_from_slice(&data);
             buf
         };
         let msg = Message::Block {
             piece_index,
             offset,
-            block,
+            data,
         };
         (msg, encoded.into())
     }
@@ -752,17 +785,17 @@ mod tests {
     fn make_cancel() -> (Message, Bytes) {
         let piece_index = 42;
         let offset = 0x4000;
-        let length = 4 * 0x4000;
-        let msg = Message::Cancel {
+        let len = BLOCK_LEN;
+        let msg = Message::Cancel(BlockInfo {
             piece_index,
             offset,
-            length,
-        };
+            len,
+        });
         let encoded = make_block_info_encoded_msg_payload(
             MessageId::Cancel,
             piece_index,
             offset,
-            length,
+            len,
         );
         (msg, encoded)
     }
@@ -771,9 +804,9 @@ mod tests {
     // the same format.
     fn make_block_info_encoded_msg_payload(
         id: MessageId,
-        piece_index: u32,
+        piece_index: usize,
         offset: u32,
-        length: u32,
+        len: u32,
     ) -> Bytes {
         // 1 byte message id, 4 byte piece index, 4 byte offset, 4 byte
         // length
@@ -783,9 +816,10 @@ mod tests {
         let mut buf = BytesMut::with_capacity(buf_len);
         buf.put_u32(msg_len);
         buf.put_u8(id as u8);
-        buf.put_u32(piece_index);
+        // ok to unwrap, only used in tests
+        buf.put_u32(piece_index.try_into().unwrap());
         buf.put_u32(offset);
-        buf.put_u32(length);
+        buf.put_u32(len);
         buf.into()
     }
 }

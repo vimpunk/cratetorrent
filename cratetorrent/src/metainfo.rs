@@ -22,6 +22,20 @@ impl Metainfo {
         self.info.pieces.len() / 20
     }
 
+    /// Returns the total download size in bytes.
+    pub fn download_len(&self) -> Result<u64> {
+        if let Some(len) = self.info.len {
+            Ok(len)
+        } else if let Some(files) = &self.info.files {
+            let len = files.iter().map(|f| f.len).sum();
+            Ok(len)
+        } else {
+            // this is implies an invalid metainfo
+            // but we should check this in the constructor
+            Err(Error::InvalidMetainfo)
+        }
+    }
+
     pub fn create_info_hash(&self) -> Result<Sha1Hash> {
         let info = serde_bencode::to_bytes(&self.info)?;
         let digest = Sha1::digest(&info);
@@ -37,8 +51,9 @@ pub struct Info {
     #[serde(with = "serde_bytes")]
     pub pieces: Vec<u8>,
     #[serde(rename = "piece length")]
-    pub piece_length: u64,
-    pub length: Option<u64>,
+    pub piece_len: u32,
+    #[serde(rename = "length")]
+    pub len: Option<u64>,
     pub files: Option<Vec<File>>,
     pub private: Option<u8>,
 }
@@ -46,7 +61,8 @@ pub struct Info {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct File {
     pub path: Vec<String>,
-    pub length: i64,
+    #[serde(rename = "length")]
+    pub len: u64,
 }
 
 #[cfg(test)]

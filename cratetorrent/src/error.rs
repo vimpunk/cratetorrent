@@ -10,8 +10,14 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub enum Error {
     /// Holds bencode serialization or deserialization related errors.
     Bencode(BencodeError),
+    /// The block length is not 4 KiB.
+    InvalidBlockLength,
+    /// The torrent metainfo is not valid.
+    InvalidMetainfo,
     /// Peer's torrent info hash did not match ours.
     InvalidPeerInfoHash,
+    /// The piece index was larger than the number of pieces in torrent.
+    InvalidPieceIndex,
     /// The chain of piece hashes in the torrent metainfo file was not
     /// a multiple of 20, or is otherwise invalid and thus the torrent could not
     /// be started.
