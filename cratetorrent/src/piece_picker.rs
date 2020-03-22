@@ -79,12 +79,12 @@ impl PiecePicker {
     pub fn is_interested(&self, pieces: &Bitfield) -> bool {
         for (index, (has_piece, peer_has_piece)) in
             self.own_pieces.iter().zip(pieces.iter()).enumerate()
-            {
-                // if we don't have a piece that peer has, we are interested
-                if !has_piece && *peer_has_piece {
-                    return true;
-                }
+        {
+            // if we don't have a piece that peer has, we are interested
+            if !has_piece && *peer_has_piece {
+                return true;
             }
+        }
         false
     }
 
@@ -132,6 +132,7 @@ mod tests {
         // save picked pieces
         let mut picked = HashSet::with_capacity(piece_count);
 
+        // pick all pieces one by one
         for index in 0..piece_count {
             let pick = piece_picker.pick_piece();
             // for now we assert that we pick pieces in sequential order, but
@@ -168,7 +169,7 @@ mod tests {
 
         // request pieces to pick next and make sure the ones we already have
         // are not picked
-        for index in 0..piece_count - owned_pieces.len() {
+        for _ in 0..piece_count - owned_pieces.len() {
             let pick = piece_picker.pick_piece().unwrap();
             // assert that it's not a piece we already have
             assert!(owned_pieces.iter().all(|owned| *owned != pick));

@@ -1,16 +1,16 @@
 mod codec;
 
-use crate::{PeerId, Bitfield, BlockInfo};
-use crate::error::*;
-use crate::piece_picker::PiecePicker;
-use crate::torrent::SharedTorrentInfo;
-use codec::*;
-use futures::{SinkExt, StreamExt};
-use std::net::SocketAddr;
-use std::sync::Arc;
-use tokio::net::TcpStream;
-use tokio::sync::RwLock;
-use tokio_util::codec::{Framed, FramedParts};
+use {
+    crate::{
+        download::PieceDownload, error::*, piece_picker::PiecePicker,
+        torrent::SharedTorrentInfo, Bitfield, BlockInfo, PeerId,
+    },
+    codec::*,
+    futures::{SinkExt, StreamExt},
+    std::{net::SocketAddr, sync::Arc},
+    tokio::{net::TcpStream, sync::RwLock},
+    tokio_util::codec::{Framed, FramedParts},
+};
 
 /// At any given time, a connection with a peer is in one of the below states.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -104,11 +104,11 @@ pub(crate) struct PeerSession {
     status: Status,
     // These are the active piece downloads in which this `peer_session` is
     // participating.
-    //downloads: Vec<PieceDownload>,
+    downloads: Vec<PieceDownload>,
     // Our pending requests that we sent to peer. It represents the blocks that
     // we are expecting. Thus, if we receive a block that is not in this list,
     // it is dropped.  If we receive a block whose request entry is in here, the
-    // request entry is removed.
+    // entry is removed.
     //
     // Since the Fast extension is not supported (yet), this is emptied when
     // we're choked, as in that case we don't expect outstanding requests to be
@@ -134,6 +134,7 @@ impl PeerSession {
             piece_picker,
             addr,
             status: Status::default(),
+            downloads: Vec::new(),
             outgoing_requests: Vec::new(),
             peer_info: None,
         }
@@ -236,7 +237,8 @@ impl PeerSession {
                     // register peer's pieces with piece picker
                     let mut piece_picker = self.piece_picker.write().await;
                     piece_picker.register_availability(&bitfield);
-                    self.status.is_interested = piece_picker.is_interested(&bitfield);
+                    self.status.is_interested =
+                        piece_picker.is_interested(&bitfield);
                     debug_assert!(self.status.is_interested);
                     if let Some(peer_info) = &mut self.peer_info {
                         peer_info.pieces = Some(bitfield);
@@ -287,7 +289,12 @@ impl PeerSession {
                 }
                 Message::Choke => {
                     log::info!("Peer {} choked us", self.addr);
-                    self.status.is_choked = true;
+                    if !self.status.is_choked {
+                        // since we're choked we don't expect to receive blocks
+                        // for our pending requests
+                        self.outgoing_requests.clear();
+                        self.status.is_choked = true;
+                    }
                 }
                 Message::Unchoke => {
                     log::info!("Peer {} unchoked us", self.addr);

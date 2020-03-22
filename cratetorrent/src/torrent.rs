@@ -8,8 +8,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
-use tokio::task;
-use tokio::time;
+use tokio::{task, time};
 
 struct TorrentInfo {
     // Information that is shared with peer sessions.
@@ -52,7 +51,7 @@ struct Peer {
     handle: Option<task::JoinHandle<Result<()>>>,
 }
 
-pub struct Torrent {
+pub(crate) struct Torrent {
     seed: Peer,
     // General information about a torrent.
     info: TorrentInfo,

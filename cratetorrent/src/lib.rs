@@ -1,6 +1,7 @@
 #[macro_use]
 extern crate serde_derive;
 
+mod download;
 pub mod error;
 pub mod metainfo;
 mod peer;
@@ -26,17 +27,42 @@ pub type Sha1Hash = [u8; 20];
 /// doesn't have the piece.
 pub type Bitfield = BitVec<Msb0, u8>;
 
+/// This is the only block length we're dealing with. It is the widely used and
+/// accepted 4KiB.
+pub(crate) const BLOCK_LEN: u32 = 0x4000;
+
 /// A block is a fixed size chunk of a piece, which in turn is a fixed size
 /// chunk of a torrent. Downloading torrents happen at this block level
 /// granularity.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct BlockInfo {
     /// The index of the piece of which this is a block.
     pub piece_index: u32,
-    /// The byte offset into the piece.
+    /// The zero-based byte offset into the piece.
     pub offset: u32,
-    /// The length in bytes of this block. Almost always 4KiB (0x4000 bytes).
-    pub length: u32
+    /// The block's length in bytes. Always 4KiB (0x4000 bytes), for now.
+    pub length: u32,
+}
+
+impl BlockInfo {
+    /// Createas a new `BlockInfo` instance with the default length of 4 KiB.
+    pub fn new(piece_index: u32, offset: u32) -> Self {
+        Self {
+            piece_index,
+            offset,
+            length: BLOCK_LEN,
+        }
+    }
+
+    /// Returns the index of the block within its piece.
+    pub fn index(&self) -> usize {
+        self.offset as usize / BLOCK_LEN as usize
+    }
+}
+
+/// Returns the number of blocks in a piece of the given length.
+pub(crate) fn block_count(piece_len: u32) -> usize {
+    (piece_len as usize + (BLOCK_LEN as usize - 1)) / BLOCK_LEN as usize
 }
 
 /// Connect to a single seed and download the torrent.

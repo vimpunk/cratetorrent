@@ -487,6 +487,6 @@ arrives.
 
 ## Piece download
 
-A piece download tracks the piece completion. It will play an important role in
-  optimizing download performance, but none of that is implemented for now (see
-  research notes).
+A piece download tracks the piece completion of an ongoing piece download. It
+  will play an important role in optimizing download performance, but none of
+  that is implemented for now (see research notes).
