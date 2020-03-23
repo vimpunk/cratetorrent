@@ -223,7 +223,7 @@ impl PeerSession {
 
     async fn run(
         &mut self,
-        mut socket: Framed<TcpStream, PeerCodec>,
+        socket: Framed<TcpStream, PeerCodec>,
     ) -> Result<()> {
         // split the sink and stream so that we can pass the sink while holding
         // a reference to the stream in the loop
@@ -347,10 +347,20 @@ impl PeerSession {
                     }
 
                     let block_info = BlockInfo::new(piece_index, offset);
-                    self.handle_block(block_info, data);
+                    self.handle_block_msg(block_info, data).await;
 
-                    // we may be able to make more requests now that a block has arrived
-                    self.make_requests(&mut sink).await?;
+                    // check if we finished the download with this block
+                    if self.piece_picker.read().await.count_missing_pieces()
+                        == 0
+                    {
+                        log::info!("Finished torrent download");
+                        // TODO: perform more action
+                        return Ok(());
+                    } else {
+                        // otherwise we may be able to make more requests now
+                        // that a block has arrived
+                        self.make_requests(&mut sink).await?;
+                    }
                 }
                 // these messages are not expected until seed functionality is added
                 //
@@ -465,7 +475,10 @@ impl PeerSession {
         Ok(())
     }
 
-    fn handle_block(&mut self, block_info: BlockInfo, data: Vec<u8>) {
+    // Verifies block validity, registers the download (and finishes a piece
+    // download if this was the last missing block in piece) and updates
+    // statistics about the download.
+    async fn handle_block_msg(&mut self, block_info: BlockInfo, data: Vec<u8>) {
         log::info!("Peer {} sent block: {:?}", self.addr, block_info);
 
         // find block in the list of pending requests
@@ -499,25 +512,36 @@ impl PeerSession {
 
         // mark the block as downloaded with its respective piece
         // download instance
-        let download = self
+        let download_pos = self
             .downloads
-            .iter_mut()
-            .find(|d| d.piece_index() == block_info.piece_index);
+            .iter()
+            .position(|d| d.piece_index() == block_info.piece_index);
         // this fires as a result of a broken invariant: we
         // shouldn't have an entry in `outgoing_requests` without a
         // corresponding entry in `downloads`
         //
-        // TODO: can we do this without an unwrap?
-        debug_assert!(download.is_some());
-        let mut download = download.unwrap();
+        // TODO: can we handle this without unwrapping?
+        debug_assert!(download_pos.is_some());
+        let download_pos = download_pos.unwrap();
+        let download = &mut self.downloads[download_pos];
         download.received_block(block_info);
+
+        // finish download of piece if this was the last missing block in it
+        let missing_blocks_count = download.count_missing_blocks();
+        if missing_blocks_count == 0 {
+            // register received piece
+            self.piece_picker
+                .write()
+                .await
+                .received_piece(block_info.piece_index);
+            // remove piece download from `downloads`
+            self.downloads.remove(download_pos);
+        }
 
         // TODO: validate and save the block to disk (this is part
         // of the next MR)
 
         // adjust request statistics
         self.status.downloaded_block_bytes_count += block_info.len as u64;
-
-        // make more requests
     }
 }

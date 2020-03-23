@@ -95,9 +95,9 @@ impl PieceDownload {
     }
 
     /// Returns the number of free (pickable) blocks.
-    pub fn free_block_count(&self) -> usize {
-        // TODO: we could optimize this by caching this value in
-        // a `free_block_count` field in self that is updated in pick_blocks
+    pub fn count_missing_blocks(&self) -> usize {
+        // TODO: we could optimize this by caching this value in a
+        // `count_missing_blocks` field in self that is updated in pick_blocks
         self.blocks
             .iter()
             .filter(|b| matches!(b, Block::Free))
@@ -206,7 +206,7 @@ mod tests {
         let block_count = block_count(piece_len);
 
         assert_eq!(
-            download.free_block_count(),
+            download.count_missing_blocks(),
             block_count - picked_block_indices.len()
         );
 

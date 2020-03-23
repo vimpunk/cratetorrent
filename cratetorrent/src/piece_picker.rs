@@ -39,6 +39,12 @@ impl PiecePicker {
         }
     }
 
+    /// Returns the number of missing pieces that are needed to complete the
+    /// download.
+    pub fn count_missing_pieces(&self) -> usize {
+        self.own_pieces.count_zeros()
+    }
+
     /// Returns the first piece that we don't yet have and isn't already being
     /// downloaded, or None, if no piece can be picked at this time.
     pub fn pick_piece(&mut self) -> Option<usize> {
@@ -77,8 +83,8 @@ impl PiecePicker {
     /// Determines if we are interested in the given pieces. This happens if the
     /// pieces contain at least one piece that we don't have.
     pub fn is_interested(&self, pieces: &Bitfield) -> bool {
-        for (index, (has_piece, peer_has_piece)) in
-            self.own_pieces.iter().zip(pieces.iter()).enumerate()
+        for (has_piece, peer_has_piece) in
+            self.own_pieces.iter().zip(pieces.iter())
         {
             // if we don't have a piece that peer has, we are interested
             if !has_piece && *peer_has_piece {
