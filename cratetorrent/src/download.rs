@@ -100,7 +100,7 @@ impl PieceDownload {
         // `count_missing_blocks` field in self that is updated in pick_blocks
         self.blocks
             .iter()
-            .filter(|b| matches!(b, Block::Free))
+            .filter(|b| matches!(b, Block::Free | Block::Requested))
             .count()
     }
 }
@@ -207,7 +207,7 @@ mod tests {
 
         assert_eq!(
             download.count_missing_blocks(),
-            block_count - picked_block_indices.len()
+            block_count - received_block_count
         );
 
         // pick all remaining free blocks

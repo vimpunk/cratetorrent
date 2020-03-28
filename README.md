@@ -49,13 +49,14 @@ path of the torrent file mapped into the container.
 
 ## Goals
 
-1. Perform a single download of a file with a single peer connection if given
+1. Perform a single in-memory download of a file with a single peer connection if given
    the address of a seed and the path to the torrent metainfo. No multiple
    torrents, no seeding, no optimizations, or any other feature you might expect
    from a full-fledged BitTorrent library.
-2. Download a directory of files using a single peer connection.
-3. Download a torrent using multiple connections.
-4. Seed a torrent.
+2. Extend 1. with actually saving the downloaded file to disk.
+3. Download a directory of files using a single peer connection.
+4. Download a torrent using multiple connections.
+5. Seed a torrent.
 
 And more milestones to be added later. Eventually, I hope to develop
 cratetorrent into a full-fledged BitTorrent engine library that can be used as

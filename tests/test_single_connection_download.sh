@@ -50,7 +50,7 @@ docker run \
     -ti \
     --env SEED="${seed_addr}" \
     --env METAINFO_PATH="${metainfo_cont_path}" \
-    --env RUST_LOG=trace,cratetorrent=trace,cratetorrent_cli=trace \
+    --env RUST_LOG=cratetorrent=trace,cratetorrent_cli=trace \
     --mount type=bind,src="${metainfo_path}",dst="${metainfo_cont_path}" \
     cratetorrent-cli
 
