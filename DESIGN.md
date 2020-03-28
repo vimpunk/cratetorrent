@@ -151,9 +151,8 @@ currently only TCP is supported.
 - Download pipeline: downloaders should keep several piece requests queued up
   for optimal throughput rates. This is achieved by sending several piece
     requests at a time and always keeping the optimal number of piece requests
-    outstanding until choked or the download is complete. However, note that
-    this is not implemented at the time, it is only kept here as a note for
-    future implementations.
+    outstanding until choked or the download is complete. See the [download
+    pipeline section](#download-pipeline).
 - The first exchanged message _must_ be the handshake.
 - Apart from the handshake length prefix, all integers are encoded as four bytes
   in big-endian (i.e. multi-byte integers are sent in network order).
@@ -278,6 +277,9 @@ R |      |        | /    |
 
 And even from such a simple example as this, it can be concluded as a feature and not
 premature optimization.
+
+What is needed for this to work reliably is timing out requests, but as of this
+writing that is not yet implemented.
 
 ### Messages
 

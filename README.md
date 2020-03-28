@@ -15,12 +15,14 @@ The project is split up in two:
 
 ## How to run
 
+#### Binary
 The CLI binary is currently very basic, but you can connect to a seed by
 running the following from the repo root:
 ```
 cargo run --release -p cratetorrent-cli
 ```
 
+#### In Docker
 A Dockerfile is also provided for the CLI. To build the docker image, first
   build the binary (also from the repo root):
 ```
