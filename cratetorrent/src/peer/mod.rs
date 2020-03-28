@@ -240,7 +240,7 @@ impl PeerSession {
                 if let Message::Bitfield(bitfield) = msg {
                     // if peer is not a seed, we abort the connection as we only
                     // support downloading and for that we must be connected to
-                    // a seed
+                    // a seed (otherwise we couldn't download the whole torrent)
                     if !bitfield.all() {
                         log::warn!(
                             "Peer {} is not a seed, cannot download",
@@ -273,6 +273,12 @@ impl PeerSession {
                     // send interested message to peer
                     log::info!("Interested in peer {}", self.addr);
                     sink.send(Message::Interested).await?;
+                    // This is the start of the download, so set the request
+                    // queue size so we can request blocks. Set it
+                    // optimistically to 4 for now, but later we'll have a TCP
+                    // like slow start algorithm for quickly finding the ideal
+                    // request queue size.
+                    self.status.best_request_queue_len = Some(4);
 
                     // go to the next message (the message is consumed in this
                     // branch)
@@ -312,7 +318,7 @@ impl PeerSession {
                     }
                 }
                 Message::Unchoke => {
-                    if !self.status.is_choked {
+                    if self.status.is_choked {
                         log::info!("Peer {} unchoked us", self.addr);
                         self.status.is_choked = false;
                         // now that we are allowed to request blocks, start the
@@ -327,7 +333,7 @@ impl PeerSession {
                     }
                 }
                 Message::NotInterested => {
-                    if !self.status.is_peer_interested {
+                    if self.status.is_peer_interested {
                         log::info!("Peer {} is not interested", self.addr);
                         self.status.is_peer_interested = false;
                     }
