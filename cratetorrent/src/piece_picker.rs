@@ -63,6 +63,7 @@ impl PiecePicker {
             }
         }
         // no piece could be picked
+        log::trace!("Could not pick piece");
         None
     }
 

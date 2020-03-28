@@ -47,6 +47,8 @@ impl Default for State {
 // interested in the other.
 #[derive(Clone, Copy, Debug)]
 struct Status {
+    // The current state of the session.
+    state: State,
     // If we're cohked, peer doesn't allow us to download pieces from them.
     is_choked: bool,
     // If we're interested, peer has pieces that we don't have.
@@ -81,6 +83,7 @@ struct Status {
 impl Default for Status {
     fn default() -> Self {
         Self {
+            state: State::default(),
             is_choked: true,
             is_interested: false,
             is_peer_choked: true,
@@ -100,8 +103,6 @@ struct PeerInfo {
 }
 
 pub(crate) struct PeerSession {
-    // The current state of the session.
-    state: State,
     // Shared information of the torrent.
     torrent: Arc<SharedStatus>,
     piece_picker: Arc<RwLock<PiecePicker>>,
@@ -143,7 +144,6 @@ impl PeerSession {
         addr: SocketAddr,
     ) -> Self {
         Self {
-            state: State::default(),
             torrent,
             piece_picker,
             addr,
@@ -158,7 +158,7 @@ impl PeerSession {
         log::info!("Starting peer {} session", self.addr);
 
         log::info!("Connecting to peer {}", self.addr);
-        self.state = State::Connecting;
+        self.status.state = State::Connecting;
         let socket = TcpStream::connect(self.addr).await?;
         log::info!("Connected to peer {}", self.addr);
 
@@ -166,7 +166,7 @@ impl PeerSession {
 
         // this is an outbound connection, so we have to send the first
         // handshake
-        self.state = State::Handshaking;
+        self.status.state = State::Handshaking;
         let handshake =
             Handshake::new(self.torrent.info_hash, self.torrent.client_id);
         log::info!("Sending handshake to peer {}", self.addr);
@@ -211,8 +211,8 @@ impl PeerSession {
             // bitfield (we don't send one as we currently only implement
             // downloading so we cannot have piece availability until multiple
             // peer connections or resuming a torrent is implemented)
-            self.state = State::AvailabilityExchange;
-            log::info!("Peer {} session state: {:?}", self.addr, self.state);
+            self.status.state = State::AvailabilityExchange;
+            log::info!("Peer {} session state: {:?}", self.addr, self.status.state);
 
             // run the session
             self.run(socket).await?;
@@ -234,7 +234,7 @@ impl PeerSession {
             log::info!("Received message from peer {}", self.addr);
             log::debug!("Peer {} message: {:?}", self.addr, msg);
 
-            if self.state == State::AvailabilityExchange {
+            if self.status.state == State::AvailabilityExchange {
                 // handle bitfield message separately as it may only be received
                 // directly after the handshake
                 if let Message::Bitfield(bitfield) = msg {
@@ -263,11 +263,11 @@ impl PeerSession {
                     //
                     // TODO: this needs to be moved out of here once we start
                     // supporting session with other leeches
-                    self.state = State::Connected;
+                    self.status.state = State::Connected;
                     log::info!(
                         "Peer {} session state: {:?}",
                         self.addr,
-                        self.state
+                        self.status.state
                     );
 
                     // send interested message to peer
@@ -423,18 +423,19 @@ impl PeerSession {
             // our outgoing request queue shouldn't exceed the allowed request
             // queue size
             debug_assert!(
-                self.status.best_request_queue_len.unwrap_or(1)
+                self.status.best_request_queue_len.unwrap_or_default()
                     >= self.outgoing_requests.len()
             );
-            let request_queue_len =
-                self.status.best_request_queue_len.unwrap_or(1)
+            // the number of requests we can make now
+            let to_request_count =
+                self.status.best_request_queue_len.unwrap_or_default()
                     - self.outgoing_requests.len();
-            if request_queue_len == 0 {
+            if to_request_count == 0 {
                 break;
             }
 
             // request blocks and register in our outgoing requests queue
-            let blocks = download.pick_blocks(request_queue_len);
+            let blocks = download.pick_blocks(to_request_count);
             self.outgoing_requests.extend_from_slice(&blocks);
             // make the actual requests
             for block in blocks.iter() {
@@ -447,11 +448,11 @@ impl PeerSession {
             // our outgoing request queue shouldn't exceed the allowed request
             // queue size
             debug_assert!(
-                self.status.best_request_queue_len.unwrap_or(1)
+                self.status.best_request_queue_len.unwrap_or_default()
                     >= self.outgoing_requests.len()
             );
             let request_queue_len =
-                self.status.best_request_queue_len.unwrap_or(1)
+                self.status.best_request_queue_len.unwrap_or_default()
                     - self.outgoing_requests.len();
             if request_queue_len == 0 {
                 break;

@@ -42,7 +42,7 @@ impl PieceDownload {
     /// Picks the requested number of blocks or fewer, if fewer are remaining.
     pub fn pick_blocks(&mut self, count: usize) -> Vec<BlockInfo> {
         log::trace!(
-            "Picking {} block(s) in piece {} with length {} and {} blocks",
+            "Picking {} block(s) in piece {} with length {} and {} block(s)",
             count,
             self.index,
             self.len,
