@@ -132,7 +132,19 @@ impl Decoder for HandshakeCodec {
             return Ok(None);
         }
 
-        let prot_len = buf.get_u8() as usize;
+        // hack:
+        // `get_*` integer extractors consume the message bytes by advancing
+        // buf's internal cursor. However, we don't want to do this as at this
+        // point we aren't sure we have the full message in the buffer, and thus
+        // we just want to peek at this value.
+        //
+        // However, this is not supported by the `bytes` crate API
+        // (https://github.com/tokio-rs/bytes/issues/382), so we need to work
+        // this around by getting a reference to the underlying buffer and
+        // performing the message length extraction on the returned slice, which
+        // won't advance `buf`'s cursor
+        let mut tmp_buf = buf.bytes();
+        let prot_len = tmp_buf.get_u8() as usize;
         if prot_len != PROTOCOL_STRING.as_bytes().len() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -140,9 +152,16 @@ impl Decoder for HandshakeCodec {
             ));
         }
 
-        // check that we got the full payload in the buffer
+        // check that we got the full payload in the buffer (NOTE: we need to
+        // add the message length prefix's byte count to msg_len since the
+        // buffer cursor was not advanced and thus we need to consider the
+        // prefix too)
         let payload_len = prot_len + 8 + 20 + 20;
-        if buf.remaining() < payload_len {
+        if buf.remaining() >= 1 + payload_len {
+            // we have the full message in the buffer so advance the buffer
+            // cursor past the message length header
+            buf.advance(1);
+        } else {
             return Ok(None);
         }
 
@@ -330,22 +349,47 @@ impl Decoder for PeerCodec {
     type Error = io::Error;
 
     fn decode(&mut self, buf: &mut BytesMut) -> io::Result<Option<Self::Item>> {
+        log::trace!("Decoder has {} byte(s) remaining", buf.remaining());
+
         // the message length header must be present at the minimum, otherwise
         // we can't determine the message type
-        if buf.len() < 4 {
+        if buf.remaining() < 4 {
             return Ok(None);
         }
 
-        let msg_len = buf.get_u32() as usize;
+        // hack:
+        // `get_*` integer extractors consume the message bytes by advancing
+        // buf's internal cursor. However, we don't want to do this as at this
+        // point we aren't sure we have the full message in the buffer, and thus
+        // we just want to peek at this value.
+        //
+        // However, this is not supported by the `bytes` crate API
+        // (https://github.com/tokio-rs/bytes/issues/382), so we need to work
+        // this around by getting a reference to the underlying buffer and
+        // performing the message length extraction on the returned slice, which
+        // won't advance `buf`'s cursor
+        let mut tmp_buf = buf.bytes();
+        let msg_len = tmp_buf.get_u32() as usize;
 
-        // the message length is only 0 if this is a keep alive message (all
-        // other message types have at least one more field, the message id)
-        if msg_len == 0 {
-            return Ok(Some(Message::KeepAlive));
-        }
-
-        // check that we got the full payload in the buffer
-        if buf.remaining() < msg_len {
+        // check that we got the full payload in the buffer (NOTE: we need to
+        // add the message length prefix's byte count to msg_len since the
+        // buffer cursor was not advanced and thus we need to consider the
+        // prefix too)
+        if buf.remaining() >= 4 + msg_len {
+            // we have the full message in the buffer so advance the buffer
+            // cursor past the message length header
+            buf.advance(4);
+            // the message length is only 0 if this is a keep alive message (all
+            // other message types have at least one more field, the message id)
+            if msg_len == 0 {
+                return Ok(Some(Message::KeepAlive));
+            }
+        } else {
+            log::trace!(
+                "Read buffer is {} bytes long but message is {} bytes long",
+                buf.remaining(),
+                msg_len
+            );
             return Ok(None);
         }
 
@@ -363,8 +407,9 @@ impl Decoder for PeerCodec {
                 Message::Have { piece_index }
             }
             MessageId::Bitfield => {
-                // preallocate buffer to the length of bitfield, by subtracting
-                // the id from the message length
+                // preallocate buffer to the length of bitfield, which is the
+                // value gotten by subtracting the id length from the message
+                // length
                 let mut bitfield = vec![0; msg_len - 1];
                 buf.copy_to_slice(&mut bitfield);
                 Message::Bitfield(Bitfield::from_vec(bitfield))
@@ -383,18 +428,21 @@ impl Decoder for PeerCodec {
                 )?)
             }
             MessageId::Block => {
+                // TODO: this shouldn't be a debug asset as we're dealing with
+                // unknown input
+                debug_assert!(msg_len > 9);
                 let piece_index = buf.get_u32();
                 let piece_index = piece_index.try_into().map_err(|e| {
                     io::Error::new(io::ErrorKind::InvalidInput, e)
                 })?;
                 let offset = buf.get_u32();
-                // TODO: here we would want to copy into a pre-allocated buffer
-                // rather than create a new buffer, created outside the message
-                // codec
-                debug_assert!(msg_len > 8);
                 // preallocate the vector to the block length, by subtracting
                 // the id, piece index and offset lengths from the message
                 // length
+                //
+                // TODO: here we would want to copy into a pre-allocated buffer
+                // rather than create a new buffer, created outside the message
+                // codec
                 let mut data = vec![0; msg_len - 9];
                 buf.copy_to_slice(&mut data);
                 Message::Block {
@@ -437,12 +485,15 @@ mod tests {
         let msgs = [
             make_choke(),
             make_unchoke(),
+            make_keep_alive(),
             make_interested(),
             make_not_interested(),
             make_bitfield(),
             make_have(),
             make_request(),
             make_block(),
+            make_block(),
+            make_keep_alive(),
             make_interested(),
             make_cancel(),
             make_block(),
@@ -454,18 +505,78 @@ mod tests {
         // create byte stream of all above messages
         let msgs_len =
             msgs.iter().fold(0, |acc, (_, encoded)| acc + encoded.len());
-        let mut buf = BytesMut::with_capacity(msgs_len);
-        buf.extend_from_slice(&encoded_handshake);
+        let mut read_buf = BytesMut::with_capacity(msgs_len);
+        read_buf.extend_from_slice(&encoded_handshake);
         for (_, encoded) in &msgs {
-            buf.extend_from_slice(&encoded);
+            read_buf.extend_from_slice(&encoded);
         }
 
         // decode messages one by one from the byte stream in the same order as
         // they were encoded, starting with the handshake
-        let decoded_handshake = HandshakeCodec.decode(&mut buf).unwrap();
+        let decoded_handshake = HandshakeCodec.decode(&mut read_buf).unwrap();
         assert_eq!(decoded_handshake, Some(handshake));
         for (msg, _) in &msgs {
-            let decoded_msg = PeerCodec.decode(&mut buf).unwrap();
+            let decoded_msg = PeerCodec.decode(&mut read_buf).unwrap();
+            assert_eq!(decoded_msg.unwrap(), *msg);
+        }
+    }
+
+    // This test attempts to simulate a closer to real world use case than
+    // `test_test_message_stream`, by progresively loading up the codec's read
+    // buffer with the encoded message bytes, asserting that messages are
+    // decoded correctly even if their bytes arrives in different chunks.
+    //
+    // This is a regression test in that there used to be a bug that failed to
+    // parse block messages (the largest message type) if the full message
+    // couldn't be received (as is often the case).
+    #[test]
+    fn test_chunked_message_stream() {
+        let mut read_buf = BytesMut::new();
+
+        // start with the handshake by adding only the first half of it to the
+        // buffer
+        let (handshake, encoded_handshake) = make_handshake();
+        let handshake_split_pos = encoded_handshake.len() / 2;
+        read_buf.extend_from_slice(&encoded_handshake[0..handshake_split_pos]);
+
+        // can't decode the handshake without the full message
+        assert!(HandshakeCodec.decode(&mut read_buf).unwrap().is_none());
+
+        // the handshake should successfully decode with the second half added
+        read_buf.extend_from_slice(&encoded_handshake[handshake_split_pos..]);
+        let decoded_handshake = HandshakeCodec.decode(&mut read_buf).unwrap();
+        assert_eq!(decoded_handshake, Some(handshake));
+
+        let msgs = [
+            make_choke(),
+            make_unchoke(),
+            make_interested(),
+            make_not_interested(),
+            make_bitfield(),
+            make_have(),
+            make_request(),
+            make_block(),
+            make_block(),
+            make_interested(),
+            make_cancel(),
+            make_block(),
+            make_not_interested(),
+            make_choke(),
+            make_choke(),
+        ];
+
+        // go through all above messages and do the same procedure as with the
+        // handshake: add the first half, fail to decode, add the second half,
+        // decode successfully
+        for (msg, encoded) in &msgs {
+            // add the first half of the message
+            let split_pos = encoded.len() / 2;
+            read_buf.extend_from_slice(&encoded[0..split_pos]);
+            // fail to decode
+            assert!(PeerCodec.decode(&mut read_buf).unwrap().is_none());
+            // add the second half
+            read_buf.extend_from_slice(&encoded[split_pos..]);
+            let decoded_msg = PeerCodec.decode(&mut read_buf).unwrap();
             assert_eq!(decoded_msg.unwrap(), *msg);
         }
     }
@@ -566,6 +677,13 @@ mod tests {
 
     // Tests the encoding and subsequent decoding of a valid 'choke' message.
     #[test]
+    fn test_keep_alive_codec() {
+        let (msg, expected_encoded) = make_keep_alive();
+        assert_message_codec(msg, expected_encoded);
+    }
+
+    // Tests the encoding and subsequent decoding of a valid 'choke' message.
+    #[test]
     fn test_choke_codec() {
         let (msg, expected_encoded) = make_choke();
         assert_message_codec(msg, expected_encoded);
@@ -645,6 +763,10 @@ mod tests {
         // decode same message
         let decoded = PeerCodec.decode(&mut encoded).unwrap();
         assert_eq!(decoded, Some(msg));
+    }
+
+    fn make_keep_alive() -> (Message, Bytes) {
+        (Message::KeepAlive, Bytes::from_static(&[0; 4]))
     }
 
     // Returns `Choke` and its expected encoded variant.
@@ -756,7 +878,7 @@ mod tests {
     fn make_block() -> (Message, Bytes) {
         let piece_index = 42;
         let offset = 0x4000;
-        let data = vec![0; 4 * 0x4000];
+        let data = vec![0; 0x4000];
         // TODO: fill the block with random values
         let encoded = {
             // 1 byte message id, 4 byte piece index, 4 byte offset, and n byte

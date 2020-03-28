@@ -110,7 +110,7 @@ pub(crate) struct PeerSession {
     addr: SocketAddr,
     // Session related information.
     status: Status,
-    // These are the active piece downloads in which this `peer_session` is
+    // These are the active piece downloads in which this session is
     // participating.
     downloads: Vec<PieceDownload>,
     // Our pending requests that we sent to peer. It represents the blocks that
@@ -134,10 +134,10 @@ pub(crate) struct PeerSession {
 }
 
 impl PeerSession {
-    // Creates a new outbound session with the peer at the given address.
-    //
-    // The peer needs to be a seed in order for us to download a file through
-    // this peer session, otherwise the session is aborted with an error.
+    /// Creates a new outbound session with the peer at the given address.
+    ///
+    /// The peer needs to be a seed in order for us to download a file through
+    /// this peer session, otherwise the session is aborted with an error.
     pub fn outbound(
         torrent: Arc<SharedStatus>,
         piece_picker: Arc<RwLock<PiecePicker>>,
@@ -154,6 +154,9 @@ impl PeerSession {
         }
     }
 
+    /// Starts the peer session and returns normally if the download is
+    /// complete, or aborts if an error is encountered and the error is
+    /// returned. 
     pub async fn start(&mut self) -> Result<()> {
         log::info!("Starting peer {} session", self.addr);
 
@@ -221,6 +224,10 @@ impl PeerSession {
         Ok(())
     }
 
+    // Runs the session after connection to peer is established.
+    //
+    // This is the main session "loop" and performs the exchange of messages,
+    // timeout logic, among other things.
     async fn run(
         &mut self,
         socket: Framed<TcpStream, PeerCodec>,
