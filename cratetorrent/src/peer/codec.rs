@@ -88,6 +88,23 @@ pub(crate) enum Message {
     Cancel(BlockInfo),
 }
 
+impl Message {
+    pub fn id(&self) -> Option<MessageId> {
+        match self {
+            Self::KeepAlive => None,
+            Self::Bitfield(_) => Some(MessageId::Bitfield),
+            Self::Choke => Some(MessageId::Choke),
+            Self::Unchoke => Some(MessageId::Unchoke),
+            Self::Interested => Some(MessageId::Interested),
+            Self::NotInterested => Some(MessageId::NotInterested),
+            Self::Have { .. } => Some(MessageId::Have),
+            Self::Request(_) => Some(MessageId::Request),
+            Self::Block { .. } => Some(MessageId::Block),
+            Self::Cancel(_) => Some(MessageId::Cancel),
+        }
+    }
+}
+
 pub(crate) const PROTOCOL_STRING: &str = "BitTorrent protocol";
 
 pub(crate) struct HandshakeCodec;

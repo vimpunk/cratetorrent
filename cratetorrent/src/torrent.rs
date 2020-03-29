@@ -62,7 +62,7 @@ impl SharedStatus {
         let download_len = metainfo.download_len()?;
         let piece_len = metainfo.info.piece_len;
         let last_piece_len =
-            download_len - piece_len as u64 * piece_count as u64;
+            download_len - piece_len as u64 * (piece_count - 1) as u64;
 
         Ok(Self {
             info_hash,

@@ -156,7 +156,7 @@ impl PeerSession {
 
     /// Starts the peer session and returns normally if the download is
     /// complete, or aborts if an error is encountered and the error is
-    /// returned. 
+    /// returned.
     pub async fn start(&mut self) -> Result<()> {
         log::info!("Starting peer {} session", self.addr);
 
@@ -215,7 +215,11 @@ impl PeerSession {
             // downloading so we cannot have piece availability until multiple
             // peer connections or resuming a torrent is implemented)
             self.status.state = State::AvailabilityExchange;
-            log::info!("Peer {} session state: {:?}", self.addr, self.status.state);
+            log::info!(
+                "Peer {} session state: {:?}",
+                self.addr,
+                self.status.state
+            );
 
             // run the session
             self.run(socket).await?;
@@ -238,8 +242,11 @@ impl PeerSession {
         // start receiving and sending messages
         while let Some(msg) = stream.next().await {
             let msg = msg?;
-            log::info!("Received message from peer {}", self.addr);
-            log::debug!("Peer {} message: {:?}", self.addr, msg);
+            log::info!(
+                "Received message {} from peer {:?}",
+                self.addr,
+                msg.id()
+            );
 
             if self.status.state == State::AvailabilityExchange {
                 // handle bitfield message separately as it may only be received
@@ -362,10 +369,12 @@ impl PeerSession {
                     let block_info = BlockInfo::new(piece_index, offset);
                     self.handle_block_msg(block_info, data).await;
 
+                    let missing_piece_count =
+                        self.piece_picker.read().await.count_missing_pieces();
+                    log::debug!("Piece(s) left: {}", missing_piece_count);
+
                     // check if we finished the download with this block
-                    if self.piece_picker.read().await.count_missing_pieces()
-                        == 0
-                    {
+                    if missing_piece_count == 0 {
                         log::info!("Finished torrent download");
                         // TODO: perform more action
                         return Ok(());
@@ -483,6 +492,12 @@ impl PeerSession {
                 for block in blocks.iter() {
                     sink.send(Message::Request(*block)).await?;
                 }
+            } else {
+                log::debug!(
+                    "Could not pick more pieces from peer {}",
+                    self.addr
+                );
+                break;
             }
         }
 
