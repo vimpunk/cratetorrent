@@ -1,35 +1,43 @@
-# cratetorrent design doc
+# Cratetorrent design
 
 This document contains notes on the *current* design of the implementation of
-cratetorrent. It serves as a high-level documentation of the code and
-documenting design decisions that may not be self-evident. It is continuously
-expanded as more features are added. It is important to note that this document
-only reflects the current state of the code and does not include future
-features, unless otherwise noted.
+both the cratetorrent library as well as the CLI cratetorrent binary. It serves
+as a high-level documentation of the code and documenting design decisions that
+may not be self-evident. It is continuously expanded as more features are added.
+It is important to note that this document only reflects the current state of
+the code and does not include future features, unless otherwise noted.
+
+The library can be found in the [`cratetorrent`](./cratetorrent) folder, while
+the binary is in [`cratetorrent-cli`](./cratetorrent-cli). The rationale for
+developing a library and a binary simultaneously is because big emphasis is
+placed on the usability of the cratetorrent library API, and testing the API, as
+it is developed, in a near real world scenario helps to integrate feedback
+immediately.
 
 
 ## Sources
 
 - The official protocol specification: http://bittorrent.org/beps/bep_0003.html
-- My previous torrent engine implementation (in C++): https://github.com/mandreyel/tide
+- My previous torrent engine implementation (in C++), Tide: (https://github.com/mandreyel/tide)
 - The libtorrent blog: https://blog.libtorrent.org/
 
 
 ## Overview
 
-Currently the "engine" is simplified to perform only a download of a single
-file for a single connection. Still, such a simple goal requires quite a few
-components (each detailed in its own section):
+Currently the "engine" is simplified to perform only a download of a single file
+into memory via a single connection. Still, such a simple goal requires quite a
+few components (each detailed in its own section):
 
-- [metainfo](#metainfo), which contains torrent information;
+- [metainfo](#metainfo), which contains necessary information to start the
+  torrent;
 - [disk IO](#disk-io), which saves downloaded file pieces;
-- [torrents](#torrent), which coordinates the download of a torrent;
+- [torrent](#torrent), which coordinates the download of a torrent;
 - a [piece picker](#piece-picker) per torrent, that selects the next piece to
   download;
-- [peer connections](#peer-connection) in a torrent (currently only a single
-  downloader), which implements the peer protocol and performs the actual
+- [peer connection](#peer-connection) in a torrent (currently only a single
+  downloader), which implement the peer protocol and perform the actual
   download;
-- in progress [piece downloads](#piece-download), which tracks the state of an
+- in progress [piece download](#piece-download), which track the state of an
   ongoing piece download.
 
 The binary takes as command line arguments the single seed IP address and port
@@ -45,9 +53,8 @@ A torrent's metadata is described in the metainfo file. Starting a download or
   extract relevant information from it about the torrent and start the
   upload/download. The contents of the metainfo file must be UTF-8 encoded.
 
-However, cratetorrent doesn't currently implement this, so the relevant
-parameters from the metainfo file are passed as _command line arguments_ to the
-test binary.
+There is an easy way to parse metainfo files using the [`serde` bencode
+extension](https://github.com/toby/serde-bencode).
 
 The metainfo is a dictionary of key values. It has the following two top-level
 keys:
@@ -80,20 +87,41 @@ Trackers are not implemented so this is disregarded for now.
     - **`path`**: The UTF-8 encoded full path of the file, relative to the
       download root.
 
+### Torrent info hash
+
+The hash of the torrent is the SHA1 hash of the raw (bencoded) string of the
+metainfo's `info` key's value.
+
+Note that this can be problematic as some metainfo files define fields not
+supported or used by cratetorrent, and currently the way we generate this hash
+is by encoding the parsed metainfo struct again into its raw bencoded
+representation, and this way we may not serialize fields originally present in
+the source metainfo.
+A better approach would be to keep the underlying raw source (as in Tide), but
+  this is not currently possible with the current solution of using `serde`.
+
 
 ## Disk IO
 
-To be added.
+Currently, due to the experimental state of the crate, downloaded blocks are not
+saved to disk. This section is to be added when the functionality is implemented.
 
 
 ## Torrent
 
-- The hash of the torrent is the SHA1 hash of the raw (bencoded) string of the
-  metainfo's `info` key's value.
-- Contains the piece picker and a set of connections (for now only one).
-- Torrent tick: periodically loops through all its peer connections and
-  performs actions like stats collections, later choking/unchoking, resume
-  state saving, and others.
+- Contains the piece picker and a single connection to a seed from which to
+  download the file.
+- Also contains other metadata relevant to the torrent, such as its info hash,
+  the files it needs to download, the destination directory, and others.
+- Torrent tick: periodically loops through all its peer connections and performs
+  actions like stats collections, later choking/unchoking, resume state saving,
+  and others.
+- A peer session is spawned on a new
+  [task](https://docs.rs/tokio/0.2.13/tokio/task), as otherwise we'd enter all
+  sorts of lifetime issues by running the torrent and the peer session in the
+  same task's async loop. More research on this and alternatives needs to be
+  done.
+
 
 ## Piece picker
 
@@ -103,6 +131,13 @@ decision on what piece to pick next. For now though, pieces are downloaded
 sequentially and more complex algorithms will be implemented later (see research
 notes).
 
+The piece picker holds a vector pre-allocated to the number of pieces in the
+torrent and each element in this vector contains metadata about the piece:
+whether we have it or not and its frequency in the swarm.
+
+Later the internal data structures of the piece picker will most likely be
+changed to be more optimal for the rarest-pieces-first algorithm (the default
+defined by the standard).
 
 ## Peer connection
 
@@ -122,9 +157,8 @@ currently only TCP is supported.
 - Download pipeline: downloaders should keep several piece requests queued up
   for optimal throughput rates. This is achieved by sending several piece
     requests at a time and always keeping the optimal number of piece requests
-    outstanding until choked or the download is complete. However, note that
-    this is not implemented at the time, it is only kept here as a note for
-    future implementations.
+    outstanding until choked or the download is complete. See the [download
+    pipeline section](#download-pipeline).
 - The first exchanged message _must_ be the handshake.
 - Apart from the handshake length prefix, all integers are encoded as four bytes
   in big-endian (i.e. multi-byte integers are sent in network order).
@@ -135,11 +169,146 @@ currently only TCP is supported.
   within pieces. This is almost always **2^14 bytes**, or **16 KiB**, some
   clients even rejecting to service requests for piece blocks larger than this
   value.
-- All IO is asynchronous, and there will be two
-[tasks](https://doc.rust-lang.org/std/task/index.html): one for socket read and
-one for socket write. This is necessary as sending and receiving messages is a
-mostly separate operation.
+- All IO is asynchronous, and the "session loop" (that runs the peer session) is
+  going to multiplex several event sources (futures): receiving of messages from
+  peer, saving of a block to disk, updates from owning torrent.
 
+### Startup
+
+1. Connect to TCP socket of peer.
+2. We're in the handshake exchange state.
+3. If this is an outbound connection, start by sending a handshake, otherwise
+   just start receiving and wait for incoming handshake.
+4. Receive handshake, and if it is valid and the torrent info hash checks out,
+   send our own handshake.
+5. The connected peers may now optionally exchange their piece availability.
+6. After this step, peers start exchanging normal messages.
+
+### Download pipeline
+
+After receiving an unchoke message from our seed, we can start making requests.
+In order to download blocks in the fastest way, we always need to keep the
+number of requests outstanding that saturates the link to the peer we're
+downloading from.
+
+From a relevant [libtorrent
+blog post](https://blog.libtorrent.org/2011/11/requesting-pieces/):
+
+> Deciding how many outstanding requests to keep to peers typically is based on
+  the bandwidth delay product, or a simplified model thereof.
+
+> The bandwidth delay product is the bandwidth capacity of a link multiplied by
+  the latency of the link. It represents the number of bytes that fit in the
+  wire and buffers along the path. In order to fully utilize a link, one needs
+  to keep at least the bandwidth delay product worth of bytes outstanding
+  requests at any given time. If fewer bytes than that are kept in outstanding
+  requests, the other end will satisfy all the requests and then have to wait
+  (wasting bandwidth) until it receives more requests.
+
+> If many more requests than the bandwidth delay product is kept outstanding,
+  more blocks than necessary will be marked as requested, and waste potential to
+  request them from other peers, completing a piece sooner. Typically, keeping
+  too few outstanding requests has a much more severe impact on performance than
+  keeping too many.
+
+> On machines running at max disk capacity, the actual disk-job that a request
+  result in may take longer to be satisfied by the drive than the network
+  latency. It’s important to take the disk latency into account, as to not under
+  estimate the latency of the link. i.e. the link could be considered to go all
+  the way down to the disk [...] This is another reason to rather
+  over-estimate the latency of the network connection than to under-estimate it.
+
+> A simple way to determine the number of outstanding block requests to keep to
+  a peer is to take the current download rate (in bytes per second) we see from
+  that peer and divide it by the block size (16 kiB). That assumes the latency
+  of the link to be 1 second.
+> num_pending = download_rate / 0x4000;
+> It might make sense to increase the assumed latency to 1.5 or 2 seconds, in
+  order to take into account the case where the other ends disk latency is the
+  dominant factor. Keep in mind that over-estimating is cheaper than
+  under-estimating.
+
+Based on the above, each peer session needs to maintain an "optimal request
+queue size" value (approximately the bandwidth-delay product), which is the
+number of block requests it keeps outstanding to fully saturate the link.
+
+This value is derived by collecting a running average of the downloaded bytes
+per second, as well as the average request latency, to arrive at the
+bandwidth-delay product B x D. This value is recalculated every time we receive
+a block, in order to always keep the link fully saturated. See
+[wikipedia](https://en.wikipedia.org/wiki/Bandwidth-delay_product) for more.
+
+To emphasize the value of this optimization, let's see a visual example of
+comparing two connections each downloading two blocks on a link with the same
+capacity, where one pair of peers' link is not kept saturated and another pair
+of peers whose is:
+```
+Legend
+------
+R: request
+B: block
+{A,B,C,D}: peers
+
+  A      B        C      D
+R |      |      R |      |
+  |\     |        |\     |
+  | \    |      R | \    |
+  |  \   |        |\ \   |
+  |   \  |        | \ \  |
+  |    \ |        |  \ \ |
+  |     \|        |   \ \|
+  |      | B      |    \ | B
+  |     /|        |     /|
+  |    / |        |    / | B
+  |   /  |        |   / /|
+  |  /   |        |  / / |
+  | /    |        | / /  |
+  |/     |        |/ /   |
+R |      |        | /    |
+  |\     |        |/     |
+  | \    |
+  |  \   |
+  |   \  |
+  |    \ |
+  |     \|
+  |      | B
+  |     /|
+  |    / |
+  |   /  |
+  |  /   |
+  | /    |
+  |/     |
+```
+
+And even from such a simple example as this, it can be concluded as a feature and not
+premature optimization.
+
+What is needed for this to work reliably is timing out requests, but as of this
+writing that is not yet implemented.
+
+For now, though, the download pipeline is set to a fixed size of 4, but this is
+to be added as a separate step under the optimization milestone.
+
+### Session algorithm
+
+A simplified version of the peer session algorithm follows.
+
+1. Connect to peer and send the BitTorrent handshake.
+2. Receive and verify peer's handshake.
+3. Start receiving messages.
+4. Receive peer's bitfield. If the peer didn't send a bitfield, or it doesn't
+   contain all pieces (i.e.  peer is not a seed), we abort the connection as
+   only downloading from seed's are supported.
+5. Tell peer we're interested.
+5. Wait for peer to unchoke us.
+6. From this point on we can start making block requests:
+   1. Fill the request pipeline with the optimal number of requests for blocks
+      from existing and/or new piece downloads.
+   2. Wait for requested blocks.
+   3. Mark requested blocks as received with their corresponding piece download.
+   4. If the piece is complete, mark it as finished with the piece picker.
+   5. After each complete piece, check that we have all pieces. If so, conclude
+      the download, otherwise make more requests and restart.
 
 ### Messages
 
@@ -177,7 +346,7 @@ be accessed at a glance.
 
 #### **`handshake`**
 ```
-<1: len=68>
+<1: prot len=19>
 <19: prot="BitTorrent protocol">
 <8: reserved>
 <20: info hash>
@@ -204,9 +373,9 @@ Only ever sent as the first message after the handshake. The payload of this
 message is a bitfield whose indices represent the file pieces in the torrent and
 is used to tell the other peer which pieces the sender has available (each
 available piece's bitfield value is 1). Byte 0 corresponds to indices 0-7, from
-high bit to low bit, respectively, byte 1 corresponds to indices 8-15, and so
-on. E.g. given the first byte `0b1100'0001` in the bitfield means we have pieces
-0, 1, and 7.
+most significant bit to least significant bit, respectively, byte 1 corresponds
+to indices 8-15, and so on. E.g. given the first byte `0b1100'0001` in the
+bitfield means we have pieces 0, 1, and 7.
 
 If a peer doesn't have any pieces downloaded, they need not send
 this message.
@@ -321,6 +490,6 @@ arrives.
 
 ## Piece download
 
-A piece download tracks the piece completion. It will play an important role in
-  optimizing download performance, but none of that is implemented for now (see
-  research notes).
+A piece download tracks the piece completion of an ongoing piece download. It
+  will play an important role in optimizing download performance, but none of
+  that is implemented for now (see research notes).

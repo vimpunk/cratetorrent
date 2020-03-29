@@ -21,7 +21,17 @@ cratetorrent works correctly with small and large files, with different piece
 sizes and other parameters.
 
 
+## Prerequisites
+
+To run the tests, you first first need to build the `cratetorrent-cli` binary
+and its corresponding docker image. For instructions, see the project readme.
+
+
 ## Single file download
+
+```bash
+./test_single_connection_download.sh
+```
 
 The test [script](test_single_connection_download.sh) creates a local Docker
 network of two BitTorrent peer containers, in which one container runs the well
