@@ -15,14 +15,16 @@ The project is split up in two:
 
 ## How to run
 
-#### Binary
+### Binary
+
 The CLI binary is currently very basic, but you can connect to a seed by
 running the following from the repo root:
 ```
 cargo run --release -p cratetorrent-cli
 ```
 
-#### In Docker
+### In Docker
+
 A Dockerfile is also provided for the CLI. To build the docker image, first
   build the binary (also from the repo root):
 ```
@@ -56,11 +58,18 @@ path of the torrent file mapped into the container.
 2. Extend 1. with actually saving the downloaded file to disk.
 3. Download a directory of files using a single peer connection.
 4. Download a torrent using multiple connections.
-5. Seed a torrent.
+5. Optimize download performance to use self-adjusting optimal request queue
+   sizes and slow start mode for ramping up download throughput.
+6. Seed a torrent.
+7. Optimize disk IO performance by introducing the concept of backpressue
+   between the network IO and disk IO, in both ways (i.e. for both seeds and
+   downloads).
 
 And more milestones to be added later. Eventually, I hope to develop
 cratetorrent into a full-fledged BitTorrent engine library that can be used as
-the engine underneath torrent clients.
+the engine underneath torrent clients, so this means that features supported by
+popular clients (such as DHT, magnet links, BitTorrent protocol 2, stream
+encryption, and others) will be supported by cratetorrent too.
 
 
 ## Tests
@@ -70,10 +79,11 @@ exhaustive suite of unit tests verifying the correctness of each part of the
 code base, defined inline in the Rust source code.
 
 There is also a host of integration tests for verifying the functionality of the
-whole engine, ranging from testing the download of a single file through a single
-connection, through downloading a torrent from several peers, to seeding to
-other peers, stress testing, and others. To see more, please see the
-[integration tests folder](tests).
+whole engine, ranging from testing the download of a single file through a
+single connection, through downloading a torrent from several peers, to seeding
+to other peers, stress testing, and others, added simultaneously with
+functionality added. To see more, please see the [integration tests
+folder](tests).
 
 
 ## Design

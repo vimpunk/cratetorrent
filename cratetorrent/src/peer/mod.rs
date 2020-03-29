@@ -374,6 +374,10 @@ impl PeerSession {
                     log::debug!("Piece(s) left: {}", missing_piece_count);
 
                     // check if we finished the download with this block
+                    //
+                    // TODO: we don't actually need to check this after every
+                    // received block, it's enough to check if a piece has been
+                    // completed
                     if missing_piece_count == 0 {
                         log::info!("Finished torrent download");
                         // TODO: perform more action

@@ -1,4 +1,4 @@
-# cratetorrent design doc
+# Cratetorrent design
 
 This document contains notes on the *current* design of the implementation of
 both the cratetorrent library as well as the CLI cratetorrent binary. It serves
@@ -18,26 +18,26 @@ immediately.
 ## Sources
 
 - The official protocol specification: http://bittorrent.org/beps/bep_0003.html
-- My previous torrent engine implementation (in C++): https://github.com/mandreyel/tide
+- My previous torrent engine implementation (in C++), Tide: (https://github.com/mandreyel/tide)
 - The libtorrent blog: https://blog.libtorrent.org/
 
 
 ## Overview
 
-Currently the "engine" is simplified to perform only a download of a single
-file for a single connection. Still, such a simple goal requires quite a few
-components (each detailed in its own section):
+Currently the "engine" is simplified to perform only a download of a single file
+into memory via a single connection. Still, such a simple goal requires quite a
+few components (each detailed in its own section):
 
 - [metainfo](#metainfo), which contains necessary information to start the
   torrent;
 - [disk IO](#disk-io), which saves downloaded file pieces;
-- [torrents](#torrent), which coordinates the download of a torrent;
+- [torrent](#torrent), which coordinates the download of a torrent;
 - a [piece picker](#piece-picker) per torrent, that selects the next piece to
   download;
-- [peer connections](#peer-connection) in a torrent (currently only a single
-  downloader), which implements the peer protocol and performs the actual
+- [peer connection](#peer-connection) in a torrent (currently only a single
+  downloader), which implement the peer protocol and perform the actual
   download;
-- in progress [piece downloads](#piece-download), which tracks the state of an
+- in progress [piece download](#piece-download), which track the state of an
   ongoing piece download.
 
 The binary takes as command line arguments the single seed IP address and port
@@ -116,6 +116,12 @@ saved to disk. This section is to be added when the functionality is implemented
 - Torrent tick: periodically loops through all its peer connections and performs
   actions like stats collections, later choking/unchoking, resume state saving,
   and others.
+- A peer session is spawned on a new
+  [task](https://docs.rs/tokio/0.2.13/tokio/task), as otherwise we'd enter all
+  sorts of lifetime issues by running the torrent and the peer session in the
+  same task's async loop. More research on this and alternatives needs to be
+  done.
+
 
 ## Piece picker
 
@@ -166,7 +172,6 @@ currently only TCP is supported.
 - All IO is asynchronous, and the "session loop" (that runs the peer session) is
   going to multiplex several event sources (futures): receiving of messages from
   peer, saving of a block to disk, updates from owning torrent.
-
 
 ### Startup
 
@@ -280,6 +285,30 @@ premature optimization.
 
 What is needed for this to work reliably is timing out requests, but as of this
 writing that is not yet implemented.
+
+For now, though, the download pipeline is set to a fixed size of 4, but this is
+to be added as a separate step under the optimization milestone.
+
+### Session algorithm
+
+A simplified version of the peer session algorithm follows.
+
+1. Connect to peer and send the BitTorrent handshake.
+2. Receive and verify peer's handshake.
+3. Start receiving messages.
+4. Receive peer's bitfield. If the peer didn't send a bitfield, or it doesn't
+   contain all pieces (i.e.  peer is not a seed), we abort the connection as
+   only downloading from seed's are supported.
+5. Tell peer we're interested.
+5. Wait for peer to unchoke us.
+6. From this point on we can start making block requests:
+   1. Fill the request pipeline with the optimal number of requests for blocks
+      from existing and/or new piece downloads.
+   2. Wait for requested blocks.
+   3. Mark requested blocks as received with their corresponding piece download.
+   4. If the piece is complete, mark it as finished with the piece picker.
+   5. After each complete piece, check that we have all pieces. If so, conclude
+      the download, otherwise make more requests and restart.
 
 ### Messages
 
