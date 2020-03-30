@@ -151,30 +151,27 @@ impl Torrent {
         self.seed.handle = Some(handle);
 
         // start the torrent update loop
-        let update_loop = async {
-            let mut loop_timer = time::interval(Duration::from_secs(1));
-            let mut prev_instant = None;
-            while let Some(instant) = loop_timer.next().await {
-                // calculate how long torrent has been running
-                //
-                // only deal with std time types
-                let instant = instant.into_std();
-                let elapsed = if let Some(prev_instant) = prev_instant {
-                    instant.saturating_duration_since(prev_instant)
-                } else if let Some(start_time) = self.status.start_time {
-                    instant.saturating_duration_since(start_time)
-                } else {
-                    Duration::default()
-                };
-                self.status.run_duration += elapsed;
-                prev_instant = Some(instant);
+        let mut loop_timer = time::interval(Duration::from_secs(1));
+        let mut prev_instant = None;
+        while let Some(instant) = loop_timer.next().await {
+            // calculate how long torrent has been running
+            //
+            // only deal with std time types
+            let instant = instant.into_std();
+            let elapsed = if let Some(prev_instant) = prev_instant {
+                instant.saturating_duration_since(prev_instant)
+            } else if let Some(start_time) = self.status.start_time {
+                instant.saturating_duration_since(start_time)
+            } else {
+                Duration::default()
+            };
+            self.status.run_duration += elapsed;
+            prev_instant = Some(instant);
 
-                log::debug!(
-                    "Torrent running for {}s",
-                    self.status.run_duration.as_secs()
-                );
-            }
-        };
-        update_loop.await
+            log::debug!(
+                "Torrent running for {}s",
+                self.status.run_duration.as_secs()
+            );
+        }
     }
 }
