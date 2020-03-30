@@ -203,12 +203,12 @@ impl PeerSession {
             // keep the buffer from the original codec as it may contain bytes
             // of any potential message the peer may have sent after the
             // handshake)
-            let parts = socket.into_parts();
-            let mut parts = FramedParts::new(parts.io, PeerCodec);
+            let old_parts = socket.into_parts();
+            let mut new_parts = FramedParts::new(old_parts.io, PeerCodec);
             // reuse buffers of previous codec
-            parts.read_buf = parts.read_buf;
-            parts.write_buf = parts.write_buf;
-            let socket = Framed::from_parts(parts);
+            new_parts.read_buf = old_parts.read_buf;
+            new_parts.write_buf = old_parts.write_buf;
+            let socket = Framed::from_parts(new_parts);
 
             // enter the piece availability exchange state until peer sends a
             // bitfield (we don't send one as we currently only implement
