@@ -125,9 +125,10 @@ pub(crate) struct PeerSession {
     // Note that if a reuest for a piece's block is in this queue, there _must_
     // be a corresponding entry for the piece download in `downloads`.
     //
-    // TODO: Can we store this information in just PieceDownload so that we
-    // don't have to enforce this invariant (keeping in mind that later
-    // PieceDownloads will be shared among PeerSessions)?
+    // TODO(https://github.com/mandreyel/cratetorrent/issues/11): Can we store
+    // this information in just PieceDownload so that we don't have to enforce
+    // this invariant (keeping in mind that later PieceDownloads will be shared
+    // among PeerSessions)?
     outgoing_requests: Vec<BlockInfo>,
     // Information about a peer that is set after a successful handshake.
     peer_info: Option<PeerInfo>,
@@ -275,7 +276,8 @@ impl PeerSession {
 
                     // enter connected state
                     //
-                    // TODO: this needs to be moved out of here once we start
+                    // TODO(https://github.com/mandreyel/cratetorrent/issues/14):
+                    // this needs to be moved out of here once we start
                     // supporting session with other leeches
                     self.status.state = State::Connected;
                     log::info!(
@@ -375,12 +377,11 @@ impl PeerSession {
 
                     // check if we finished the download with this block
                     //
-                    // TODO: we don't actually need to check this after every
-                    // received block, it's enough to check if a piece has been
-                    // completed
+                    // TODO(https://github.com/mandreyel/cratetorrent/issues/13):
+                    // we don't actually need to check this after every received
+                    // block, it's enough to check if a piece has been completed
                     if missing_piece_count == 0 {
                         log::info!("Finished torrent download");
-                        // TODO: perform more action
                         return Ok(());
                     } else {
                         // otherwise we may be able to make more requests now
@@ -389,8 +390,6 @@ impl PeerSession {
                     }
                 }
                 // these messages are not expected until seed functionality is added
-                //
-                // TODO: decide whether to sever connection or not
                 Message::Have { .. } => {
                     log::warn!(
                         "Seed {} sent unexpected message: {:?}",
@@ -532,10 +531,10 @@ impl PeerSession {
                 // block that arrived after peer unchoked us or we
                 // cancelled the request)
                 //
-                // TODO: In the future we could add logic that
-                // accepts blocks within a window after the last
-                // request. If not done, peer could DoS us by
-                // sending unwanted blocks repeatedly.
+                // TODO(https://github.com/mandreyel/cratetorrent/issues/10): In
+                // the future we could add logic that accepts blocks within
+                // a window after the last request. If not done, peer could DoS
+                // us by sending unwanted blocks repeatedly.
                 return;
             }
         };
@@ -553,7 +552,8 @@ impl PeerSession {
         // shouldn't have an entry in `outgoing_requests` without a
         // corresponding entry in `downloads`
         //
-        // TODO: can we handle this without unwrapping?
+        // TODO(https://github.com/mandreyel/cratetorrent/issues/11): can we
+        // handle this without unwrapping?
         debug_assert!(download_pos.is_some());
         let download_pos = download_pos.unwrap();
         let download = &mut self.downloads[download_pos];
@@ -571,8 +571,8 @@ impl PeerSession {
             self.downloads.remove(download_pos);
         }
 
-        // TODO: validate and save the block to disk (this is part
-        // of the next MR)
+        // TODO(https://github.com/mandreyel/cratetorrent/issues/12): validate
+        // and save the block to disk (this is part of the next MR)
 
         // adjust request statistics
         self.status.downloaded_block_bytes_count += block_info.len as u64;
