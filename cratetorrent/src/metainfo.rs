@@ -69,5 +69,6 @@ pub struct File {
 mod tests {
     use super::*;
 
-    // TODO: add metainfo parsing tests
+    // TODO(https://github.com/mandreyel/cratetorrent/issues/8): add metainfo
+    // parsing tests
 }

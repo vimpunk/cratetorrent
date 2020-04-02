@@ -55,13 +55,14 @@ path of the torrent file mapped into the container.
    the address of a seed and the path to the torrent metainfo. No multiple
    torrents, no seeding, no optimizations, or any other feature you might expect
    from a full-fledged BitTorrent library.
-2. Extend 1. with actually saving the downloaded file to disk.
+2. Extend 1. with actually saving the downloaded file to disk after
+   verification.
 3. Download a directory of files using a single peer connection.
 4. Download a torrent using multiple connections.
 5. Optimize download performance to use self-adjusting optimal request queue
    sizes and slow start mode for ramping up download throughput.
 6. Seed a torrent.
-7. Optimize disk IO performance by introducing the concept of backpressue
+7. Optimize disk IO performance by introducing the concept of backpressure
    between the network IO and disk IO, in both ways (i.e. for both seeds and
    downloads).
 

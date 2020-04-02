@@ -70,8 +70,8 @@ impl PiecePicker {
     /// Registers the avilability of a peer's pieces.
     pub fn register_availability(&mut self, pieces: &Bitfield) {
         log::trace!("Registering piece availability: {}", pieces);
-        // TODO: this should possibly not be a debug assert and we should return
-        // an error
+        // TODO(https://github.com/mandreyel/cratetorrent/issues/19): this
+        // should possibly not be a debug assert and we should return an error
         debug_assert!(pieces.len() == self.own_pieces.len());
         for (index, peer_has_piece) in pieces.iter().enumerate() {
             // increase frequency count for this piece if peer has it
@@ -98,8 +98,8 @@ impl PiecePicker {
     /// Registers the avilability of a single new piece of a peer.
     pub fn register_piece_availability(&mut self, index: usize) {
         log::trace!("Registering piece {} availability", index);
-        // TODO: this should possibly not be a debug assert and we should return
-        // an error
+        // TODO(https://github.com/mandreyel/cratetorrent/issues/19): this
+        // should possibly not be a debug assert and we should return an error
         debug_assert!(index < self.own_pieces.len());
         // increase frequency count for this piece
         self.pieces[index].frequency += 1;
@@ -109,8 +109,8 @@ impl PiecePicker {
     /// index.
     pub fn received_piece(&mut self, index: usize) {
         log::trace!("Registering received piece {}", index);
-        // TODO: this should possibly not be a debug assert and we should return
-        // an error
+        // TODO(https://github.com/mandreyel/cratetorrent/issues/19): this
+        // should possibly not be a debug assert and we should return an error
         debug_assert!(index < self.own_pieces.len());
         // register owned piece
         self.own_pieces.set(index, true);

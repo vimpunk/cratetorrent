@@ -40,6 +40,9 @@ impl PieceDownload {
     }
 
     /// Picks the requested number of blocks or fewer, if fewer are remaining.
+    // TODO(https://github.com/mandreyel/cratetorrent/issues/17): place new
+    // requests into an existing buffer to avoid reallocating the vector every
+    // time
     pub fn pick_blocks(&mut self, count: usize) -> Vec<BlockInfo> {
         log::trace!(
             "Picking {} block(s) in piece {} with length {} and {} block(s)",
@@ -63,7 +66,8 @@ impl PieceDownload {
                 *block = Block::Requested;
             }
 
-            // TODO: if we requested block too long ago, time out block
+            // TODO(https://github.com/mandreyel/cratetorrent/issues/18): if we
+            // requested block too long ago, time out block
         }
 
         log::trace!(
@@ -80,8 +84,9 @@ impl PieceDownload {
     pub fn received_block(&mut self, block: BlockInfo) {
         log::trace!("Received piece {} block {:?}", self.index, block);
 
-        // TODO: this information is sanitized in PeerSession but maybe we want
-        // to return a Result anyway
+        // TODO(https://github.com/mandreyel/cratetorrent/issues/16): this
+        // information is sanitized in PeerSession but maybe we want to return
+        // a Result anyway
         debug_assert_eq!(block.piece_index, self.index);
         debug_assert!(block.offset < self.len);
         debug_assert!(block.len <= self.len);
@@ -91,13 +96,15 @@ impl PieceDownload {
 
         self.blocks[block.index()] = Block::Received;
 
-        // TODO: record rount trip time for this block
+        // TODO(https://github.com/mandreyel/cratetorrent/issues/9): record
+        // rount trip time for this block
     }
 
     /// Returns the number of free (pickable) blocks.
     pub fn count_missing_blocks(&self) -> usize {
-        // TODO: we could optimize this by caching this value in a
-        // `count_missing_blocks` field in self that is updated in pick_blocks
+        // TODO(https://github.com/mandreyel/cratetorrent/issues/15): we could
+        // optimize this by caching this value in a `count_missing_blocks` field
+        // in self that is updated in pick_blocks
         self.blocks
             .iter()
             .filter(|b| matches!(b, Block::Free | Block::Requested))
