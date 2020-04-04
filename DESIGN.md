@@ -103,8 +103,14 @@ A better approach would be to keep the underlying raw source (as in Tide), but
 
 ## Disk IO
 
-Currently, due to the experimental state of the crate, downloaded blocks are not
-saved to disk. This section is to be added when the functionality is implemented.
+- Allocate torrent storage at torrent start. Use sparse files?
+- Save single full file to disk.
+- Hash each piece before saving to disk.
+- Return hashing result to peer session: if bad, abort connection.
+- Keep blocks of an unhashed piece in a write buffer and write to file only
+  pieces; done primarily to ease hashing not as a disk IO optimization.
+- The design is greatly simplified by the fact that we're currently sequentially
+  downloading all torrents, so for now disk IO can rely on this.
 
 
 ## Torrent

@@ -1,6 +1,7 @@
 #[macro_use]
 extern crate serde_derive;
 
+mod disk;
 mod download;
 pub mod error;
 pub mod metainfo;
@@ -56,7 +57,7 @@ impl BlockInfo {
 
     /// Returns the index of the block within its piece.
     pub fn index(&self) -> usize {
-        self.offset as usize / BLOCK_LEN as usize
+        self.offset as usize / self.len as usize
     }
 }
 
@@ -68,7 +69,7 @@ pub(crate) fn block_count(piece_len: u32) -> usize {
     (piece_len as usize + (BLOCK_LEN as usize - 1)) / BLOCK_LEN as usize
 }
 
-/// Connect to a single seed and download the torrent.
+/// Connects to a single seed and downloads the torrent or aborts on error.
 pub fn run_torrent(
     client_id: PeerId,
     metainfo: Metainfo,
