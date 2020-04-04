@@ -1,3 +1,4 @@
+use crate::disk::Disk;
 use crate::error::*;
 use crate::metainfo::Metainfo;
 use crate::peer::PeerSession;
@@ -107,6 +108,9 @@ pub(crate) struct Torrent {
     // as pieces in the torrent swarm (more relevant when more peers are added),
     // and using this knowledge which piece to pick next.
     piece_picker: Arc<RwLock<PiecePicker>>,
+    // The entity used to save downloaded file blocks to disk and a shared copy
+    // is passed to peer session.
+    disk: Arc<Disk>,
 }
 
 impl Torrent {
@@ -125,6 +129,9 @@ impl Torrent {
         let piece_picker = PiecePicker::new(metainfo.piece_count());
         let piece_picker = Arc::new(RwLock::new(piece_picker));
 
+        let disk = Disk::new();
+        let disk = Arc::new(disk);
+
         Ok(Self {
             seed: Peer {
                 addr: seed_addr,
@@ -132,6 +139,7 @@ impl Torrent {
             },
             status,
             piece_picker,
+            disk,
         })
     }
 
@@ -145,6 +153,7 @@ impl Torrent {
         let mut session = PeerSession::outbound(
             Arc::clone(&self.status.shared),
             Arc::clone(&self.piece_picker),
+            Arc::clone(&self.disk),
             self.seed.addr,
         );
         let handle = task::spawn(async move { session.start().await });
