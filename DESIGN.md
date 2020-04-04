@@ -101,18 +101,6 @@ A better approach would be to keep the underlying raw source (as in Tide), but
   this is not currently possible with the current solution of using `serde`.
 
 
-## Disk IO
-
-- Allocate torrent storage at torrent start. Use sparse files?
-- Save single full file to disk.
-- Hash each piece before saving to disk.
-- Return hashing result to peer session: if bad, abort connection.
-- Keep blocks of an unhashed piece in a write buffer and write to file only
-  pieces; done primarily to ease hashing not as a disk IO optimization.
-- The design is greatly simplified by the fact that we're currently sequentially
-  downloading all torrents, so for now disk IO can rely on this.
-
-
 ## Torrent
 
 - Contains the piece picker and a single connection to a seed from which to
@@ -127,6 +115,41 @@ A better approach would be to keep the underlying raw source (as in Tide), but
   sorts of lifetime issues by running the torrent and the peer session in the
   same task's async loop. More research on this and alternatives needs to be
   done.
+- Communication with peer sessions would happen through `tokio`'s `mpsc` queues,
+  since a peer session is spawned on a task which may be run by a different
+  thread on which torrent is executing
+
+
+## Disk IO
+
+- Allocate torrent storage at torrent start. Use sparse files?
+- Purpose saves single full file to disk by torrent pieces.
+- Hash each piece before saving to disk.
+- Return hashing result to torrent and then to peer session: if bad, abort
+  connection.
+- Keep blocks of an unhashed piece in a write buffer and write to file only
+  pieces; done primarily to ease hashing not as a disk IO optimization (which is
+  a later step).
+- Even though we're currently sequentially
+  downloading all torrents, disk IO can't rely on this because even though we're
+  requesting blocks sequentially, the peer is not required to send the requested
+  batch in order (which may occur due to download pipelining, see below).
+- Each block write is highly asynchronous, not just due to using `tokio_fs`, but
+  because blocks may or may not be written to disk immediately. Block write is
+  not an `async` function, however: the result is communicated to Torrent via
+  a `tokio` `mpsc` channel. This is because it simplifies the design and solves
+  ownership and various type issues.
+
+Saving the blocks in a piece:
+1. Peer session requests n blocks from peer.
+2. For each received block, `Disk::save_block` is called which instructs `Disk`
+   to place the block in the write buffer.
+3. Once piece has all blocks in it, it is hashed and, if the hash matches the
+   expected hash, saved to disk.
+4. The block write and optionally the hash result is communicated back to
+   torrent via a channel.
+5. Torrent receives this message, processes it, and forwards it to the peer
+   session.
 
 
 ## Piece picker

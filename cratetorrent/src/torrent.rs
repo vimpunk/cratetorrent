@@ -1,16 +1,26 @@
-use crate::disk::Disk;
-use crate::error::*;
-use crate::metainfo::Metainfo;
-use crate::peer::PeerSession;
-use crate::piece_picker::PiecePicker;
-use crate::{PeerId, Sha1Hash};
-use futures::StreamExt;
-use std::convert::TryInto;
-use std::net::SocketAddr;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
-use tokio::sync::RwLock;
-use tokio::{task, time};
+use {
+    crate::{
+        disk::{self, Disk},
+        error::*,
+        metainfo::Metainfo,
+        peer::PeerSession,
+        piece_picker::PiecePicker,
+        {PeerId, Sha1Hash},
+    },
+    futures::StreamExt,
+    std::{
+        convert::TryInto,
+        net::SocketAddr,
+        sync::Arc,
+        time::{Duration, Instant},
+    },
+    tokio::{
+        sync::{
+            RwLock,
+        },
+        task, time,
+    },
+};
 
 // Status information of a torrent.
 struct Status {
@@ -111,6 +121,9 @@ pub(crate) struct Torrent {
     // The entity used to save downloaded file blocks to disk and a shared copy
     // is passed to peer session.
     disk: Arc<Disk>,
+    // The port on which we're receiving disk IO notifications of block write
+    // and piece completion.
+    disk_io_notify_port: disk::Receiver,
 }
 
 impl Torrent {
@@ -129,7 +142,13 @@ impl Torrent {
         let piece_picker = PiecePicker::new(metainfo.piece_count());
         let piece_picker = Arc::new(RwLock::new(piece_picker));
 
-        let disk = Disk::new();
+        let (disk, disk_io_notify_port) = Disk::new(
+            metainfo.info.pieces,
+            status.shared.piece_count,
+            status.shared.piece_len,
+            status.shared.last_piece_len,
+            status.shared.download_len,
+        );
         let disk = Arc::new(disk);
 
         Ok(Self {
@@ -140,6 +159,7 @@ impl Torrent {
             status,
             piece_picker,
             disk,
+            disk_io_notify_port,
         })
     }
 

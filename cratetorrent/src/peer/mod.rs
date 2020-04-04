@@ -250,11 +250,16 @@ impl PeerSession {
         // start receiving messages
         while let Some(msg) = stream.next().await {
             let msg = msg?;
+            log::debug!(
+                "Received message {} from peer {:?}",
+                self.addr,
+                msg.id()
+            );
 
             // handle bitfield message separately as it may only be received
             // directly after the handshake (later once we implement the FAST
-            // extension, there will be other piece availability related messages to
-            // handle)
+            // extension, there will be other piece availability related
+            // messages to handle)
             if self.status.state == State::AvailabilityExchange {
                 if let Message::Bitfield(bitfield) = msg {
                     self.handle_bitfield_msg(&mut sink, bitfield).await?;
@@ -333,9 +338,6 @@ impl PeerSession {
         sink: &mut SplitSink<Framed<TcpStream, PeerCodec>, Message>,
         msg: Message,
     ) -> Result<()> {
-        log::info!("Received message {} from peer {:?}", self.addr, msg.id());
-
-        // handle rest of the protocol messages
         match msg {
             Message::Bitfield(_) => {
                 log::info!(
@@ -593,6 +595,7 @@ impl PeerSession {
 
         // TODO(https://github.com/mandreyel/cratetorrent/issues/12): validate
         // and save the block to disk (this is part of the next MR)
+        //self.disk.save_block(block_info, data)
 
         // adjust request statistics
         self.status.downloaded_block_bytes_count += block_info.len as u64;
