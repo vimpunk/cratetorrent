@@ -394,7 +394,7 @@ impl PeerSession {
                 }
 
                 let block_info = BlockInfo::new(piece_index, offset);
-                self.handle_block_msg(block_info, data).await;
+                self.handle_block_msg(block_info, data).await?;
 
                 let missing_piece_count =
                     self.piece_picker.read().await.count_missing_pieces();
@@ -532,7 +532,11 @@ impl PeerSession {
     // Verifies block validity, registers the download (and finishes a piece
     // download if this was the last missing block in piece) and updates
     // statistics about the download.
-    async fn handle_block_msg(&mut self, block_info: BlockInfo, data: Vec<u8>) {
+    async fn handle_block_msg(
+        &mut self,
+        block_info: BlockInfo,
+        data: Vec<u8>,
+    ) -> Result<()> {
         log::info!("Peer {} sent block: {:?}", self.addr, block_info);
 
         // find block in the list of pending requests
@@ -557,7 +561,7 @@ impl PeerSession {
                 // the future we could add logic that accepts blocks within
                 // a window after the last request. If not done, peer could DoS
                 // us by sending unwanted blocks repeatedly.
-                return;
+                return Ok(());
             }
         };
 
@@ -595,9 +599,11 @@ impl PeerSession {
 
         // TODO(https://github.com/mandreyel/cratetorrent/issues/12): validate
         // and save the block to disk (this is part of the next MR)
-        //self.disk.save_block(block_info, data)
+        self.disk.save_block(block_info, data).await?;
 
         // adjust request statistics
         self.status.downloaded_block_bytes_count += block_info.len as u64;
+
+        Ok(())
     }
 }

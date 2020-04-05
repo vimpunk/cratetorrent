@@ -7,20 +7,134 @@ use {
         piece_picker::PiecePicker,
         {PeerId, Sha1Hash},
     },
-    futures::StreamExt,
+    futures::{
+        select,
+        stream::{Fuse, StreamExt},
+    },
     std::{
         convert::TryInto,
         net::SocketAddr,
         sync::Arc,
         time::{Duration, Instant},
     },
-    tokio::{
-        sync::{
-            RwLock,
-        },
-        task, time,
-    },
+    tokio::{sync::RwLock, task, time},
 };
+
+pub(crate) struct Torrent {
+    seed: Peer,
+    // General status and information about the torrent.
+    status: Status,
+    // This is passed to peer and tracks the availability of our pieces as well
+    // as pieces in the torrent swarm (more relevant when more peers are added),
+    // and using this knowledge which piece to pick next.
+    piece_picker: Arc<RwLock<PiecePicker>>,
+    // The entity used to save downloaded file blocks to disk and a shared copy
+    // is passed to peer session.
+    disk: Arc<Disk>,
+    // The port on which we're receiving disk IO notifications of block write
+    // and piece completion.
+    disk_io_notify_port: Fuse<disk::Receiver>,
+}
+
+impl Torrent {
+    /// Creates a new `Torrent` instance.
+    pub fn new(
+        client_id: PeerId,
+        metainfo: Metainfo,
+        seed_addr: SocketAddr,
+    ) -> Result<Self> {
+        let status = Status {
+            shared: Arc::new(SharedStatus::new(client_id, &metainfo)?),
+            start_time: None,
+            run_duration: Duration::default(),
+        };
+
+        let piece_picker = PiecePicker::new(metainfo.piece_count());
+        let piece_picker = Arc::new(RwLock::new(piece_picker));
+
+        let (disk, disk_io_notify_port) = Disk::new(
+            metainfo.info.pieces,
+            status.shared.piece_count,
+            status.shared.piece_len,
+            status.shared.last_piece_len,
+            status.shared.download_len,
+        );
+        let disk = Arc::new(disk);
+        let disk_io_notify_port = disk_io_notify_port.fuse();
+
+        Ok(Self {
+            seed: Peer {
+                addr: seed_addr,
+                handle: None,
+            },
+            status,
+            piece_picker,
+            disk,
+            disk_io_notify_port,
+        })
+    }
+
+    pub async fn start(&mut self) {
+        log::info!("Starting torrent");
+
+        // record the torrent starttime
+        self.status.start_time = Some(Instant::now());
+
+        // start the seed peer session
+        let mut session = PeerSession::outbound(
+            Arc::clone(&self.status.shared),
+            Arc::clone(&self.piece_picker),
+            Arc::clone(&self.disk),
+            self.seed.addr,
+        );
+        let handle = task::spawn(async move { session.start().await });
+        self.seed.handle = Some(handle);
+
+        let mut loop_timer = time::interval(Duration::from_secs(1)).fuse();
+        let mut prev_instant = None;
+
+        // the torrent loop is triggered every second by the loop timer and by
+        // disk IO events
+        loop {
+            select! {
+                instant = loop_timer.select_next_some() => {
+                    // calculate how long torrent has been running
+                    //
+                    // only deal with std time types
+                    let instant = instant.into_std();
+                    let elapsed = if let Some(prev_instant) = prev_instant {
+                        instant.saturating_duration_since(prev_instant)
+                    } else if let Some(start_time) = self.status.start_time {
+                        instant.saturating_duration_since(start_time)
+                    } else {
+                        Duration::default()
+                    };
+                    self.status.run_duration += elapsed;
+                    prev_instant = Some(instant);
+
+                    log::debug!(
+                        "Torrent running for {}s",
+                        self.status.run_duration.as_secs()
+                    );
+                }
+                write_result = self.disk_io_notify_port.select_next_some() => {
+                    log::debug!("Disk message {:?}", write_result);
+                }
+            }
+        }
+    }
+}
+
+// A peer in the torrent.
+struct Peer {
+    // The address of a single peer this torrent donwloads the file from. This
+    // peer has to be a seed as currently we only support downloading and no
+    // seeding.
+    addr: SocketAddr,
+    // The join handle to the peer session task. This is set when the session is
+    // started.
+    handle: Option<task::JoinHandle<Result<()>>>,
+}
 
 // Status information of a torrent.
 struct Status {
@@ -95,112 +209,6 @@ impl SharedStatus {
         } else {
             log::error!("Piece {} is invalid for torrent: {:?}", index, self);
             Err(Error::InvalidPieceIndex)
-        }
-    }
-}
-
-// A peer in the torrent.
-struct Peer {
-    // The address of a single peer this torrent donwloads the file from. This
-    // peer has to be a seed as currently we only support downloading and no
-    // seeding.
-    addr: SocketAddr,
-    // The join handle to the peer session task. This is set when the session is
-    // started.
-    handle: Option<task::JoinHandle<Result<()>>>,
-}
-
-pub(crate) struct Torrent {
-    seed: Peer,
-    // General status and information about the torrent.
-    status: Status,
-    // This is passed to peer and tracks the availability of our pieces as well
-    // as pieces in the torrent swarm (more relevant when more peers are added),
-    // and using this knowledge which piece to pick next.
-    piece_picker: Arc<RwLock<PiecePicker>>,
-    // The entity used to save downloaded file blocks to disk and a shared copy
-    // is passed to peer session.
-    disk: Arc<Disk>,
-    // The port on which we're receiving disk IO notifications of block write
-    // and piece completion.
-    disk_io_notify_port: disk::Receiver,
-}
-
-impl Torrent {
-    /// Creates a new `Torrent` instance.
-    pub fn new(
-        client_id: PeerId,
-        metainfo: Metainfo,
-        seed_addr: SocketAddr,
-    ) -> Result<Self> {
-        let status = Status {
-            shared: Arc::new(SharedStatus::new(client_id, &metainfo)?),
-            start_time: None,
-            run_duration: Duration::default(),
-        };
-
-        let piece_picker = PiecePicker::new(metainfo.piece_count());
-        let piece_picker = Arc::new(RwLock::new(piece_picker));
-
-        let (disk, disk_io_notify_port) = Disk::new(
-            metainfo.info.pieces,
-            status.shared.piece_count,
-            status.shared.piece_len,
-            status.shared.last_piece_len,
-            status.shared.download_len,
-        );
-        let disk = Arc::new(disk);
-
-        Ok(Self {
-            seed: Peer {
-                addr: seed_addr,
-                handle: None,
-            },
-            status,
-            piece_picker,
-            disk,
-            disk_io_notify_port,
-        })
-    }
-
-    pub async fn start(&mut self) {
-        log::info!("Starting torrent");
-
-        // record the torrent starttime
-        self.status.start_time = Some(Instant::now());
-
-        // start the seed peer session
-        let mut session = PeerSession::outbound(
-            Arc::clone(&self.status.shared),
-            Arc::clone(&self.piece_picker),
-            Arc::clone(&self.disk),
-            self.seed.addr,
-        );
-        let handle = task::spawn(async move { session.start().await });
-        self.seed.handle = Some(handle);
-
-        // start the torrent update loop
-        let mut loop_timer = time::interval(Duration::from_secs(1));
-        let mut prev_instant = None;
-        while let Some(instant) = loop_timer.next().await {
-            // calculate how long torrent has been running
-            //
-            // only deal with std time types
-            let instant = instant.into_std();
-            let elapsed = if let Some(prev_instant) = prev_instant {
-                instant.saturating_duration_since(prev_instant)
-            } else if let Some(start_time) = self.status.start_time {
-                instant.saturating_duration_since(start_time)
-            } else {
-                Duration::default()
-            };
-            self.status.run_duration += elapsed;
-            prev_instant = Some(instant);
-
-            log::debug!(
-                "Torrent running for {}s",
-                self.status.run_duration.as_secs()
-            );
         }
     }
 }
