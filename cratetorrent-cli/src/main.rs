@@ -1,7 +1,8 @@
-use clap::{App, Arg};
-use cratetorrent::metainfo::*;
-use cratetorrent::run_torrent;
-use std::fs;
+use {
+    clap::{App, Arg},
+    cratetorrent::{metainfo::*, run_torrent},
+    std::{fs, path::PathBuf},
+};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
@@ -25,6 +26,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .help("The path to the torrent metainfo file")
                 .takes_value(true),
         )
+        .arg(
+            Arg::with_name("download-dir")
+                .short("d")
+                .long("download-dir")
+                .value_name("PATH")
+                .help("The path of the folder where to download file")
+                .takes_value(true),
+        )
         .get_matches();
 
     // parse cli args
@@ -35,6 +44,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let metainfo_path = matches
         .value_of("metainfo")
         .ok_or_else(|| "--seed must be set")?;
+    let download_dir: PathBuf = matches
+        .value_of("download-dir")
+        .ok_or_else(|| "--download-dir must be set")?
+        .into();
 
     // read in torrent metainfo
     let metainfo = fs::read(metainfo_path)?;
@@ -48,7 +61,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut client_id = [0; 20];
     client_id.copy_from_slice(CLIENT_ID.as_bytes());
 
-    run_torrent(client_id, metainfo, seed)?;
+    run_torrent(client_id, &download_dir, metainfo, seed)?;
 
     Ok(())
 }

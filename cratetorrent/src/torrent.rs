@@ -14,6 +14,7 @@ use {
     std::{
         convert::TryInto,
         net::SocketAddr,
+        path::Path,
         sync::Arc,
         time::{Duration, Instant},
     },
@@ -39,6 +40,7 @@ pub(crate) struct Torrent {
 impl Torrent {
     /// Creates a new `Torrent` instance.
     pub fn new(
+        download_dir: &Path,
         client_id: PeerId,
         metainfo: Metainfo,
         seed_addr: SocketAddr,
@@ -52,13 +54,15 @@ impl Torrent {
         let piece_picker = PiecePicker::new(metainfo.piece_count());
         let piece_picker = Arc::new(RwLock::new(piece_picker));
 
+        let download_path = download_dir.join(metainfo.info.name);
         let (disk, disk_io_notify_port) = Disk::new(
+            download_path,
             metainfo.info.pieces,
             status.shared.piece_count,
             status.shared.piece_len,
             status.shared.last_piece_len,
             status.shared.download_len,
-        );
+        )?;
         let disk = Arc::new(disk);
         let disk_io_notify_port = disk_io_notify_port.fuse();
 

@@ -19,10 +19,20 @@ seed_cont_name=transmission
 
 metainfo_path="$(pwd)/assets/1mb-test.txt.torrent"
 metainfo_cont_path=/cratetorrent/1mb-test.txt.torrent
+download_dir=/tmp/cratetorrent
+download_cont_dir=/tmp/cratetorrent
 
 if [ ! -f "${metainfo_path}" ]; then
     echo "Metainfo at ${metainfo_path} not found"
     exit 1
+fi
+
+if [ ! -d "${download_dir}" ]; then
+    echo "Creating download directory ${download_dir}"
+    mkdir -p "${download_dir}"
+elif [ -f "${download_dir}" ]; then
+    echo "File found at download directory path ${download_dir}"
+    exit 2
 fi
 
 # start seed container if it isn't running
@@ -50,8 +60,10 @@ docker run \
     -ti \
     --env SEED="${seed_addr}" \
     --env METAINFO_PATH="${metainfo_cont_path}" \
+    --env DOWNLOAD_DIR="${download_cont_dir}" \
     --env RUST_LOG=cratetorrent=trace,cratetorrent_cli=trace \
     --mount type=bind,src="${metainfo_path}",dst="${metainfo_cont_path}" \
+    --mount type=bind,src="${download_dir}",dst="${download_cont_dir}" \
     cratetorrent-cli
 
 # TODO

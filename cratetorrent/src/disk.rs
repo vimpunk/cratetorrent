@@ -1,7 +1,12 @@
 use {
     crate::{block_count, error::*, BlockInfo, Sha1Hash},
     sha1::{Digest, Sha1},
-    std::collections::{BTreeMap, HashMap},
+    std::{
+        collections::{BTreeMap, HashMap},
+        fs::{File, OpenOptions},
+        io::{IoSlice, Write},
+        path::PathBuf,
+    },
     tokio::{
         sync::{
             mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
@@ -11,7 +16,7 @@ use {
     },
 };
 
-// The type of channel used to notify a torrent that some blocks was written to
+// The type of channel used to notify a torrent that some blocks were written to
 // disk.
 type Sender = UnboundedSender<WriteResult>;
 
@@ -40,24 +45,25 @@ impl Disk {
     /// Creates a new `Disk` instance for a specific torrent and returns itself
     /// and a receiver on which the torrent can be notified of disk IO updates.
     pub fn new(
+        path: PathBuf,
         piece_hashes: Vec<u8>,
         piece_count: usize,
         piece_len: u32,
         last_piece_len: u32,
         download_len: u64,
-    ) -> (Self, Receiver) {
+    ) -> Result<(Self, Receiver)> {
         let (notify_chan, notify_port) = unbounded_channel();
-        let torrent = Torrent {
+        let torrent = Torrent::new(
+            path,
             notify_chan,
-            pieces: HashMap::new(),
             piece_hashes,
             piece_count,
             piece_len,
             last_piece_len,
             download_len,
-        };
+        )?;
         let torrent = RwLock::new(torrent);
-        (Self { torrent }, notify_port)
+        Ok((Self { torrent }, notify_port))
     }
 
     /// Queues a block for eventual saving to disk.
@@ -83,6 +89,11 @@ impl Disk {
 // Contains the in-progress pieces (i.e. the write buffer), metadata about
 // torrent's download and piece sizes, etc.
 struct Torrent {
+    // The path of the in-progress download file. This is the same as the
+    // `final_path`, except the extension is changed to '.part'.
+    part_path: PathBuf,
+    // The path that will begiven to the fully downloaded file.
+    final_path: PathBuf,
     // The channel used to notify a torrent that a block has been written to
     // disk and/or a piece was completed.
     notify_chan: Sender,
@@ -108,6 +119,37 @@ struct Torrent {
 }
 
 impl Torrent {
+    fn new(
+        final_path: PathBuf,
+        notify_chan: Sender,
+        piece_hashes: Vec<u8>,
+        piece_count: usize,
+        piece_len: u32,
+        last_piece_len: u32,
+        download_len: u64,
+    ) -> Result<Self> {
+        let part_path = final_path.with_extension("part");
+        // TODO: part path can exist once we support continuing downloads
+        if final_path.exists() || part_path.exists() {
+            return Err(Error::InvalidDownloadPath);
+        }
+
+        // create the part file
+        File::create(&part_path)?;
+
+        Ok(Self {
+            final_path,
+            part_path,
+            notify_chan,
+            pieces: HashMap::new(),
+            piece_hashes,
+            piece_count,
+            piece_len,
+            last_piece_len,
+            download_len,
+        })
+    }
+
     fn save_block(&mut self, info: BlockInfo, data: Vec<u8>) -> Result<()> {
         if !self.pieces.contains_key(&info.piece_index) {
             self.start_new_piece(info)?;
@@ -125,6 +167,7 @@ impl Torrent {
             let piece = self.pieces.remove(&info.piece_index).unwrap();
 
             let notify_chan = self.notify_chan.clone();
+            let part_path = self.part_path.clone();
 
             // don't block the reactor with the potentially expensive hashing
             task::spawn_blocking(move || {
@@ -135,7 +178,18 @@ impl Torrent {
                 let hash = hasher.result();
                 let expected_hash = piece.expected_hash;
 
-                // TODO: save piece to disk
+                // save piece to disk
+                let block_slices: Vec<_> = piece
+                    .blocks
+                    .values()
+                    .map(|b| IoSlice::new(&b[..]))
+                    .collect();
+                let mut file =
+                    OpenOptions::new().append(true).open(&part_path)?;
+                let mut written = 0;
+                while written < piece.len as usize {
+                    written += file.write_vectored(&block_slices)?;
+                }
 
                 let blocks = piece
                     .blocks

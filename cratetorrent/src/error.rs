@@ -14,6 +14,10 @@ pub enum Error {
     Disk,
     /// The block length is not 4 KiB.
     InvalidBlockLength,
+    /// The torrent download location is not valid.
+    // TODO: consider adding more variations (path exists, doesn't exist,
+    // permission issues)
+    InvalidDownloadPath,
     /// The torrent metainfo is not valid.
     InvalidMetainfo,
     /// Peer's torrent info hash did not match ours.

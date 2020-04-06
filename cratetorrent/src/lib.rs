@@ -9,12 +9,14 @@ mod peer;
 mod piece_picker;
 mod torrent;
 
-use bitvec::prelude::{BitVec, Msb0};
-use error::*;
-use metainfo::Metainfo;
-use std::net::SocketAddr;
-use tokio::runtime::Runtime;
-use torrent::Torrent;
+use {
+    bitvec::prelude::{BitVec, Msb0},
+    error::*,
+    metainfo::Metainfo,
+    std::{net::SocketAddr, path::Path},
+    tokio::runtime::Runtime,
+    torrent::Torrent,
+};
 
 pub type PeerId = [u8; 20];
 pub type Sha1Hash = [u8; 20];
@@ -72,11 +74,13 @@ pub(crate) fn block_count(piece_len: u32) -> usize {
 /// Connects to a single seed and downloads the torrent or aborts on error.
 pub fn run_torrent(
     client_id: PeerId,
+    download_dir: &Path,
     metainfo: Metainfo,
     seed_addr: SocketAddr,
 ) -> Result<()> {
     let mut rt = Runtime::new()?;
-    let mut torrent = Torrent::new(client_id, metainfo, seed_addr)?;
+    let mut torrent =
+        Torrent::new(download_dir, client_id, metainfo, seed_addr)?;
     let torrent_fut = torrent.start();
     rt.block_on(torrent_fut);
     Ok(())
