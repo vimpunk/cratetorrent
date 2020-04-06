@@ -11,7 +11,7 @@ use {
     },
 };
 
-// The type of channel used to notify a torrent that a block was written to
+// The type of channel used to notify a torrent that some blocks was written to
 // disk.
 type Sender = UnboundedSender<WriteResult>;
 
@@ -19,17 +19,12 @@ type Sender = UnboundedSender<WriteResult>;
 /// completions.
 pub(crate) type Receiver = UnboundedReceiver<WriteResult>;
 
-/// Type returned on each successful block write.
+/// Type returned on each successful batch of blocks written to disk.
 #[derive(Debug)]
 pub(crate) struct WriteResult {
-    /// The info of the block that was written.
-    ///
-    /// This is included here as there are usually multiple in-progress block
-    /// writes at any given time for a download session so the future returned
-    /// by the block wirte method is usually placed in some sort of container
-    /// (`FuturesUnordered`), this helps to identify which block has been
-    /// written to disk.
-    pub info: BlockInfo,
+    /// The indices of the blocks in the piece that were written to the disk in
+    /// this batch.
+    pub blocks: Vec<usize>,
     /// This field is set for the block write that completes the piece and
     /// contains whether the downloaded piece's hash matches its expected hash.
     pub is_piece_valid: Option<bool>,
@@ -138,40 +133,21 @@ impl Torrent {
                     hasher.input(&block);
                 }
                 let hash = hasher.result();
-
                 let expected_hash = piece.expected_hash;
 
                 // TODO: save piece to disk
 
-                let blocks = piece.blocks.values();
-
-                // notify torrent of each block before the last one that has
-                // been written to disk
-                for (offset, _) in blocks.take(piece.blocks.len() - 1).enumerate() {
-                    let info = BlockInfo::new(info.piece_index, offset as u32);
-                    notify_chan
-                        .send(WriteResult {
-                            info,
-                            is_piece_valid: None,
-                        })
-                        .map_err(|e| {
-                            log::error!(
-                                "Error sending disk notification to torrent: {}",
-                                e
-                            );
-                            Error::Disk
-                        })?;
-                }
-
-                // Finally, notify torrent of the last block in piece that also
-                // contains the piece result. This is so that torrent need only
-                // handle a piece completion event once, but later we should
-                // make this more robust as later piece completions may not
-                // always be in order.
+                let blocks = piece
+                    .blocks
+                    .values()
+                    .enumerate()
+                    .map(|(offset, _)| offset)
+                    .collect();
                 let is_piece_valid = Some(hash.as_slice() == expected_hash);
+
                 notify_chan
                     .send(WriteResult {
-                        info,
+                        blocks,
                         is_piece_valid,
                     })
                     .map_err(|e| {
