@@ -122,8 +122,109 @@ A better approach would be to keep the underlying raw source (as in Tide), but
 
 ## Disk IO
 
-- Allocate torrent storage at torrent start. Use sparse files?
-- Purpose saves single full file to disk by torrent pieces.
+This entity, called `Disk` in the code, is responsible for everything disk
+storage related. This includes:
+- allocating a torrent's files at download start;
+- hashing downloaded file pieces and saving them to disk;
+- once seeding functionality is implemented: reading blocks from disk.
+
+### Torrent file allocation
+
+Currently only a single file download is supported, so the file allocation is
+very simple: the to-be-downloaded file is truncated to its desired length at the
+destination path, and given the `.part` suffix, denoting a not yet downloaded
+file. Once the file is downloaded, the suffix is removed.
+
+### Saving to disk
+
+The primary purpose of `Disk` right now is to buffer downloaded blocks in memory
+until the piece is complete, hash the piece, notify torrent of the result, and,
+if the resulting hash matches the expected one, save to disk.
+
+Efficiency is key here; a torrent application is twofold IO bound: on disk
+and on the network. To achieve the fastest download given a fixed network
+bandwidth is to buffer the whole download in memory and write a file to disk in
+one go, i.e. to not produce backpressure in disk for the download.
+
+However, this is not practical in most cases. For one, the download host may be
+shut down which would lead to the loss of the existing downloaded data. The
+other reason is the desire to constrain memory usage as the user may not have
+enough RAM to buffer an entire download or even if they do, they would likely
+wish other programs to run in parallel.
+
+For these reasons cratetortent will be highly configurable to serve all needs,
+but will aim to provide sane, good enough defaults for most use cases. For now,
+though, the implementation is very simple: we download sequentially, and buffer
+blocks of a piece until the piece is complete, after which that piece is flushed
+to disk. The rationale for saving a piece to disk as soon as it is complete is
+twofold:
+- being defensive: so that in an event of shutdown, as much data is persisted as
+possible;
+- simplicity of the implementation of the MVP. (This means that later it will be
+possible to configure cratetorrent to buffer several pieces before flushing them
+to disk, or buffer at most `n` blocks, which may be fewer than is in a torrent's
+piece.)
+
+#### Vectored IO
+A peer downloads pieces in 4 KiB blocks and to save overhead of concatenating
+these buffers these blocks are stored in the disk write buffer as is. Writing
+each block to disk as a separate system call would incur tremendous overhead
+(relative to the other operations in most of cratetorrent), especially that
+context switches into kernel space have become far more expensive lately to
+mitigate risks of speculative execution, so these buffers are flushed to disk in
+one system call, using [vectored
+IO](http://man7.org/linux/man-pages/man2/readv.2.html).
+
+All disk IO is synchronous because `tokio_fs`'s vectored write implementation is just
+a wrapper around repeatedly calling `write` for each buffer, defeating any
+performance gains.
+
+For now `writev` is used, as that's the API that the standard lib `File`
+[exposes](https://doc.rust-lang.org/std/io/trait.Write.html#method.write_vectored),
+however, this requires that the file cursor is at the correct position, and
+requires seeking to the correct position if it's not. Since this needlessly
+adds another context switch, but ideally
+[`pwritev`](https://docs.rs/nix/0.17.0/nix/sys/uio/fn.pwritev.html) would be
+used (where the position of the write is specified as part of the write
+operation). For now the standard lib is used for simplicity as this is not yet
+an issue due to downloading sequentially, but this will be changed later.
+
+#### Architecture
+Each torrent (for now one) has its own entry in `Disk`, that contains metadata
+about the total download size, the piece count, the piece length, etc, as well
+as a channel for torrent used to send notifications of block writes and piece
+completion (and later to send fetched blocks).
+
+When a peer session wants to write a block to disk, it calls a method on its
+copy of `Arc<Disk>` and that block is appended to its torrent's piece write
+buffer (or a new one is created if this is the first block). If the piece has
+all blocks, a [blocking task is
+spawned](https://docs.rs/tokio/0.2.17/tokio/task/fn.spawn_blocking.html) to hash
+the piece, save it to disk, and send a notification of the piece completion to
+its torrent via a channel.
+
+Note again, that all this happens on the task of the peer session that
+downloaded the block, as currently we have a single peer session and it doesn't
+make sense to run disk on a separate thread for this. This will change, see
+[research notes](./RESEARCH.md#disk-io).
+
+#### In summary:
+1. Peer session requests `n` blocks from peer.
+2. For each received block, `Disk::save_block` is called which instructs `Disk`
+   to place the block in the write buffer.
+3. Once piece has all blocks in it, it is hashed and, if the hash matches the
+   expected hash, saved to disk.
+4. The written blocks and the hash result is communicated back to torrent via a
+   channel. Note that currently blocks are only written to disk as a whole
+   piece, but later we may write blocks to disk even when the piece is not
+   complete yet, as part of a future effort to provide ways to tune memory
+   usage.
+5. Torrent receives this message, processes it, and forwards it to the peer
+   session.
+
+
+Responsibilities:
+- Allocate torrent storage at torrent start.
 - Hash each piece before saving to disk.
 - Return hashing result to torrent and then to peer session: if bad, abort
   connection.
@@ -140,16 +241,6 @@ A better approach would be to keep the underlying raw source (as in Tide), but
   a `tokio` `mpsc` channel. This is because it simplifies the design and solves
   ownership and various type issues.
 
-Saving the blocks in a piece:
-1. Peer session requests n blocks from peer.
-2. For each received block, `Disk::save_block` is called which instructs `Disk`
-   to place the block in the write buffer.
-3. Once piece has all blocks in it, it is hashed and, if the hash matches the
-   expected hash, saved to disk.
-4. The block write and optionally the hash result is communicated back to
-   torrent via a channel.
-5. Torrent receives this message, processes it, and forwards it to the peer
-   session.
 
 
 ## Piece picker
