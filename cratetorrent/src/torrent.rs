@@ -1,11 +1,11 @@
 use {
     crate::{
-        disk::{self, Disk},
+        disk::{DiskHandle, TorrentAlert, TorrentAlertReceiver},
         error::*,
         metainfo::Metainfo,
         peer::PeerSession,
         piece_picker::PiecePicker,
-        {PeerId, Sha1Hash},
+        TorrentId, {PeerId, Sha1Hash},
     },
     futures::{
         select,
@@ -14,7 +14,6 @@ use {
     std::{
         convert::TryInto,
         net::SocketAddr,
-        path::Path,
         sync::Arc,
         time::{Duration, Instant},
     },
@@ -29,24 +28,30 @@ pub(crate) struct Torrent {
     // as pieces in the torrent swarm (more relevant when more peers are added),
     // and using this knowledge which piece to pick next.
     piece_picker: Arc<RwLock<PiecePicker>>,
-    // The entity used to save downloaded file blocks to disk and a shared copy
-    // is passed to peer session.
-    disk: Arc<Disk>,
+    // The handle to the disk IO task, used to issue commands on it. A copy of
+    // this handle is passed down to each peer session.
+    disk: DiskHandle,
     // The port on which we're receiving disk IO notifications of block write
     // and piece completion.
-    disk_io_notify_port: Fuse<disk::Receiver>,
+    //
+    // The channel has to be wrapped in a `stream::Fuse` so that we can
+    // `select!` on it in the torrent event loop.
+    disk_alert_port: Fuse<TorrentAlertReceiver>,
 }
 
 impl Torrent {
-    /// Creates a new `Torrent` instance.
+    /// Creates a new `Torrent` instance, initializing its core components but
+    /// not starting it.
     pub fn new(
-        download_dir: &Path,
+        id: TorrentId,
+        disk: DiskHandle,
+        disk_alert_port: TorrentAlertReceiver,
         client_id: PeerId,
         metainfo: Metainfo,
         seed_addr: SocketAddr,
     ) -> Result<Self> {
         let status = Status {
-            shared: Arc::new(SharedStatus::new(client_id, &metainfo)?),
+            shared: Arc::new(SharedStatus::new(id, client_id, &metainfo)?),
             start_time: None,
             run_duration: Duration::default(),
         };
@@ -54,17 +59,7 @@ impl Torrent {
         let piece_picker = PiecePicker::new(metainfo.piece_count());
         let piece_picker = Arc::new(RwLock::new(piece_picker));
 
-        let download_path = download_dir.join(metainfo.info.name);
-        let (disk, disk_io_notify_port) = Disk::new(
-            download_path,
-            metainfo.info.pieces,
-            status.shared.piece_count,
-            status.shared.piece_len,
-            status.shared.last_piece_len,
-            status.shared.download_len,
-        )?;
-        let disk = Arc::new(disk);
-        let disk_io_notify_port = disk_io_notify_port.fuse();
+        let disk_alert_port = disk_alert_port.fuse();
 
         Ok(Self {
             seed: Peer {
@@ -74,10 +69,12 @@ impl Torrent {
             status,
             piece_picker,
             disk,
-            disk_io_notify_port,
+            disk_alert_port,
         })
     }
 
+    /// Starts the torrent and returns normally if the download is complete, or
+    /// aborts if an error is encountered.
     pub async fn start(&mut self) {
         log::info!("Starting torrent");
 
@@ -88,7 +85,7 @@ impl Torrent {
         let mut session = PeerSession::outbound(
             Arc::clone(&self.status.shared),
             Arc::clone(&self.piece_picker),
-            Arc::clone(&self.disk),
+            self.disk.clone(),
             self.seed.addr,
         );
         let handle = task::spawn(async move { session.start().await });
@@ -121,11 +118,54 @@ impl Torrent {
                         self.status.run_duration.as_secs()
                     );
                 }
-                write_result = self.disk_io_notify_port.select_next_some() => {
-                    log::debug!("Disk message {:?}", write_result);
+                disk_alert = self.disk_alert_port.select_next_some() => {
+                    let should_stop = self.handle_disk_alert(disk_alert).await;
+                    if should_stop {
+                        return;
+                    }
                 }
             }
         }
+    }
+
+    async fn handle_disk_alert(&self, disk_alert: TorrentAlert) -> bool {
+        match disk_alert {
+            TorrentAlert::BatchWrite(write_result) => {
+                log::debug!("Disk write result {:?}", write_result);
+
+                match write_result {
+                    Ok(batch) => {
+                        // if this write completed a piece, check torrent
+                        // completion
+                        if batch.is_piece_valid.is_some() {
+                            log::info!("Finished piece download");
+                            let missing_piece_count = self
+                                .piece_picker
+                                .read()
+                                .await
+                                .count_missing_pieces();
+                            log::debug!(
+                                "Piece(s) left: {}",
+                                missing_piece_count
+                            );
+
+                            // if the torrent is fully downloaded, stop the
+                            // download loop
+                            if missing_piece_count == 0 {
+                                log::info!("Finished torrent download, exiting");
+                                return true;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        // TODO: include details in the error as to which blocks
+                        // failed to write
+                        log::warn!("Failed to write batch to disk: {}", e);
+                    }
+                }
+            }
+        }
+        false
     }
 }
 
@@ -164,6 +204,8 @@ struct Status {
 // various synchronization primitives.
 #[derive(Debug)]
 pub(crate) struct SharedStatus {
+    // The torrent ID, unique in this engine.
+    pub id: TorrentId,
     // The info hash of the torrent, derived from its metainfo. This is used to
     // identify the torrent with other peers and trackers.
     pub info_hash: Sha1Hash,
@@ -185,7 +227,7 @@ pub(crate) struct SharedStatus {
 impl SharedStatus {
     /// Constructs a new `SharedStatus` instance from the given client ID (of
     /// this host) and the torrent metainfo.
-    pub fn new(client_id: PeerId, metainfo: &Metainfo) -> Result<Self> {
+    pub fn new(id: TorrentId, client_id: PeerId, metainfo: &Metainfo) -> Result<Self> {
         let info_hash = metainfo.create_info_hash()?;
         let piece_count = metainfo.piece_count();
         let download_len = metainfo.download_len()?;
@@ -194,6 +236,7 @@ impl SharedStatus {
             download_len - piece_len as u64 * (piece_count - 1) as u64;
 
         Ok(Self {
+            id,
             info_hash,
             client_id,
             piece_count,

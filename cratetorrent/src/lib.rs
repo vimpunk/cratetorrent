@@ -1,24 +1,32 @@
+// needed by the `select!` macro reaching the default recursion limit
+#![recursion_limit = "256"]
+// use this feature to advance written bytes
+#![feature(io_slice_advance)]
+
 #[macro_use]
 extern crate serde_derive;
 
 mod disk;
 mod download;
+pub mod engine;
 pub mod error;
 pub mod metainfo;
 mod peer;
 mod piece_picker;
 mod torrent;
 
-use {
-    bitvec::prelude::{BitVec, Msb0},
-    error::*,
-    metainfo::Metainfo,
-    std::{net::SocketAddr, path::Path},
-    tokio::runtime::Runtime,
-    torrent::Torrent,
-};
+use bitvec::prelude::{BitVec, Msb0};
 
+/// Each torrent gets a randomyl assigned ID that is unique within the
+/// application.
+pub type TorrentId = u32;
+
+/// The peer ID is an arbitrary 20 byte string.
+///
+/// Guidelines for choosing a peer ID: http://bittorrent.org/beps/bep_0020.html.
 pub type PeerId = [u8; 20];
+
+/// A SHA-1 hash digest, 20 bytes long.
 pub type Sha1Hash = [u8; 20];
 
 /// The bitfield represents the piece availability of a peer. It is a compact
@@ -69,19 +77,4 @@ pub(crate) fn block_count(piece_len: u32) -> usize {
     // last piece may be shorter so we need to account for this by rounding
     // up before dividing to get the number of blocks in piece
     (piece_len as usize + (BLOCK_LEN as usize - 1)) / BLOCK_LEN as usize
-}
-
-/// Connects to a single seed and downloads the torrent or aborts on error.
-pub fn run_torrent(
-    client_id: PeerId,
-    download_dir: &Path,
-    metainfo: Metainfo,
-    seed_addr: SocketAddr,
-) -> Result<()> {
-    let mut rt = Runtime::new()?;
-    let mut torrent =
-        Torrent::new(download_dir, client_id, metainfo, seed_addr)?;
-    let torrent_fut = torrent.start();
-    rt.block_on(torrent_fut);
-    Ok(())
 }

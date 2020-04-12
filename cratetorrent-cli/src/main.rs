@@ -1,6 +1,6 @@
 use {
     clap::{App, Arg},
-    cratetorrent::{metainfo::*, run_torrent},
+    cratetorrent::{metainfo::*, engine::run_torrent},
     std::{fs, path::PathBuf},
 };
 

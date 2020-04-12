@@ -2,7 +2,7 @@ mod codec;
 
 use {
     crate::{
-        disk::Disk, download::PieceDownload, error::*,
+        disk::DiskHandle, download::PieceDownload, error::*,
         piece_picker::PiecePicker, torrent::SharedStatus, Bitfield, BlockInfo,
         PeerId, BLOCK_LEN,
     },
@@ -108,7 +108,7 @@ pub(crate) struct PeerSession {
     torrent: Arc<SharedStatus>,
     piece_picker: Arc<RwLock<PiecePicker>>,
     // The entity used to save downloaded file blocks to disk.
-    disk: Arc<Disk>,
+    disk: DiskHandle,
     // The remote address of the peer.
     addr: SocketAddr,
     // Session related information.
@@ -145,7 +145,7 @@ impl PeerSession {
     pub fn outbound(
         torrent: Arc<SharedStatus>,
         piece_picker: Arc<RwLock<PiecePicker>>,
-        disk: Arc<Disk>,
+        disk: DiskHandle,
         addr: SocketAddr,
     ) -> Self {
         Self {
@@ -160,9 +160,8 @@ impl PeerSession {
         }
     }
 
-    /// Starts the peer session and returns normally if the download is
-    /// complete, or aborts if an error is encountered and the error is
-    /// returned.
+    /// Starts the peer session and returns if the connection is closed or an
+    /// error occurs.
     pub async fn start(&mut self) -> Result<()> {
         log::info!("Starting peer {} session", self.addr);
 
@@ -182,7 +181,7 @@ impl PeerSession {
         socket.send(handshake).await?;
 
         // receive peer's handshake
-        log::info!("Receiving handshake from peer {}", self.addr);
+        log::info!("Waiting for peer {} handshake", self.addr);
         if let Some(peer_handshake) = socket.next().await {
             let peer_handshake = peer_handshake?;
             log::info!("Received handshake from peer {}", self.addr);
@@ -396,23 +395,9 @@ impl PeerSession {
                 let block_info = BlockInfo::new(piece_index, offset);
                 self.handle_block_msg(block_info, data).await?;
 
-                let missing_piece_count =
-                    self.piece_picker.read().await.count_missing_pieces();
-                log::debug!("Piece(s) left: {}", missing_piece_count);
-
-                // check if we finished the download with this block
-                //
-                // TODO(https://github.com/mandreyel/cratetorrent/issues/13):
-                // we don't actually need to check this after every received
-                // block, it's enough to check if a piece has been completed
-                if missing_piece_count == 0 {
-                    log::info!("Finished torrent download");
-                    return Ok(());
-                } else {
-                    // otherwise we may be able to make more requests now
-                    // that a block has arrived
-                    self.make_requests(sink).await?;
-                }
+                // we may be able to make more requests now that a block has
+                // arrived
+                self.make_requests(sink).await?;
             }
             // these messages are not expected until seed functionality is added
             Message::Have { .. } => {
@@ -597,9 +582,9 @@ impl PeerSession {
             self.downloads.remove(download_pos);
         }
 
-        // TODO(https://github.com/mandreyel/cratetorrent/issues/12): validate
-        // and save the block to disk (this is part of the next MR)
-        self.disk.save_block(block_info, data).await?;
+        // validate and save the block to disk by sending a write command to the
+        // disk task
+        self.disk.write_block(self.torrent.id, block_info, data)?;
 
         // adjust request statistics
         self.status.downloaded_block_bytes_count += block_info.len as u64;

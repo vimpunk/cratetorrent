@@ -17,22 +17,40 @@ seed_port=51413
 seed_addr="${seed_ip}:${seed_port}"
 seed_cont_name=transmission
 
+# provide way to override the log level but default to tracing everything in the
+# cratetorrent lib and binary
+RUST_LOG=${RUST_LOG:-cratetorrent=trace,cratetorrent_cli=trace}
+
 metainfo_path="$(pwd)/assets/1mb-test.txt.torrent"
 metainfo_cont_path=/cratetorrent/1mb-test.txt.torrent
-download_dir=/tmp/cratetorrent
-download_cont_dir=/tmp/cratetorrent
-
 if [ ! -f "${metainfo_path}" ]; then
     echo "Metainfo at ${metainfo_path} not found"
     exit 1
 fi
 
-if [ ! -d "${download_dir}" ]; then
+download_dir=/tmp/cratetorrent
+download_cont_dir=/tmp
+
+# the final download destination
+download_path="${download_dir}/1mb-test.txt"
+# the source file's path
+source_path=assets/1mb-test.txt
+# sanity check
+if [ ! -f "${source_path}" ]; then
+    echo "Error: source file ${source_path} does not exist!"
+    exit 2
+fi
+
+# initialize download directory to state expcted by the cratetortent-cli
+if [ -d "${download_dir}" ]; then
+    echo "Clearing download directory ${download_dir}"
+    rm -rf "${download_dir}"/*
+elif [ ! -d "${download_dir}" ]; then
     echo "Creating download directory ${download_dir}"
     mkdir -p "${download_dir}"
 elif [ -f "${download_dir}" ]; then
-    echo "File found at download directory path ${download_dir}"
-    exit 2
+    echo "File found where download directory ${download_dir} is supposed to be"
+    exit 3
 fi
 
 # start seed container if it isn't running
@@ -55,19 +73,31 @@ if ! docker inspect --format '{{.State.Running}}' "${seed_cont_name}" > /dev/nul
     sleep 5
 fi
 
-# start cratetorrent leech container
-docker run \
+# start cratetorrent leech container, which will run until the torrent is not
+# downloaded or an error occurs
+time docker run \
     -ti \
     --env SEED="${seed_addr}" \
     --env METAINFO_PATH="${metainfo_cont_path}" \
     --env DOWNLOAD_DIR="${download_cont_dir}" \
-    --env RUST_LOG=cratetorrent=trace,cratetorrent_cli=trace \
+    --env RUST_LOG="${RUST_LOG}" \
     --mount type=bind,src="${metainfo_path}",dst="${metainfo_cont_path}" \
     --mount type=bind,src="${download_dir}",dst="${download_cont_dir}" \
     cratetorrent-cli
 
-# TODO
-
-# wait until file is downloaded
+# first check if the file was downloaded in the expected path
+if [ ! -f "${download_path}" ]; then
+    echo "Error: downloaded file ${download_path} does not exist!"
+    exit 4
+fi
 
 # assert that the downloaded file is the same as the original
+echo
+echo "Comparing downloaded file ${download_path} to source file ${source_path}"
+if cmp --silent "${download_path}" "${source_path}"; then
+    echo "Success! Downloaded file matches source file"
+    exit 0
+else
+    echo "Failure: downloaded file does not match source file"
+    exit 5
+fi

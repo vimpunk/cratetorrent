@@ -1,281 +1,166 @@
+mod error;
+mod io;
+
+pub use error::*;
+
 use {
-    crate::{block_count, error::*, BlockInfo, Sha1Hash},
-    sha1::{Digest, Sha1},
-    std::{
-        collections::{BTreeMap, HashMap},
-        fs::{File, OpenOptions},
-        io::{IoSlice, Write},
-        path::PathBuf,
-    },
+    crate::{BlockInfo, TorrentId},
+    io::Disk,
+    std::path::PathBuf,
     tokio::{
-        sync::{
-            mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
-            RwLock,
-        },
+        sync::mpsc::{UnboundedReceiver, UnboundedSender},
         task,
     },
 };
 
-// The type of channel used to notify a torrent that some blocks were written to
-// disk.
-type Sender = UnboundedSender<WriteResult>;
+/// Spawns a disk IO task and returns a tuple with the task join handle, the
+/// disk handle used for sending commands, and a channel for receiving
+/// command results and other notifications.
+pub(crate) fn spawn(
+) -> Result<(task::JoinHandle<Result<()>>, DiskHandle, AlertReceiver)> {
+    log::info!("Spawning disk IO task");
+    let (mut disk, cmd_chan, alert_port) = Disk::new()?;
+    // spawn disk event loop on a new task
+    let join_handle = task::spawn(async move { disk.start().await });
+    log::info!("Spawned disk IO task");
 
-/// The type of channel on which a torrent can listen for block write
-/// completions.
-pub(crate) type Receiver = UnboundedReceiver<WriteResult>;
-
-/// Type returned on each successful batch of blocks written to disk.
-#[derive(Debug)]
-pub(crate) struct WriteResult {
-    /// The indices of the blocks in the piece that were written to the disk in
-    /// this batch.
-    pub blocks: Vec<usize>,
-    /// This field is set for the block write that completes the piece and
-    /// contains whether the downloaded piece's hash matches its expected hash.
-    pub is_piece_valid: Option<bool>,
+    Ok((join_handle, DiskHandle(cmd_chan), alert_port))
 }
 
-/// The entity responsible for saving downloaded file blocks to disk and
-/// verifying whether downloaded pieces are valid.
-pub(crate) struct Disk {
-    torrent: RwLock<Torrent>,
-}
+/// The handle for the disk task, used to execute disk IO related tasks.
+///
+/// The handle may be copied an arbitrary number of times. It is an abstraction
+/// over the means to communicate with the disk IO task. For now, mpsc channels
+/// are used for issuing commands and receiving results, but this may well
+/// change later on, hence hiding this behind this handle type.
+#[derive(Clone)]
+pub(crate) struct DiskHandle(CommandSender);
 
-impl Disk {
-    /// Creates a new `Disk` instance for a specific torrent and returns itself
-    /// and a receiver on which the torrent can be notified of disk IO updates.
-    pub fn new(
-        path: PathBuf,
+impl DiskHandle {
+    /// Instructs the disk task to set up everything needed for a new torrent,
+    /// which includes in-memory metadata storage and pre-allocating the
+    /// to-be-downloaded file(s).
+    pub fn allocate_new_torrent(
+        &self,
+        id: TorrentId,
+        download_path: PathBuf,
         piece_hashes: Vec<u8>,
         piece_count: usize,
         piece_len: u32,
         last_piece_len: u32,
-        download_len: u64,
-    ) -> Result<(Self, Receiver)> {
-        let (notify_chan, notify_port) = unbounded_channel();
-        let torrent = Torrent::new(
-            path,
-            notify_chan,
-            piece_hashes,
-            piece_count,
-            piece_len,
-            last_piece_len,
-            download_len,
-        )?;
-        let torrent = RwLock::new(torrent);
-        Ok((Self { torrent }, notify_port))
+    ) -> Result<()> {
+        log::trace!("Allocating new torrent {}", id);
+        self.0
+            .send(Command::NewTorrent {
+                id,
+                download_path,
+                piece_hashes,
+                piece_count,
+                piece_len,
+                last_piece_len,
+            })
+            .map_err(Error::from)
     }
 
-    /// Queues a block for eventual saving to disk.
+    /// Queues a block for eventual writing to disk.
     ///
-    /// Once the block is saved, the result is advertised to its torrent via the
-    /// mpsc channel created in the `Disk` constructor.
-    ///
-    /// The function returns as soon as the block could be queued onto the
-    /// torrent's disk write buffer, and _not_ when the block was written to
-    /// disk.
-    pub async fn save_block(
+    /// Once the block is saved, the result is advertised to its
+    /// `AlertReceiver`.
+    pub fn write_block(
         &self,
+        id: TorrentId,
         info: BlockInfo,
         data: Vec<u8>,
     ) -> Result<()> {
         log::trace!("Saving block {:?} to disk", info);
-        self.torrent.write().await.save_block(info, data)
+        self.0
+            .send(Command::WriteBlock { id, info, data })
+            .map_err(Error::from)
+    }
+
+    /// Shuts down the disk IO task.
+    pub fn shutdown(&self) -> Result<()> {
+        log::trace!("Shutting down disk IO task");
+        self.0.send(Command::Shutdown).map_err(Error::from)
     }
 }
 
-// Torrent information related to disk IO.
-//
-// Contains the in-progress pieces (i.e. the write buffer), metadata about
-// torrent's download and piece sizes, etc.
-struct Torrent {
-    // The path of the in-progress download file. This is the same as the
-    // `final_path`, except the extension is changed to '.part'.
-    part_path: PathBuf,
-    // The path that will begiven to the fully downloaded file.
-    final_path: PathBuf,
-    // The channel used to notify a torrent that a block has been written to
-    // disk and/or a piece was completed.
-    notify_chan: Sender,
-    // The in-progress piece downloads and disk writes. This is the torrent's
-    // disk write buffer. Each piece is mapped to its index for faster lookups.
-    //
-    // TODO(https://github.com/mandreyel/cratetorrent/issues/22): Currently
-    // there is no upper bound on the in-memory write buffer, so this may lead
-    // to OOM.
-    pieces: HashMap<usize, Piece>,
-    // The concatenation of all expected piece hashes.
-    piece_hashes: Vec<u8>,
-    // The number of pieces in the torrent.
-    piece_count: usize,
-    // The nominal length of a piece.
-    piece_len: u32,
-    // The length of the last piece in torrent, which may differ from the normal
-    // piece length if the download size is not an exact multiple of the normal
-    // piece length.
-    last_piece_len: u32,
-    // The sum of the length of all files in the torrent.
-    download_len: u64,
-}
+// The channel for sendng commands to the disk task.
+type CommandSender = UnboundedSender<Command>;
+// The channel the disk task uses to listen for commands.
+type CommandReceiver = UnboundedReceiver<Command>;
 
-impl Torrent {
-    fn new(
-        final_path: PathBuf,
-        notify_chan: Sender,
+// The type of commands that the disk can execute.
+enum Command {
+    // Allocate a new torrent.
+    NewTorrent {
+        id: TorrentId,
+        download_path: PathBuf,
         piece_hashes: Vec<u8>,
         piece_count: usize,
         piece_len: u32,
         last_piece_len: u32,
-        download_len: u64,
-    ) -> Result<Self> {
-        let part_path = final_path.with_extension("part");
-        // TODO: part path can exist once we support continuing downloads
-        if final_path.exists() || part_path.exists() {
-            return Err(Error::InvalidDownloadPath);
-        }
-
-        // create the part file
-        File::create(&part_path)?;
-
-        Ok(Self {
-            final_path,
-            part_path,
-            notify_chan,
-            pieces: HashMap::new(),
-            piece_hashes,
-            piece_count,
-            piece_len,
-            last_piece_len,
-            download_len,
-        })
-    }
-
-    fn save_block(&mut self, info: BlockInfo, data: Vec<u8>) -> Result<()> {
-        if !self.pieces.contains_key(&info.piece_index) {
-            self.start_new_piece(info)?;
-        };
-        // TODO: don't unwrap here
-        let piece = self.pieces.get_mut(&info.piece_index).unwrap();
-
-        piece.enqueue_block(info.offset, data);
-
-        // if the piece has all its blocks, so we can finish the hash, save it
-        // to disk, and remove it from memory
-        if piece.is_complete() {
-            // TODO: remove from in memory store only if the disk write
-            // succeeded (otherwise we need to retry later)
-            let piece = self.pieces.remove(&info.piece_index).unwrap();
-
-            let notify_chan = self.notify_chan.clone();
-            let part_path = self.part_path.clone();
-
-            // don't block the reactor with the potentially expensive hashing
-            task::spawn_blocking(move || {
-                let mut hasher = Sha1::new();
-                for block in piece.blocks.values() {
-                    hasher.input(&block);
-                }
-                let hash = hasher.result();
-                let expected_hash = piece.expected_hash;
-
-                // save piece to disk
-                let block_slices: Vec<_> = piece
-                    .blocks
-                    .values()
-                    .map(|b| IoSlice::new(&b[..]))
-                    .collect();
-                let mut file =
-                    OpenOptions::new().append(true).open(&part_path)?;
-                let mut written = 0;
-                while written < piece.len as usize {
-                    written += file.write_vectored(&block_slices)?;
-                }
-
-                let blocks = piece
-                    .blocks
-                    .values()
-                    .enumerate()
-                    .map(|(offset, _)| offset)
-                    .collect();
-                let is_piece_valid = Some(hash.as_slice() == expected_hash);
-
-                notify_chan
-                    .send(WriteResult {
-                        blocks,
-                        is_piece_valid,
-                    })
-                    .map_err(|e| {
-                        log::error!(
-                            "Error sending disk notification to torrent: {}",
-                            e
-                        );
-                        Error::Disk
-                    })
-            });
-        }
-
-        Ok(())
-    }
-
-    fn start_new_piece(&mut self, info: BlockInfo) -> Result<()> {
-        log::trace!("Creating piece {} write buffer", info.piece_index);
-
-        // get the position of the piece in the concatenated hash string
-        let hash_pos = info.piece_index * 20;
-        if hash_pos + 20 > self.piece_hashes.len() {
-            return Err(Error::InvalidPieceIndex);
-        }
-
-        let hash_slice = &self.piece_hashes[hash_pos..hash_pos + 20];
-        let mut expected_hash = [0; 20];
-        expected_hash.copy_from_slice(hash_slice);
-
-        let len = if info.piece_index == self.piece_count - 1 {
-            self.last_piece_len
-        } else {
-            self.piece_len
-        };
-
-        let blocks = BTreeMap::new();
-
-        let piece = Piece {
-            expected_hash,
-            len,
-            blocks,
-        };
-        self.pieces.insert(info.piece_index, piece);
-
-        Ok(())
-    }
+    },
+    // Request to eventually write a block to disk.
+    WriteBlock {
+        id: TorrentId,
+        info: BlockInfo,
+        data: Vec<u8>,
+    },
+    // Eventually shut down the disk task.
+    Shutdown,
 }
 
-// An in-progress piece download kept that keeps in memory the so far downloaded
-// blocks and a hashing context that's updated with each received block.
-struct Piece {
-    // The expected hash of the whole piece.
-    expected_hash: Sha1Hash,
-    // The length of the piece, in bytes.
-    len: u32,
-    // The so far downloaded blocks. Once the size of this map reaches the
-    // number of blocks in piece, the piece is complete and, if the hash is
-    // correct, saved to disk.
-    //
-    // Each block must be 4 KiB and is mapped to its offset within piece, and
-    // we're using a BTreeMap to keep keys sorted. This is important when
-    // iterating over the map to hash each block after one another.
-    blocks: BTreeMap<u32, Vec<u8>>,
+// The type of channel used to alert the engine about global events.
+type AlertSender = UnboundedSender<Alert>;
+/// The channel on which the engine can listen for global disk events.
+pub(crate) type AlertReceiver = UnboundedReceiver<Alert>;
+
+/// The alerts that the disk task may send about global events (i.e.  events not
+/// related to individual torrents).
+#[derive(Debug)]
+pub(crate) enum Alert {
+    /// Torrent allocation result. If successful, the id of the allocated
+    /// torrent is returned for identification, if not, the reason of the error
+    /// is included.
+    TorrentAllocation(Result<TorrentAllocation, NewTorrentError>),
 }
 
-impl Piece {
-    fn enqueue_block(&mut self, offset: u32, data: Vec<u8>) {
-        if self.blocks.contains_key(&offset) {
-            log::warn!("Duplicate piece block at offset {}", offset);
-        } else {
-            self.blocks.insert(offset, data);
-        }
-    }
+/// The result of successfully allocating a torrent.
+#[derive(Debug)]
+pub(crate) struct TorrentAllocation {
+    /// The id of the torrent that has been allocated.
+    pub id: TorrentId,
+    /// The port on which torrent may receive alerts.
+    pub alert_port: TorrentAlertReceiver,
+}
 
-    fn is_complete(&self) -> bool {
-        self.blocks.len() == block_count(self.len)
-    }
+// The type of channel used to alert a torrent about torrent specific events.
+type TorrentAlertSender = UnboundedSender<TorrentAlert>;
+/// The type of channel on which a torrent can listen for block write
+/// completions.
+pub(crate) type TorrentAlertReceiver = UnboundedReceiver<TorrentAlert>;
+
+/// The alerts that the disk task may send about events related to a specific
+/// torrent.
+#[derive(Debug)]
+pub(crate) enum TorrentAlert {
+    /// Sent when some blocks were written to disk or an error ocurred while
+    /// writing.
+    BatchWrite(Result<BatchWrite, WriteError>),
+}
+
+/// Type returned on each successful batch of blocks written to disk.
+#[derive(Debug)]
+pub(crate) struct BatchWrite {
+    /// The piece blocks that were written to the disk in this batch.
+    ///
+    /// There is some inefficiency in having the piece index in all blocks,
+    /// however, this allows for supporting alerting writes of blocks in
+    /// multiple pieces, which is a feature for later (and for now this is kept
+    /// for simplicity).
+    pub blocks: Vec<BlockInfo>,
+    /// This field is set for the block write that completes the piece and
+    /// contains whether the downloaded piece's hash matches its expected hash.
+    pub is_piece_valid: Option<bool>,
 }

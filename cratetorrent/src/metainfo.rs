@@ -8,6 +8,12 @@ pub struct Metainfo {
 }
 
 impl Metainfo {
+    /// Parses from a byte buffer a new [`Metainfo`] instance, or aborts with an
+    /// error.
+    ///
+    /// If the encoding itself is correct, the constructor may still fail if the
+    /// metadata is not semantically correct (e.g. if the length of the `pieces`
+    /// field is not a multiple of 20).
     pub fn from_bytes(buf: &[u8]) -> Result<Self> {
         let metainfo: Self = serde_bencode::from_bytes(buf)?;
         // the pieces field is a concatenation of 20 byte SHA-1 hashes, so it
@@ -18,6 +24,7 @@ impl Metainfo {
         Ok(metainfo)
     }
 
+    /// Returns the number of pieces in this torrent.
     pub fn piece_count(&self) -> usize {
         self.info.pieces.len() / 20
     }
@@ -36,6 +43,10 @@ impl Metainfo {
         }
     }
 
+    /// Creates a SHA-1 hash of the encoded `info` field's value.
+    ///
+    /// The resulting hash is used to identify a torrent with trackers and
+    /// peers.
     pub fn create_info_hash(&self) -> Result<Sha1Hash> {
         let info = serde_bencode::to_bytes(&self.info)?;
         let digest = Sha1::digest(&info);

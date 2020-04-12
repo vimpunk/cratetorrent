@@ -15,6 +15,9 @@ The project is split up in two:
 
 ## How to run
 
+Rust nightly is required for the [`io_slice_advance`
+feature](https://github.com/mandreyel/cratetorrent/issues/23).
+
 ### Binary
 
 The CLI binary is currently very basic, but you can connect to a seed by

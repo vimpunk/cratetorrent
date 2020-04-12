@@ -3,6 +3,7 @@
 This document includes notes about not yet implemented features, optimizations,
 and ideas in general.
 
+
 ## Piece picker
 
 In order to ensure high availability of all file pieces in a torrent network,
@@ -18,6 +19,7 @@ In the future, different piece download algorithms may be specified for a
 torrent. E.g. some torrent engines are used for streaming video or music
 content, in which case a pseudo-random download order is unhelpful, and
 sequential piece picking is enabled.
+
 
 ## Disk IO
 
