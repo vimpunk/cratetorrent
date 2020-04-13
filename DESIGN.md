@@ -644,3 +644,44 @@ an issue due to downloading sequentially, but this will be changed later.
    channel (or the IO error if any occurred).
 5. `Torrent` receives this message, processes it, and forwards it to the peer
    session.
+
+
+## Error handling
+
+Particular emphasis is placed on correct error handling; both internally and
+the way the API consumer may handle errors.
+
+Errors are distinguished as **fatal** and **fallible**. Fatal errors cause the
+system to stop, while fallible errors are such as would occur on a time-to-time
+basis (more frequently network IO failure, less frequently disk IO failure)
+which should not be grounds for stopping the engine.
+
+The distinction is made due to the ability to effortlessly propagate errors via
+Rust's try (`?`) operator, as otherwise with a single `Error` type, encompassing
+all possible errors of the crate (as is common in the Rust ecosystem), it would
+be all too easy to forget to handle errors in critical places. For this reason
+not only are the two types of errors distinct types, they don't provide
+automatic conversion either.
+
+As an example, take disk IO errors: they are generally not expected to occur,
+but it could be that the user has moved the download file while the download was
+ongoing, or that disk storage has been used up. This, however, should not bring
+the entire engine to halt and instead these errors should be logged, routed to
+the responsible entity, and the operation re-attempted at a later time point.
+
+Now recovery is not implemented in cratetorrent yet, but the error distinction
+is: there is a general `Error` type, and a `WriteError`. The disk task is
+run until a fatal error is encountered (e.g. `mpsc` channel failure) and so all
+it's internal methods only return `Error` on fatal error; non-fatal errors are
+communicated via the alert channels. Because of this we know that in the
+following code a disk write won't abort the event loop because of IO failure,
+only because of channel sending failure (which is for now the desired behavior):
+```rust
+while let Some(cmd) = self.cmd_port.recv().await {
+    match cmd {
+        Command::BlockWrite(block) => {
+            self.write_block(block)?;
+        }
+    }
+}
+```
