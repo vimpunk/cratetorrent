@@ -112,7 +112,10 @@ impl Disk {
         Ok(())
     }
 
-    // Queues a block for writing
+    // Queues a block for writing and fails if the torrent id is invalid.
+    //
+    // If the block could not be written due to IO failure, the torrent is
+    // notified of it.
     async fn write_block(
         &self,
         id: TorrentId,
@@ -234,7 +237,6 @@ impl Torrent {
             // succeeded (otherwise we need to retry later)
             let piece = self.pieces.remove(&info.piece_index).unwrap();
 
-            let alert_chan = self.alert_chan.clone();
             let download_path = self.download_path.clone();
 
             // don't block the reactor with the potentially expensive hashing
@@ -289,7 +291,7 @@ impl Torrent {
                     }
 
                     // alert torrent of block writes and piece completion
-                    alert_chan.send(TorrentAlert::BatchWrite(Ok(
+                    self.alert_chan.send(TorrentAlert::BatchWrite(Ok(
                         BatchWrite {
                             blocks,
                             is_piece_valid: Some(is_piece_valid),
@@ -301,7 +303,7 @@ impl Torrent {
                     self.stats.write_failure_count += 1;
 
                     // alert torrent of block write failure
-                    alert_chan.send(TorrentAlert::BatchWrite(Err(e)))?;
+                    self.alert_chan.send(TorrentAlert::BatchWrite(Err(e)))?;
                 }
             }
         }
@@ -342,7 +344,7 @@ impl Torrent {
     }
 }
 
-// An in-progress piece download kept that keeps in memory the so far downloaded
+// An in-progress piece download that keeps in memory the so far downloaded
 // blocks and a hashing context that's updated with each received block.
 struct Piece {
     // The expected hash of the whole piece.
