@@ -3,7 +3,7 @@ use {
         disk::{self, Alert},
         error::*,
         metainfo::Metainfo,
-        torrent::Torrent,
+        torrent::{StorageInfo, Torrent},
         PeerId,
     },
     std::{net::SocketAddr, path::Path},
@@ -34,33 +34,12 @@ async fn start_disk_and_torrent(
 
     // allocate torrent on disk
     let id = 0;
-    let download_path = download_dir.join(&metainfo.info.name);
-    log::info!("Torrent {} download path: {:?}", id, download_path);
+    let info_hash = metainfo.create_info_hash()?;
+    let storage_info = StorageInfo::new(&metainfo, download_dir)?;
+    log::info!("Torrent {} storage info: {:?}", id, storage_info);
 
-    let download_len = metainfo.download_len()?;
-    log::info!("Torrent {} total length: {}", id, download_len);
-
-    let piece_count = metainfo.piece_count();
-    log::info!("Torrent {} piece count: {}", id, piece_count);
-
-    let piece_len = metainfo.info.piece_len as u32;
-    log::info!("Torrent {} piece length: {}", id, piece_len);
-
-    let last_piece_len =
-        download_len - piece_len as u64 * (piece_count - 1) as u64;
-    let last_piece_len = last_piece_len as u32;
-    log::info!("Torrent {} last piece length: {}", id, last_piece_len);
-
-    disk.allocate_new_torrent(
-        id,
-        download_path,
-        metainfo.info.pieces.clone(),
-        piece_count,
-        piece_len,
-        last_piece_len,
-    )?;
-
-    // wait for torrent allocation result
+    // allocate torrent and wait for its result
+    disk.allocate_new_torrent(id, storage_info.clone(), metainfo.info.pieces)?;
     let torrent_disk_alert_port =
         if let Some(Alert::TorrentAllocation(allocation_result)) =
             alert_port.recv().await
@@ -91,8 +70,9 @@ async fn start_disk_and_torrent(
         id,
         disk.clone(),
         torrent_disk_alert_port,
+        info_hash,
+        storage_info,
         client_id,
-        metainfo,
         seed_addr,
     )?;
     // run torrent to completion

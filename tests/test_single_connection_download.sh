@@ -4,7 +4,15 @@
 # asserts that cratetorrent downloads a single 1MiB file from the seed
 # correctly.
 
+
 set -e
+
+# error codes
+metainfo_not_found=1
+source_not_found=2
+dest_in_use=3
+download_not_found=4
+invalid_download=5
 
 # the default docker bridge network is on subnet 172.17.0.0/16, the gateway on
 # 172.17.0.1, so we can pin our seed to an IP in that subnet
@@ -25,7 +33,7 @@ metainfo_path="$(pwd)/assets/1mb-test.txt.torrent"
 metainfo_cont_path=/cratetorrent/1mb-test.txt.torrent
 if [ ! -f "${metainfo_path}" ]; then
     echo "Metainfo at ${metainfo_path} not found"
-    exit 1
+    exit "${metainfo_not_found}"
 fi
 
 download_dir=/tmp/cratetorrent
@@ -38,7 +46,7 @@ source_path=assets/1mb-test.txt
 # sanity check
 if [ ! -f "${source_path}" ]; then
     echo "Error: source file ${source_path} does not exist!"
-    exit 2
+    exit "${source_not_found}"
 fi
 
 # initialize download directory to state expcted by the cratetortent-cli
@@ -50,7 +58,7 @@ elif [ ! -d "${download_dir}" ]; then
     mkdir -p "${download_dir}"
 elif [ -f "${download_dir}" ]; then
     echo "File found where download directory ${download_dir} is supposed to be"
-    exit 3
+    exit "${dest_in_use}"
 fi
 
 # start seed container if it isn't running
@@ -88,7 +96,7 @@ time docker run \
 # first check if the file was downloaded in the expected path
 if [ ! -f "${download_path}" ]; then
     echo "Error: downloaded file ${download_path} does not exist!"
-    exit 4
+    exit "${download_not_found}"
 fi
 
 # assert that the downloaded file is the same as the original
@@ -99,5 +107,5 @@ if cmp --silent "${download_path}" "${source_path}"; then
     exit 0
 else
     echo "Failure: downloaded file does not match source file"
-    exit 5
+    exit "${invalid_download}"
 fi

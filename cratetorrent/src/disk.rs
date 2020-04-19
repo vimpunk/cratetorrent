@@ -4,9 +4,8 @@ mod io;
 pub use error::*;
 
 use {
-    crate::{BlockInfo, TorrentId},
+    crate::{torrent::StorageInfo, BlockInfo, TorrentId},
     io::Disk,
-    std::path::PathBuf,
     tokio::{
         sync::mpsc::{UnboundedReceiver, UnboundedSender},
         task,
@@ -43,21 +42,15 @@ impl DiskHandle {
     pub fn allocate_new_torrent(
         &self,
         id: TorrentId,
-        download_path: PathBuf,
+        info: StorageInfo,
         piece_hashes: Vec<u8>,
-        piece_count: usize,
-        piece_len: u32,
-        last_piece_len: u32,
     ) -> Result<()> {
         log::trace!("Allocating new torrent {}", id);
         self.0
             .send(Command::NewTorrent {
                 id,
-                download_path,
+                info,
                 piece_hashes,
-                piece_count,
-                piece_len,
-                last_piece_len,
             })
             .map_err(Error::from)
     }
@@ -95,11 +88,8 @@ enum Command {
     // Allocate a new torrent.
     NewTorrent {
         id: TorrentId,
-        download_path: PathBuf,
+        info: StorageInfo,
         piece_hashes: Vec<u8>,
-        piece_count: usize,
-        piece_len: u32,
-        last_piece_len: u32,
     },
     // Request to eventually write a block to disk.
     WriteBlock {
@@ -173,7 +163,7 @@ mod tests {
         super::*,
         crate::{block_count, BLOCK_LEN},
         sha1::{Digest, Sha1},
-        std::fs,
+        std::{fs, path::PathBuf},
     };
 
     // Tests the allocation of a torrent, and then the allocation of the same
@@ -184,23 +174,14 @@ mod tests {
 
         let Env {
             id,
-            download_path,
             pieces,
             piece_hashes,
-            piece_len,
-            last_piece_len,
+            info,
         } = Env::new();
 
         // allocate torrent via channel
         disk_handle
-            .allocate_new_torrent(
-                id,
-                download_path.clone(),
-                piece_hashes.clone(),
-                pieces.len(),
-                piece_len,
-                last_piece_len,
-            )
+            .allocate_new_torrent(id, info, piece_hashes.clone())
             .unwrap();
 
         // wait for result on alert port
@@ -216,14 +197,7 @@ mod tests {
 
         // try to allocate the same torrent a second time
         disk_handle
-            .allocate_new_torrent(
-                id,
-                download_path,
-                piece_hashes,
-                pieces.len(),
-                piece_len,
-                last_piece_len,
-            )
+            .allocate_new_torrent(id, info, piece_hashes)
             .unwrap();
 
         // we should get an already exists error
@@ -242,23 +216,14 @@ mod tests {
 
         let Env {
             id,
-            download_path,
             pieces,
             piece_hashes,
-            piece_len,
-            last_piece_len,
+            info,
         } = Env::new();
 
         // allocate torrent via channel
         disk_handle
-            .allocate_new_torrent(
-                id,
-                download_path.clone(),
-                piece_hashes.clone(),
-                pieces.len(),
-                piece_len,
-                last_piece_len,
-            )
+            .allocate_new_torrent(id, info, piece_hashes)
             .unwrap();
 
         // wait for result on alert port
@@ -301,7 +266,7 @@ mod tests {
         }
 
         // clean up test env
-        fs::remove_file(&download_path)
+        fs::remove_file(&info.download_path)
             .expect("Failed to clean up disk test torrent file");
     }
 
@@ -343,23 +308,14 @@ mod tests {
 
         let Env {
             id,
-            download_path,
             pieces,
             piece_hashes,
-            piece_len,
-            last_piece_len,
+            info,
         } = Env::new();
 
         // allocate torrent via channel
         disk_handle
-            .allocate_new_torrent(
-                id,
-                download_path.clone(),
-                piece_hashes.clone(),
-                pieces.len(),
-                piece_len,
-                last_piece_len,
-            )
+            .allocate_new_torrent(id, info, piece_hashes)
             .unwrap();
 
         // wait for result on alert port
@@ -399,17 +355,15 @@ mod tests {
 
         // download file should not exists as invalid piece must not be written
         // to disk
-        assert!(!download_path.exists());
+        assert!(!info.download_path.exists());
     }
 
     // The disk IO test environment containing information of a valid torrent.
     struct Env {
         id: TorrentId,
-        download_path: PathBuf,
         pieces: Vec<Vec<u8>>,
         piece_hashes: Vec<u8>,
-        piece_len: u32,
-        last_piece_len: u32,
+        info: StorageInfo,
     }
 
     impl Env {
@@ -448,13 +402,22 @@ mod tests {
                     .expect("Failed to clean up disk test torrent file");
             }
 
-            Self {
-                id,
-                download_path,
-                pieces,
-                piece_hashes,
+            let info = StorageInfo {
+                piece_count: pieces.len(),
                 piece_len,
                 last_piece_len,
+                download_len: pieces.iter().fold(0, |mut len, piece| {
+                    len += piece.len() as u64;
+                    len
+                }),
+                download_path,
+            };
+
+            Self {
+                id,
+                pieces,
+                piece_hashes,
+                info,
             }
         }
     }

@@ -4,13 +4,13 @@ use {
         CommandReceiver, CommandSender, TorrentAlert, TorrentAlertReceiver,
         TorrentAlertSender, TorrentAllocation,
     },
-    crate::{block_count, BlockInfo, Sha1Hash, TorrentId},
+    crate::{block_count, BlockInfo, Sha1Hash, TorrentId, torrent::StorageInfo},
     sha1::{Digest, Sha1},
     std::{
         collections::{BTreeMap, HashMap},
         fs::OpenOptions,
         io::{IoSlice, Write},
-        path::{Path, PathBuf},
+        path::{Path},
     },
     tokio::{
         sync::{mpsc, RwLock},
@@ -18,22 +18,22 @@ use {
     },
 };
 
-// The entity responsible for saving downloaded file blocks to disk and
-// verifying whether downloaded pieces are valid.
+/// The entity responsible for saving downloaded file blocks to disk and
+/// verifying whether downloaded pieces are valid.
 pub(super) struct Disk {
-    // Each torrent in engine has a corresponding entry in this hashmap, which
-    // includes various metadata about torrent and the torrent specific alert
-    // channel.
+    /// Each torrent in engine has a corresponding entry in this hashmap, which
+    /// includes various metadata about torrent and the torrent specific alert
+    /// channel.
     torrents: HashMap<TorrentId, RwLock<Torrent>>,
-    // Port on which disk IO commands are received.
+    /// Port on which disk IO commands are received.
     cmd_port: CommandReceiver,
-    // Channel on which `Disk` sends alerts to the torrent engine.
+    /// Channel on which `Disk` sends alerts to the torrent engine.
     alert_chan: AlertSender,
 }
 
 impl Disk {
-    // Creates a new `Disk` instance and returns a command sender and an alert
-    // receiver.
+    /// Creates a new `Disk` instance and returns a command sender and an alert
+    /// receiver.
     pub(super) fn new() -> Result<(Self, CommandSender, AlertReceiver)> {
         let (alert_chan, alert_port) = mpsc::unbounded_channel();
         let (cmd_chan, cmd_port) = mpsc::unbounded_channel();
@@ -48,8 +48,8 @@ impl Disk {
         ))
     }
 
-    // Starts the disk event loop which is run until shutdown or an
-    // unrecoverable error occurs (e.g. mpsc channel failure).
+    /// Starts the disk event loop which is run until shutdown or an
+    /// unrecoverable error occurs (e.g. mpsc channel failure).
     pub(super) async fn start(&mut self) -> Result<()> {
         log::info!("Starting disk IO event loop");
         while let Some(cmd) = self.cmd_port.recv().await {
@@ -57,11 +57,8 @@ impl Disk {
             match cmd {
                 Command::NewTorrent {
                     id,
-                    download_path,
+                    info,
                     piece_hashes,
-                    piece_count,
-                    piece_len,
-                    last_piece_len,
                 } => {
                     if self.torrents.contains_key(&id) {
                         log::warn!("Torrent {} already allocated", id);
@@ -74,13 +71,7 @@ impl Disk {
                     // NOTE: Do _NOT_ return on failure, we don't want to kill
                     // the disk task due to potential disk IO errors: we just
                     // want to log it and notify engine of it.
-                    let torrent_res = Torrent::new(
-                        download_path,
-                        piece_hashes,
-                        piece_count,
-                        piece_len,
-                        last_piece_len,
-                    );
+                    let torrent_res = Torrent::new(info, piece_hashes);
                     match torrent_res {
                         Ok((torrent, alert_port)) => {
                             log::info!("Torrent {} successfully allocated", id);
@@ -114,10 +105,10 @@ impl Disk {
         Ok(())
     }
 
-    // Queues a block for writing and fails if the torrent id is invalid.
-    //
-    // If the block could not be written due to IO failure, the torrent is
-    // notified of it.
+    /// Queues a block for writing and fails if the torrent id is invalid.
+    ///
+    /// If the block could not be written due to IO failure, the torrent is
+    /// notified of it.
     async fn write_block(
         &self,
         id: TorrentId,
@@ -135,56 +126,45 @@ impl Disk {
     }
 }
 
-// Torrent information related to disk IO.
-//
-// Contains the in-progress pieces (i.e. the write buffer), metadata about
-// torrent's download and piece sizes, etc.
+/// Torrent information related to disk IO.
+///
+/// Contains the in-progress pieces (i.e. the write buffer), metadata about
+/// torrent's download and piece sizes, etc.
 struct Torrent {
-    // The path where the file is saved.
-    download_path: PathBuf,
-    // The channel used to alert a torrent that a block has been written to
-    // disk and/or a piece was completed.
+    /// All information concerning this torrent's storage.
+    info: StorageInfo,
+    /// The channel used to alert a torrent that a block has been written to
+    /// disk and/or a piece was completed.
     alert_chan: TorrentAlertSender,
-    // The in-progress piece downloads and disk writes. This is the torrent's
-    // disk write buffer. Each piece is mapped to its index for faster lookups.
-    //
+    /// The in-progress piece downloads and disk writes. This is the torrent's
+    /// disk write buffer. Each piece is mapped to its index for faster lookups.
     // TODO(https://github.com/mandreyel/cratetorrent/issues/22): Currently
     // there is no upper bound on the in-memory write buffer, so this may lead
     // to OOM.
     pieces: HashMap<usize, Piece>,
-    // The concatenation of all expected piece hashes.
+    /// The concatenation of all expected piece hashes.
     piece_hashes: Vec<u8>,
-    // The number of pieces in the torrent.
-    piece_count: usize,
-    // The nominal length of a piece.
-    piece_len: u32,
-    // The length of the last piece in torrent, which may differ from the normal
-    // piece length if the download size is not an exact multiple of the normal
-    // piece length.
-    last_piece_len: u32,
+    /// Disk IO statistics.
     stats: Stats,
 }
 
 #[derive(Default)]
 struct Stats {
-    // The number of bytes successfully written to disk.
+    /// The number of bytes successfully written to disk.
     write_count: u64,
-    // The number of times we failed to write to disk.
+    /// The number of times we failed to write to disk.
     write_failure_count: usize,
 }
 
 impl Torrent {
     fn new(
-        download_path: PathBuf,
+        info: StorageInfo,
         piece_hashes: Vec<u8>,
-        piece_count: usize,
-        piece_len: u32,
-        last_piece_len: u32,
     ) -> Result<(Self, TorrentAlertReceiver), NewTorrentError> {
         // TODO: since this is done as part of a tokio::task, should we use
         // tokio_fs here?
-        if download_path.exists() {
-            log::warn!("Download path {:?} exists", download_path);
+        if info.download_path.exists() {
+            log::warn!("Download path {:?} exists", info.download_path);
             return Err(NewTorrentError::Io(std::io::Error::new(
                 std::io::ErrorKind::AlreadyExists,
                 "Download path already exists",
@@ -195,13 +175,10 @@ impl Torrent {
 
         Ok((
             Self {
-                download_path,
+                info,
                 alert_chan,
                 pieces: HashMap::new(),
                 piece_hashes,
-                piece_count,
-                piece_len,
-                last_piece_len,
                 stats: Stats::default(),
             },
             alert_port,
@@ -238,7 +215,7 @@ impl Torrent {
             // succeeded (otherwise we need to retry later)
             let piece = self.pieces.remove(&info.piece_index).unwrap();
 
-            let download_path = self.download_path.clone();
+            let download_path = self.info.download_path.clone();
 
             // don't block the reactor with the potentially expensive hashing
             // and sync file writing
@@ -327,10 +304,11 @@ impl Torrent {
         let mut expected_hash = [0; 20];
         expected_hash.copy_from_slice(hash_slice);
 
-        let len = if info.piece_index == self.piece_count - 1 {
-            self.last_piece_len
+        //let len = self.info.piece_len(info.piece_index)?;
+        let len = if info.piece_index == self.info.piece_count - 1 {
+            self.info.last_piece_len
         } else {
-            self.piece_len
+            self.info.piece_len
         };
 
         let blocks = BTreeMap::new();
@@ -346,26 +324,26 @@ impl Torrent {
     }
 }
 
-// An in-progress piece download that keeps in memory the so far downloaded
-// blocks and a hashing context that's updated with each received block.
+/// An in-progress piece download that keeps in memory the so far downloaded
+/// blocks and a hashing context that's updated with each received block.
 struct Piece {
-    // The expected hash of the whole piece.
+    /// The expected hash of the whole piece.
     expected_hash: Sha1Hash,
-    // The length of the piece, in bytes.
+    /// The length of the piece, in bytes.
     len: u32,
-    // The so far downloaded blocks. Once the size of this map reaches the
-    // number of blocks in piece, the piece is complete and, if the hash is
-    // correct, saved to disk.
-    //
-    // Each block must be 4 KiB and is mapped to its offset within piece, and
-    // we're using a BTreeMap to keep keys sorted. This is important when
-    // iterating over the map to hash each block after one another.
+    /// The so far downloaded blocks. Once the size of this map reaches the
+    /// number of blocks in piece, the piece is complete and, if the hash is
+    /// correct, saved to disk.
+    ///
+    /// Each block must be 4 KiB and is mapped to its offset within piece, and
+    /// we're using a BTreeMap to keep keys sorted. This is important when
+    /// iterating over the map to hash each block after one another.
     blocks: BTreeMap<u32, Vec<u8>>,
 }
 
 impl Piece {
-    // Places block into piece's write buffer if it doesn't exist. TODO: should
-    // we return an error if it does?
+    /// Places block into piece's write buffer if it doesn't exist. TODO: should
+    /// we return an error if it does?
     fn enqueue_block(&mut self, offset: u32, data: Vec<u8>) {
         if self.blocks.contains_key(&offset) {
             log::warn!("Duplicate piece block at offset {}", offset);
@@ -374,13 +352,13 @@ impl Piece {
         }
     }
 
-    // Returns true if the piece has all its blocks in its write buffer.
+    /// Returns true if the piece has all its blocks in its write buffer.
     fn is_complete(&self) -> bool {
         self.blocks.len() == block_count(self.len)
     }
 
-    // Calculates the piece's hash using all its blocks and returns if it
-    // matches the expected hash.
+    /// Calculates the piece's hash using all its blocks and returns if it
+    /// matches the expected hash.
     fn matches_hash(&self) -> bool {
         let mut hasher = Sha1::new();
         for block in self.blocks.values() {
@@ -391,8 +369,8 @@ impl Piece {
         hash.as_slice() == self.expected_hash
     }
 
-    // Writes the piece's write buffer to disk at the given path and returns the
-    // number of bytes written.
+    /// Writes the piece's write buffer to disk at the given path and returns
+    /// the number of bytes written.
     fn write(&self, part_path: &Path) -> Result<usize, WriteError> {
         let mut block_slices: Vec<_> =
             self.blocks.values().map(|b| IoSlice::new(&b[..])).collect();
