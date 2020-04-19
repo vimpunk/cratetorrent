@@ -19,7 +19,8 @@ pub fn run_torrent(
 ) -> Result<()> {
     let mut rt = Runtime::new()?;
     rt.block_on(async move {
-        start_disk_and_torrent(client_id, download_dir, metainfo, seed_addr).await
+        start_disk_and_torrent(client_id, download_dir, metainfo, seed_addr)
+            .await
     })
 }
 
@@ -95,12 +96,15 @@ async fn start_disk_and_torrent(
         seed_addr,
     )?;
     // run torrent to completion
-    torrent.start().await;
+    torrent.start().await?;
 
     // send a shutdown command to disk
     disk.shutdown()?;
     // and join on its handle
-    disk_join_handle.await.expect("Disk task has panicked").map_err(Error::from)?;
+    disk_join_handle
+        .await
+        .expect("Disk task has panicked")
+        .map_err(Error::from)?;
 
     Ok(())
 }

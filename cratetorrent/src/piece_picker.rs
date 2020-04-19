@@ -17,7 +17,7 @@ struct Piece {
     is_pending: bool,
 }
 
-pub struct PiecePicker {
+pub(crate) struct PiecePicker {
     // Represents the pieces that we have downloaded.
     //
     // The bitfield is pre-allocated to the number of pieces in the torrent and
@@ -189,7 +189,7 @@ mod tests {
     fn test_is_interested() {
         // empty piece picker
         let piece_count = 15;
-        let mut piece_picker = PiecePicker::new(piece_count);
+        let piece_picker = PiecePicker::new(piece_count);
 
         // we are interested if peer has all pieces
         let available_pieces = Bitfield::repeat(true, piece_count);

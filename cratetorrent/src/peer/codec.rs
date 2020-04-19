@@ -1,4 +1,4 @@
-use crate::{Bitfield, BlockInfo, BLOCK_LEN};
+use crate::{Bitfield, BlockInfo};
 use bytes::{Buf, BufMut, BytesMut};
 use std::convert::{TryFrom, TryInto};
 use std::io;
@@ -205,7 +205,7 @@ impl Decoder for HandshakeCodec {
 }
 
 impl BlockInfo {
-    /// Encodes the block info in the etwork binary protocol's format into the
+    /// Encodes the block info in the network binary protocol's format into the
     /// given buffer.
     fn encode(&self, buf: &mut BytesMut) -> io::Result<()> {
         let piece_index = self
@@ -216,24 +216,6 @@ impl BlockInfo {
         buf.put_u32(self.offset);
         buf.put_u32(self.len);
         Ok(())
-    }
-
-    /// Creates a `BlockInfo` instance from an untrusted source and fails if the
-    /// length is not 4 KiB.
-    fn from_untrusted(
-        piece_index: usize,
-        offset: u32,
-        len: u32,
-    ) -> io::Result<Self> {
-        if len == BLOCK_LEN {
-            Ok(Self::new(piece_index, offset))
-        } else {
-            // TODO: consider using own error type here as well
-            Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "Block length must be 4 KiB",
-            ))
-        }
     }
 }
 
@@ -438,11 +420,11 @@ impl Decoder for PeerCodec {
                 let piece_index = piece_index.try_into().map_err(|e| {
                     io::Error::new(io::ErrorKind::InvalidInput, e)
                 })?;
-                Message::Request(BlockInfo::from_untrusted(
+                Message::Request(BlockInfo {
                     piece_index,
                     offset,
                     len,
-                )?)
+                })
             }
             MessageId::Block => {
                 // TODO: this shouldn't be a debug asset as we're dealing with
@@ -474,12 +456,12 @@ impl Decoder for PeerCodec {
                     io::Error::new(io::ErrorKind::InvalidInput, e)
                 })?;
                 let offset = buf.get_u32();
-                let length = buf.get_u32();
-                Message::Cancel(BlockInfo::from_untrusted(
+                let len = buf.get_u32();
+                Message::Cancel(BlockInfo {
                     piece_index,
                     offset,
-                    length,
-                )?)
+                    len,
+                })
             }
         };
 

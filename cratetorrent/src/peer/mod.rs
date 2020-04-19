@@ -7,15 +7,35 @@ use {
         PeerId, BLOCK_LEN,
     },
     codec::*,
-    futures::{stream::SplitSink, SinkExt, StreamExt},
+    futures::{
+        select,
+        stream::{Fuse, SplitSink},
+        SinkExt, StreamExt,
+    },
     std::{net::SocketAddr, sync::Arc},
-    tokio::{net::TcpStream, sync::RwLock},
+    tokio::{
+        net::TcpStream,
+        sync::{
+            mpsc::{self, UnboundedReceiver, UnboundedSender},
+            RwLock,
+        },
+    },
     tokio_util::codec::{Framed, FramedParts},
 };
 
+/// The channel on which torrent can send a command to the peer session task.
+pub(crate) type Sender = UnboundedSender<Command>;
+type Receiver = UnboundedReceiver<Command>;
+
+/// The commands peer session can receive.
+pub(crate) enum Command {
+    /// Eventually shut down the peer session.
+    Shutdown,
+}
+
 /// At any given time, a connection with a peer is in one of the below states.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub enum State {
+pub(crate) enum State {
     /// The peer connection has not yet been connected or it had been connected
     /// before but has been stopped.
     Disconnected,
@@ -109,6 +129,8 @@ pub(crate) struct PeerSession {
     piece_picker: Arc<RwLock<PiecePicker>>,
     // The entity used to save downloaded file blocks to disk.
     disk: DiskHandle,
+    // The port on which peer session receives commands.
+    cmd_port: Fuse<Receiver>,
     // The remote address of the peer.
     addr: SocketAddr,
     // Session related information.
@@ -147,17 +169,22 @@ impl PeerSession {
         piece_picker: Arc<RwLock<PiecePicker>>,
         disk: DiskHandle,
         addr: SocketAddr,
-    ) -> Self {
-        Self {
-            torrent,
-            piece_picker,
-            disk,
-            addr,
-            status: Status::default(),
-            downloads: Vec::new(),
-            outgoing_requests: Vec::new(),
-            peer_info: None,
-        }
+    ) -> (Self, Sender) {
+        let (cmd_chan, cmd_port) = mpsc::unbounded_channel();
+        (
+            Self {
+                torrent,
+                piece_picker,
+                disk,
+                cmd_port: cmd_port.fuse(),
+                addr,
+                status: Status::default(),
+                downloads: Vec::new(),
+                outgoing_requests: Vec::new(),
+                peer_info: None,
+            },
+            cmd_chan,
+        )
     }
 
     /// Starts the peer session and returns if the connection is closed or an
@@ -245,49 +272,63 @@ impl PeerSession {
     ) -> Result<()> {
         // split the sink and stream so that we can pass the sink while holding
         // a reference to the stream in the loop
-        let (mut sink, mut stream) = socket.split();
-        // start receiving messages
-        while let Some(msg) = stream.next().await {
-            let msg = msg?;
-            log::debug!(
-                "Received message {} from peer {:?}",
-                self.addr,
-                msg.id()
-            );
+        let (mut sink, stream) = socket.split();
+        let mut stream = stream.fuse();
 
-            // handle bitfield message separately as it may only be received
-            // directly after the handshake (later once we implement the FAST
-            // extension, there will be other piece availability related
-            // messages to handle)
-            if self.status.state == State::AvailabilityExchange {
-                if let Message::Bitfield(bitfield) = msg {
-                    self.handle_bitfield_msg(&mut sink, bitfield).await?;
-                } else {
-                    // since we expect peer to be a seed, we *must* get
-                    // a bitfield message, as otherwise we assume the peer to be
-                    // a leech with no pieces to share (which is not good for
-                    // our purposes of downloading a file)
-                    log::warn!(
-                        "Peer {} hasn't sent bitfield, cannot download",
-                        self.addr
+        // start the loop for receiving messages from peer and commands from
+        // other parts of the engine
+        loop {
+            select! {
+                msg = stream.select_next_some() => {
+                    let msg = msg?;
+                    log::debug!(
+                        "Received message {} from peer {:?}",
+                        self.addr,
+                        msg.id()
                     );
-                    return Err(Error::PeerNotSeed);
-                }
 
-                // enter connected state
-                self.status.state = State::Connected;
-                log::info!(
-                    "Peer {} session state: {:?}",
-                    self.addr,
-                    self.status.state
-                );
-            } else {
-                self.handle_msg(&mut sink, msg).await?;
+                    // handle bitfield message separately as it may only be
+                    // received directly after the handshake (later once we
+                    // implement the FAST extension, there will be other piece
+                    // availability related messages to handle)
+                    if self.status.state == State::AvailabilityExchange {
+                        if let Message::Bitfield(bitfield) = msg {
+                            self.handle_bitfield_msg(&mut sink, bitfield).await?;
+                        } else {
+                            // since we expect peer to be a seed, we *must* get
+                            // a bitfield message, as otherwise we assume the
+                            // peer to be a leech with no pieces to share (which
+                            // is not good for our purposes of downloading
+                            // a file)
+                            log::warn!(
+                                "Peer {} hasn't sent bitfield, cannot download",
+                                self.addr
+                            );
+                            return Err(Error::PeerNotSeed);
+                        }
+
+                        // enter connected state
+                        self.status.state = State::Connected;
+                        log::info!(
+                            "Peer {} session state: {:?}",
+                            self.addr,
+                            self.status.state
+                        );
+                    } else {
+                        self.handle_msg(&mut sink, msg).await?;
+                    }
+                }
+                cmd = self.cmd_port.select_next_some() => {
+                    match cmd {
+                        Command::Shutdown => {
+                            log::info!("Shutting down peer {} session", self.addr);
+                            break;
+                        }
+                    }
+                }
             }
         }
 
-        // if we're here, it means the receiving side of the connection was
-        // closed
         Ok(())
     }
 
@@ -538,9 +579,7 @@ impl PeerSession {
                     block_info,
                 );
                 // silently ignore this block if we didn't expected
-                // it (don't abort the connection as this could be a
-                // block that arrived after peer unchoked us or we
-                // cancelled the request)
+                // it
                 //
                 // TODO(https://github.com/mandreyel/cratetorrent/issues/10): In
                 // the future we could add logic that accepts blocks within

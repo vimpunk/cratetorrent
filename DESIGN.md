@@ -80,7 +80,7 @@ Trackers are not implemented so this is disregarded for now.
 - **`piece length`**: Files are split up into _pieces_, and the length of a
   piece is the number of bytes in a piece, except for possibly the last piece,
   which may be shorter. This value is usually a power of two, and usually some
-  multiple of 4KiB. File pieces are indexed from zero.
+  multiple of 16 KiB. File pieces are indexed from zero.
 - **`pieces`**: A list of SHA1 hashes, that represent the expected value of
   hashing each of the file pieces.
 - **`length`** exclusive or **`files`**:
@@ -295,8 +295,9 @@ premature optimization.
 What is needed for this to work reliably is timing out requests, but as of this
 writing that is not yet implemented.
 
-For now, though, the download pipeline is set to a fixed size of 4, but this is
-to be added as a separate step under the optimization milestone.
+For now, though, the download pipeline is set to a fixed size of 4, but
+automatically adjusting it as a function of bandwidth-delay is to be added as a
+separate step under the optimization milestone.
 
 ### Session algorithm
 

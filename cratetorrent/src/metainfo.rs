@@ -76,10 +76,5 @@ pub struct File {
     pub len: u64,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    // TODO(https://github.com/mandreyel/cratetorrent/issues/8): add metainfo
-    // parsing tests
-}
+// TODO(https://github.com/mandreyel/cratetorrent/issues/8): add metainfo
+// parsing tests

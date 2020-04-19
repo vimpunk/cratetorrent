@@ -1,5 +1,7 @@
-pub use serde_bencode::Error as BencodeError;
-pub use tokio::io::Error as IoError;
+pub use {
+    serde_bencode::Error as BencodeError,
+    tokio::{io::Error as IoError, sync::mpsc::error::SendError},
+};
 
 use {
     crate::disk,
@@ -12,6 +14,9 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub enum Error {
     /// Holds bencode serialization or deserialization related errors.
     Bencode(BencodeError),
+    /// The channel on which some component in engine was listening or sending
+    /// died.
+    Channel,
     /// Disk IO related errors.
     Disk(disk::Error),
     /// The block length is not 4 KiB.
@@ -71,6 +76,12 @@ impl From<IoError> for Error {
         // the pieces field is a concatenation of 20 byte SHA-1 hashes, so it
         // must be a multiple of 20
         Self::Io(e)
+    }
+}
+
+impl<T> From<SendError<T>> for Error {
+    fn from(_: SendError<T>) -> Self {
+        Self::Channel
     }
 }
 

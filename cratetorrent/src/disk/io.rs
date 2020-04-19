@@ -65,7 +65,9 @@ impl Disk {
                 } => {
                     if self.torrents.contains_key(&id) {
                         log::warn!("Torrent {} already allocated", id);
-                        // TODO: handle duplicate torrent error
+                        self.alert_chan.send(Alert::TorrentAllocation(Err(
+                            NewTorrentError::AlreadyExists,
+                        )))?;
                         continue;
                     }
 
@@ -183,7 +185,7 @@ impl Torrent {
         // tokio_fs here?
         if download_path.exists() {
             log::warn!("Download path {:?} exists", download_path);
-            return Err(NewTorrentError(std::io::Error::new(
+            return Err(NewTorrentError::Io(std::io::Error::new(
                 std::io::ErrorKind::AlreadyExists,
                 "Download path already exists",
             )));
@@ -215,11 +217,10 @@ impl Torrent {
 
         if !self.pieces.contains_key(&info.piece_index) {
             if let Err(e) = self.start_new_piece(info) {
-                self.alert_chan
-                    .send(TorrentAlert::BatchWrite(Err(e)))?;
+                self.alert_chan.send(TorrentAlert::BatchWrite(Err(e)))?;
                 // return with ok as the disk task itself shouldn't be aborted
                 // due to invalid input
-                return Ok(())
+                return Ok(());
             }
         }
         // TODO: don't unwrap here
@@ -247,7 +248,8 @@ impl Torrent {
             // happen from time to time). We need to alert torrent of this
             // failure and return normally.
             //
-            // TODO: also place back piece write buffer in torrent
+            // TODO(https://github.com/mandreyel/cratetorrent/issues/23): also
+            // place back piece write buffer in torrent and retry later
             let write_result = task::spawn_blocking(move || {
                     let is_piece_valid = piece.matches_hash();
 

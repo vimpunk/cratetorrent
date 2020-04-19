@@ -54,10 +54,20 @@ impl fmt::Display for WriteError {
 /// This error is non-fatal so it should not be grouped with the global `Error`
 /// type as it may be recovered from.
 #[derive(Debug)]
-pub(crate) struct NewTorrentError(pub std::io::Error);
+pub(crate) enum NewTorrentError {
+    /// The torrent entry already exists in `Disk`'s hashmap of torrents.
+    AlreadyExists,
+    /// IO error while allocating torrent.
+    Io(std::io::Error),
+}
 
 impl fmt::Display for NewTorrentError {
     fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
-        write!(fmt, "{}", self.0)
+        match self {
+            Self::AlreadyExists => {
+                write!(fmt, "disk torrent entry alrady exists")
+            }
+            Self::Io(e) => write!(fmt, "{}", e),
+        }
     }
 }

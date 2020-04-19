@@ -3,7 +3,7 @@ use {
         disk::{DiskHandle, TorrentAlert, TorrentAlertReceiver},
         error::*,
         metainfo::Metainfo,
-        peer::PeerSession,
+        peer::{self, PeerSession},
         piece_picker::PiecePicker,
         TorrentId, {PeerId, Sha1Hash},
     },
@@ -75,14 +75,14 @@ impl Torrent {
 
     /// Starts the torrent and returns normally if the download is complete, or
     /// aborts if an error is encountered.
-    pub async fn start(&mut self) {
+    pub async fn start(&mut self) -> Result<()> {
         log::info!("Starting torrent");
 
         // record the torrent starttime
         self.status.start_time = Some(Instant::now());
 
         // start the seed peer session
-        let mut session = PeerSession::outbound(
+        let (mut session, peer_chan) = PeerSession::outbound(
             Arc::clone(&self.status.shared),
             Arc::clone(&self.piece_picker),
             self.disk.clone(),
@@ -119,16 +119,22 @@ impl Torrent {
                     );
                 }
                 disk_alert = self.disk_alert_port.select_next_some() => {
-                    let should_stop = self.handle_disk_alert(disk_alert).await;
+                    let should_stop = self.handle_disk_alert(disk_alert).await?;
                     if should_stop {
-                        return;
+                        // we don't particularly care if we weren't successful
+                        // in sending the command (for now)
+                        peer_chan.send(peer::Command::Shutdown).ok();
+                        return Ok(());
                     }
                 }
             }
         }
     }
 
-    async fn handle_disk_alert(&self, disk_alert: TorrentAlert) -> bool {
+    async fn handle_disk_alert(
+        &self,
+        disk_alert: TorrentAlert,
+    ) -> Result<bool> {
         match disk_alert {
             TorrentAlert::BatchWrite(write_result) => {
                 log::debug!("Disk write result {:?}", write_result);
@@ -137,23 +143,33 @@ impl Torrent {
                     Ok(batch) => {
                         // if this write completed a piece, check torrent
                         // completion
-                        if batch.is_piece_valid.is_some() {
-                            log::info!("Finished piece download");
-                            let missing_piece_count = self
-                                .piece_picker
-                                .read()
-                                .await
-                                .count_missing_pieces();
-                            log::debug!(
-                                "Piece(s) left: {}",
-                                missing_piece_count
-                            );
+                        if let Some(is_piece_valid) = batch.is_piece_valid {
+                            if is_piece_valid {
+                                log::info!(
+                                    "Finished piece download, valid? {}",
+                                    is_piece_valid
+                                );
+                                let missing_piece_count = self
+                                    .piece_picker
+                                    .read()
+                                    .await
+                                    .count_missing_pieces();
+                                log::debug!(
+                                    "Piece(s) left: {}",
+                                    missing_piece_count
+                                );
 
-                            // if the torrent is fully downloaded, stop the
-                            // download loop
-                            if missing_piece_count == 0 {
-                                log::info!("Finished torrent download, exiting");
-                                return true;
+                                // if the torrent is fully downloaded, stop the
+                                // download loop
+                                if missing_piece_count == 0 {
+                                    log::info!(
+                                        "Finished torrent download, exiting"
+                                    );
+                                    return Ok(true);
+                                }
+                            } else {
+                                log::warn!("Received invalid piece, aborting");
+                                return Ok(true);
                             }
                         }
                     }
@@ -165,7 +181,8 @@ impl Torrent {
                 }
             }
         }
-        false
+
+        Ok(false)
     }
 }
 
@@ -227,7 +244,11 @@ pub(crate) struct SharedStatus {
 impl SharedStatus {
     /// Constructs a new `SharedStatus` instance from the given client ID (of
     /// this host) and the torrent metainfo.
-    pub fn new(id: TorrentId, client_id: PeerId, metainfo: &Metainfo) -> Result<Self> {
+    pub fn new(
+        id: TorrentId,
+        client_id: PeerId,
+        metainfo: &Metainfo,
+    ) -> Result<Self> {
         let info_hash = metainfo.create_info_hash()?;
         let piece_count = metainfo.piece_count();
         let download_len = metainfo.download_len()?;
