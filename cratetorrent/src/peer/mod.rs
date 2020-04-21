@@ -23,107 +23,6 @@ use {
     tokio_util::codec::{Framed, FramedParts},
 };
 
-/// The channel on which torrent can send a command to the peer session task.
-pub(crate) type Sender = UnboundedSender<Command>;
-type Receiver = UnboundedReceiver<Command>;
-
-/// The commands peer session can receive.
-pub(crate) enum Command {
-    /// Eventually shut down the peer session.
-    Shutdown,
-}
-
-/// At any given time, a connection with a peer is in one of the below states.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) enum State {
-    /// The peer connection has not yet been connected or it had been connected
-    /// before but has been stopped.
-    Disconnected,
-    /// The state during which the TCP connection is established.
-    Connecting,
-    /// The state after establishing the TCP connection and exchanging the
-    /// initial BitTorrent handshake.
-    Handshaking,
-    /// This state is optional, it is used to verify that the bitfield exchange
-    /// occurrs after the handshake and not later. It is set once the handshakes
-    /// are exchanged and changed as soon as we receive the bitfield or the the
-    /// first message that is not a bitfield. Any subsequent bitfield messages
-    /// are rejected and the connection is dropped, as per the standard.
-    AvailabilityExchange,
-    /// This is the normal state of a peer session, in which any messages, apart
-    /// from the 'handshake' and 'bitfield', may be exchanged.
-    Connected,
-}
-
-/// The default (and initial) state of a peer session is `Disconnected`.
-impl Default for State {
-    fn default() -> Self {
-        Self::Disconnected
-    }
-}
-
-/// The status of a peer session.
-///
-/// By default, both sides of the connection start off as choked and not
-/// interested in the other.
-#[derive(Clone, Copy, Debug)]
-struct Status {
-    /// The current state of the session.
-    state: State,
-    /// If we're cohked, peer doesn't allow us to download pieces from them.
-    is_choked: bool,
-    /// If we're interested, peer has pieces that we don't have.
-    is_interested: bool,
-    /// If peer is choked, we don't allow them to download pieces from us.
-    is_peer_choked: bool,
-    /// If peer is interested in us, they mean to download pieces that we have.
-    is_peer_interested: bool,
-    /// The request queue size, which is the number of block requests we keep
-    /// outstanding to fully saturate the link.
-    ///
-    /// Each peer session needs to maintain an "optimal request queue size"
-    /// value (approximately the bandwidth-delay product), which is the  number
-    /// of block requests it keeps outstanding to fully saturate the link.
-    ///
-    /// This value is derived by collecting a running average of the downloaded
-    /// bytes per second, as well as the average request latency, to arrive at
-    /// the bandwidth-delay product B x D. This value is recalculated every time
-    /// we receive a block, in order to always keep the link fully saturated.
-    ///
-    /// See more on
-    /// [Wikipedia](https://en.wikipedia.org/wiki/Bandwidth-delay_product).
-    ///
-    /// Only set once we start downloading.
-    best_request_queue_len: Option<usize>,
-    /// The total number of bytes downloaded (protocol chatter and downloaded
-    /// files).
-    downloaded_bytes_count: u64,
-    /// The number of piece/block bytes downloaded.
-    downloaded_block_bytes_count: u64,
-}
-
-impl Default for Status {
-    fn default() -> Self {
-        Self {
-            state: State::default(),
-            is_choked: true,
-            is_interested: false,
-            is_peer_choked: true,
-            is_peer_interested: false,
-            best_request_queue_len: None,
-            downloaded_bytes_count: 0,
-            downloaded_block_bytes_count: 0,
-        }
-    }
-}
-
-struct PeerInfo {
-    /// Peer's 20 byte BitTorrent id.
-    peer_id: PeerId,
-    /// All pieces peer has, updated when it announces to us a new piece.
-    pieces: Option<Bitfield>,
-}
-
 pub(crate) struct PeerSession {
     /// Shared information of the torrent.
     torrent: Arc<SharedStatus>,
@@ -634,4 +533,106 @@ impl PeerSession {
 
         Ok(())
     }
+}
+
+/// The channel on which torrent can send a command to the peer session task.
+pub(crate) type Sender = UnboundedSender<Command>;
+type Receiver = UnboundedReceiver<Command>;
+
+/// The commands peer session can receive.
+pub(crate) enum Command {
+    /// Eventually shut down the peer session.
+    Shutdown,
+}
+
+/// The status of a peer session.
+///
+/// By default, both sides of the connection start off as choked and not
+/// interested in the other.
+#[derive(Clone, Copy, Debug)]
+struct Status {
+    /// The current state of the session.
+    state: State,
+    /// If we're cohked, peer doesn't allow us to download pieces from them.
+    is_choked: bool,
+    /// If we're interested, peer has pieces that we don't have.
+    is_interested: bool,
+    /// If peer is choked, we don't allow them to download pieces from us.
+    is_peer_choked: bool,
+    /// If peer is interested in us, they mean to download pieces that we have.
+    is_peer_interested: bool,
+    /// The request queue size, which is the number of block requests we keep
+    /// outstanding to fully saturate the link.
+    ///
+    /// Each peer session needs to maintain an "optimal request queue size"
+    /// value (approximately the bandwidth-delay product), which is the  number
+    /// of block requests it keeps outstanding to fully saturate the link.
+    ///
+    /// This value is derived by collecting a running average of the downloaded
+    /// bytes per second, as well as the average request latency, to arrive at
+    /// the bandwidth-delay product B x D. This value is recalculated every time
+    /// we receive a block, in order to always keep the link fully saturated.
+    ///
+    /// See more on
+    /// [Wikipedia](https://en.wikipedia.org/wiki/Bandwidth-delay_product).
+    ///
+    /// Only set once we start downloading.
+    best_request_queue_len: Option<usize>,
+    /// The total number of bytes downloaded (protocol chatter and downloaded
+    /// files).
+    downloaded_bytes_count: u64,
+    /// The number of piece/block bytes downloaded.
+    downloaded_block_bytes_count: u64,
+}
+
+impl Default for Status {
+    fn default() -> Self {
+        Self {
+            state: State::default(),
+            is_choked: true,
+            is_interested: false,
+            is_peer_choked: true,
+            is_peer_interested: false,
+            best_request_queue_len: None,
+            downloaded_bytes_count: 0,
+            downloaded_block_bytes_count: 0,
+        }
+    }
+}
+
+/// At any given time, a connection with a peer is in one of the below states.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum State {
+    /// The peer connection has not yet been connected or it had been connected
+    /// before but has been stopped.
+    Disconnected,
+    /// The state during which the TCP connection is established.
+    Connecting,
+    /// The state after establishing the TCP connection and exchanging the
+    /// initial BitTorrent handshake.
+    Handshaking,
+    /// This state is optional, it is used to verify that the bitfield exchange
+    /// occurrs after the handshake and not later. It is set once the handshakes
+    /// are exchanged and changed as soon as we receive the bitfield or the the
+    /// first message that is not a bitfield. Any subsequent bitfield messages
+    /// are rejected and the connection is dropped, as per the standard.
+    AvailabilityExchange,
+    /// This is the normal state of a peer session, in which any messages, apart
+    /// from the 'handshake' and 'bitfield', may be exchanged.
+    Connected,
+}
+
+/// The default (and initial) state of a peer session is `Disconnected`.
+impl Default for State {
+    fn default() -> Self {
+        Self::Disconnected
+    }
+}
+
+/// Information about the peer we're connected to.
+struct PeerInfo {
+    /// Peer's 20 byte BitTorrent id.
+    peer_id: PeerId,
+    /// All pieces peer has, updated when it announces to us a new piece.
+    pieces: Option<Bitfield>,
 }

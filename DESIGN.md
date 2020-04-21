@@ -615,7 +615,7 @@ twofold:
   piece.)
 
 ##### Vectored IO
-A peer downloads pieces in 4 KiB blocks and to save overhead of concatenating
+A peer downloads pieces in 16 KiB blocks and to save overhead of concatenating
 these buffers these blocks are stored in the disk write buffer as is, i.e the
 write buffer is a vector of byte vectors.
 Writing each block to disk as a separate system call would incur tremendous
