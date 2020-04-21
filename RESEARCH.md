@@ -3,6 +3,7 @@
 This document includes notes about not yet implemented features, optimizations,
 and ideas in general.
 
+
 ## Piece picker
 
 In order to ensure high availability of all file pieces in a torrent network,
@@ -18,6 +19,21 @@ In the future, different piece download algorithms may be specified for a
 torrent. E.g. some torrent engines are used for streaming video or music
 content, in which case a pseudo-random download order is unhelpful, and
 sequential piece picking is enabled.
+
+
+## Disk IO
+
+Once we have more torrents, each having multiple peer connections, we will need
+a hashmap of torrents, and in that case each disk write (and later read) would
+require synchronization of the hashmap, potentially blocking other peer
+sessions.  Furthermore, in the future blocks buffered in memory for too long
+might be saved to disk (before hashing) when more recently downloaded blocks are
+downloaded and the above mentioned configurable write buffer upper bound is
+reached. For both of these things, it would be more beneficial for `Disk` to run
+its own "event loop" on a separate task, where `Disk` would receive messages
+from each peer (thus not requiring synchronization of each of `Disk`'s fields),
+and it could multiplex the message channel with timers.
+
 
 ## Choking
 

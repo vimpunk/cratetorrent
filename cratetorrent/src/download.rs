@@ -16,12 +16,12 @@ impl Default for Block {
 /// A piece download tracks the completion of an ongoing piece download and is
 /// used to request the next block in piece.
 pub(crate) struct PieceDownload {
-    // The piece's index.
+    /// The piece's index.
     index: usize,
-    // The piece's length in bytes.
+    /// The piece's length in bytes.
     len: u32,
-    // The blocks in this piece, tracking which are downloaded, pending, or
-    // received. The vec is preallocated to the number of blocks in piece.
+    /// The blocks in this piece, tracking which are downloaded, pending, or
+    /// received. The vec is preallocated to the number of blocks in piece.
     blocks: Vec<Block>,
 }
 

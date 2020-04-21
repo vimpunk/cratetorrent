@@ -1,8 +1,12 @@
-pub use serde_bencode::Error as BencodeError;
-pub use tokio::io::Error as IoError;
+pub use {
+    serde_bencode::Error as BencodeError,
+    tokio::{io::Error as IoError, sync::mpsc::error::SendError},
+};
 
-use std::convert::From;
-use std::fmt;
+use {
+    crate::disk,
+    std::{convert::From, fmt},
+};
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -10,10 +14,21 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub enum Error {
     /// Holds bencode serialization or deserialization related errors.
     Bencode(BencodeError),
+    /// The channel on which some component in engine was listening or sending
+    /// died.
+    Channel,
+    /// Disk IO related errors.
+    Disk(disk::Error),
     /// The block length is not 4 KiB.
     InvalidBlockLength,
+    /// The torrent download location is not valid.
+    // TODO: consider adding more variations (path exists, doesn't exist,
+    // permission issues)
+    InvalidDownloadPath,
     /// The torrent metainfo is not valid.
     InvalidMetainfo,
+    /// The torrent ID did not correspond to any entry.
+    InvalidTorrentId,
     /// Peer's torrent info hash did not match ours.
     InvalidPeerInfoHash,
     /// The piece index was larger than the number of pieces in torrent.
@@ -64,8 +79,20 @@ impl From<IoError> for Error {
     }
 }
 
+impl<T> From<SendError<T>> for Error {
+    fn from(_: SendError<T>) -> Self {
+        Self::Channel
+    }
+}
+
 impl From<BencodeError> for Error {
     fn from(e: BencodeError) -> Self {
         Self::Bencode(e)
+    }
+}
+
+impl From<disk::Error> for Error {
+    fn from(e: disk::Error) -> Self {
+        Self::Disk(e)
     }
 }

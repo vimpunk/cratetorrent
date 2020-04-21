@@ -2,19 +2,40 @@ mod codec;
 
 use {
     crate::{
-        download::PieceDownload, error::*, piece_picker::PiecePicker,
-        torrent::SharedStatus, Bitfield, BlockInfo, PeerId, BLOCK_LEN,
+        disk::DiskHandle, download::PieceDownload, error::*,
+        piece_picker::PiecePicker, torrent::SharedStatus, Bitfield, BlockInfo,
+        PeerId, BLOCK_LEN,
     },
     codec::*,
-    futures::{stream::SplitSink, SinkExt, StreamExt},
+    futures::{
+        select,
+        stream::{Fuse, SplitSink},
+        SinkExt, StreamExt,
+    },
     std::{net::SocketAddr, sync::Arc},
-    tokio::{net::TcpStream, sync::RwLock},
+    tokio::{
+        net::TcpStream,
+        sync::{
+            mpsc::{self, UnboundedReceiver, UnboundedSender},
+            RwLock,
+        },
+    },
     tokio_util::codec::{Framed, FramedParts},
 };
 
+/// The channel on which torrent can send a command to the peer session task.
+pub(crate) type Sender = UnboundedSender<Command>;
+type Receiver = UnboundedReceiver<Command>;
+
+/// The commands peer session can receive.
+pub(crate) enum Command {
+    /// Eventually shut down the peer session.
+    Shutdown,
+}
+
 /// At any given time, a connection with a peer is in one of the below states.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub enum State {
+pub(crate) enum State {
     /// The peer connection has not yet been connected or it had been connected
     /// before but has been stopped.
     Disconnected,
@@ -41,42 +62,43 @@ impl Default for State {
     }
 }
 
-// The status of a peer session.
-//
-// By default, both sides of the connection start off as choked and not
-// interested in the other.
+/// The status of a peer session.
+///
+/// By default, both sides of the connection start off as choked and not
+/// interested in the other.
 #[derive(Clone, Copy, Debug)]
 struct Status {
-    // The current state of the session.
+    /// The current state of the session.
     state: State,
-    // If we're cohked, peer doesn't allow us to download pieces from them.
+    /// If we're cohked, peer doesn't allow us to download pieces from them.
     is_choked: bool,
-    // If we're interested, peer has pieces that we don't have.
+    /// If we're interested, peer has pieces that we don't have.
     is_interested: bool,
-    // If peer is choked, we don't allow them to download pieces from us.
+    /// If peer is choked, we don't allow them to download pieces from us.
     is_peer_choked: bool,
-    // If peer is interested in us, they mean to download pieces that we have.
+    /// If peer is interested in us, they mean to download pieces that we have.
     is_peer_interested: bool,
-    // The request queue size, which is the number of block requests we keep
-    // outstanding to fully saturate the link.
-    //
-    // each peer session needs to maintain an "optimal request queue size" value
-    // (approximately the bandwidth-delay product), which is the  number of
-    // block requests it keeps outstanding to fully saturate the link.
-    //
-    // This value is derived by collecting a running average of the downloaded
-    // bytes per second, as well as the average request latency, to arrive at
-    // the bandwidth-delay product B x D. This value is recalculated every time
-    // we receive a block, in order to always keep the link fully saturated.
-    //
-    // https://en.wikipedia.org/wiki/Bandwidth-delay_product
-    //
-    // Only set once we start downloading.
+    /// The request queue size, which is the number of block requests we keep
+    /// outstanding to fully saturate the link.
+    ///
+    /// Each peer session needs to maintain an "optimal request queue size"
+    /// value (approximately the bandwidth-delay product), which is the  number
+    /// of block requests it keeps outstanding to fully saturate the link.
+    ///
+    /// This value is derived by collecting a running average of the downloaded
+    /// bytes per second, as well as the average request latency, to arrive at
+    /// the bandwidth-delay product B x D. This value is recalculated every time
+    /// we receive a block, in order to always keep the link fully saturated.
+    ///
+    /// See more on
+    /// [Wikipedia](https://en.wikipedia.org/wiki/Bandwidth-delay_product).
+    ///
+    /// Only set once we start downloading.
     best_request_queue_len: Option<usize>,
-    // The total number of bytes downloaded (protocol chatter and downloaded
-    // files).
+    /// The total number of bytes downloaded (protocol chatter and downloaded
+    /// files).
     downloaded_bytes_count: u64,
-    // The number of piece/block bytes downloaded.
+    /// The number of piece/block bytes downloaded.
     downloaded_block_bytes_count: u64,
 }
 
@@ -96,41 +118,46 @@ impl Default for Status {
 }
 
 struct PeerInfo {
-    // Peer's 20 byte BitTorrent id.
+    /// Peer's 20 byte BitTorrent id.
     peer_id: PeerId,
-    // All pieces peer has, updated when it announces to us a new piece.
+    /// All pieces peer has, updated when it announces to us a new piece.
     pieces: Option<Bitfield>,
 }
 
 pub(crate) struct PeerSession {
-    // Shared information of the torrent.
+    /// Shared information of the torrent.
     torrent: Arc<SharedStatus>,
+    /// The piece picker picks the next most optimal piece to download and is
+    /// shared by other entities in the same torrent.
     piece_picker: Arc<RwLock<PiecePicker>>,
-    // The remote address of the peer.
+    /// The entity used to save downloaded file blocks to disk.
+    disk: DiskHandle,
+    /// The port on which peer session receives commands.
+    cmd_port: Fuse<Receiver>,
+    /// The remote address of the peer.
     addr: SocketAddr,
-    // Session related information.
+    /// Session related information.
     status: Status,
-    // These are the active piece downloads in which this session is
-    // participating.
+    /// These are the active piece downloads in which this session is
+    /// participating.
     downloads: Vec<PieceDownload>,
-    // Our pending requests that we sent to peer. It represents the blocks that
-    // we are expecting. Thus, if we receive a block that is not in this list,
-    // it is dropped. If we receive a block whose request entry is in here, the
-    // entry is removed.
-    //
-    // Since the Fast extension is not supported (yet), this is emptied when
-    // we're choked, as in that case we don't expect outstanding requests to be
-    // served.
-    //
-    // Note that if a reuest for a piece's block is in this queue, there _must_
-    // be a corresponding entry for the piece download in `downloads`.
-    //
+    /// Our pending requests that we sent to peer. It represents the blocks that
+    /// we are expecting. Thus, if we receive a block that is not in this list,
+    /// it is dropped. If we receive a block whose request entry is in here, the
+    /// entry is removed.
+    ///
+    /// Since the Fast extension is not supported (yet), this is emptied when
+    /// we're choked, as in that case we don't expect outstanding requests to be
+    /// served.
+    ///
+    /// Note that if a reuest for a piece's block is in this queue, there _must_
+    /// be a corresponding entry for the piece download in `downloads`.
     // TODO(https://github.com/mandreyel/cratetorrent/issues/11): Can we store
     // this information in just PieceDownload so that we don't have to enforce
     // this invariant (keeping in mind that later PieceDownloads will be shared
     // among PeerSessions)?
     outgoing_requests: Vec<BlockInfo>,
-    // Information about a peer that is set after a successful handshake.
+    /// Information about a peer that is set after a successful handshake.
     peer_info: Option<PeerInfo>,
 }
 
@@ -142,22 +169,28 @@ impl PeerSession {
     pub fn outbound(
         torrent: Arc<SharedStatus>,
         piece_picker: Arc<RwLock<PiecePicker>>,
+        disk: DiskHandle,
         addr: SocketAddr,
-    ) -> Self {
-        Self {
-            torrent,
-            piece_picker,
-            addr,
-            status: Status::default(),
-            downloads: Vec::new(),
-            outgoing_requests: Vec::new(),
-            peer_info: None,
-        }
+    ) -> (Self, Sender) {
+        let (cmd_chan, cmd_port) = mpsc::unbounded_channel();
+        (
+            Self {
+                torrent,
+                piece_picker,
+                disk,
+                cmd_port: cmd_port.fuse(),
+                addr,
+                status: Status::default(),
+                downloads: Vec::new(),
+                outgoing_requests: Vec::new(),
+                peer_info: None,
+            },
+            cmd_chan,
+        )
     }
 
-    /// Starts the peer session and returns normally if the download is
-    /// complete, or aborts if an error is encountered and the error is
-    /// returned.
+    /// Starts the peer session and returns if the connection is closed or an
+    /// error occurs.
     pub async fn start(&mut self) -> Result<()> {
         log::info!("Starting peer {} session", self.addr);
 
@@ -177,7 +210,7 @@ impl PeerSession {
         socket.send(handshake).await?;
 
         // receive peer's handshake
-        log::info!("Receiving handshake from peer {}", self.addr);
+        log::info!("Waiting for peer {} handshake", self.addr);
         if let Some(peer_handshake) = socket.next().await {
             let peer_handshake = peer_handshake?;
             log::info!("Received handshake from peer {}", self.addr);
@@ -225,205 +258,222 @@ impl PeerSession {
             // run the session
             self.run(socket).await?;
         }
+        // TODO(https://github.com/mandreyel/cratetorrent/issues/20): handle
+        // not recieving anything with an error rather than an Ok(())
 
         Ok(())
     }
 
-    // Runs the session after connection to peer is established.
-    //
-    // This is the main session "loop" and performs the exchange of messages,
-    // timeout logic, among other things.
+    /// Runs the session after connection to peer is established.
+    ///
+    /// This is the main session "loop" and performs the core of the session
+    /// logic: exchange of messages, timeout logic, etc.
     async fn run(
         &mut self,
         socket: Framed<TcpStream, PeerCodec>,
     ) -> Result<()> {
         // split the sink and stream so that we can pass the sink while holding
         // a reference to the stream in the loop
-        let (mut sink, mut stream) = socket.split();
-        // start receiving and sending messages
-        while let Some(msg) = stream.next().await {
-            let msg = msg?;
-            log::info!(
-                "Received message {} from peer {:?}",
-                self.addr,
-                msg.id()
-            );
+        let (mut sink, stream) = socket.split();
+        let mut stream = stream.fuse();
 
-            if self.status.state == State::AvailabilityExchange {
-                // handle bitfield message separately as it may only be received
-                // directly after the handshake
-                if let Message::Bitfield(bitfield) = msg {
-                    // if peer is not a seed, we abort the connection as we only
-                    // support downloading and for that we must be connected to
-                    // a seed (otherwise we couldn't download the whole torrent)
-                    if !bitfield.all() {
-                        log::warn!(
-                            "Peer {} is not a seed, cannot download",
-                            self.addr
-                        );
-                        return Err(Error::PeerNotSeed);
-                    }
-
-                    // register peer's pieces with piece picker
-                    let mut piece_picker = self.piece_picker.write().await;
-                    piece_picker.register_availability(&bitfield);
-                    self.status.is_interested =
-                        piece_picker.is_interested(&bitfield);
-                    debug_assert!(self.status.is_interested);
-                    if let Some(peer_info) = &mut self.peer_info {
-                        peer_info.pieces = Some(bitfield);
-                    }
-
-                    // enter connected state
-                    //
-                    // TODO(https://github.com/mandreyel/cratetorrent/issues/14):
-                    // this needs to be moved out of here once we start
-                    // supporting session with other leeches
-                    self.status.state = State::Connected;
-                    log::info!(
-                        "Peer {} session state: {:?}",
+        // start the loop for receiving messages from peer and commands from
+        // other parts of the engine
+        loop {
+            select! {
+                msg = stream.select_next_some() => {
+                    let msg = msg?;
+                    log::debug!(
+                        "Received message {} from peer {:?}",
                         self.addr,
-                        self.status.state
+                        msg.id()
                     );
 
-                    // send interested message to peer
-                    log::info!("Interested in peer {}", self.addr);
-                    sink.send(Message::Interested).await?;
-                    // This is the start of the download, so set the request
-                    // queue size so we can request blocks. Set it
-                    // optimistically to 4 for now, but later we'll have a TCP
-                    // like slow start algorithm for quickly finding the ideal
-                    // request queue size.
-                    self.status.best_request_queue_len = Some(4);
+                    // handle bitfield message separately as it may only be
+                    // received directly after the handshake (later once we
+                    // implement the FAST extension, there will be other piece
+                    // availability related messages to handle)
+                    if self.status.state == State::AvailabilityExchange {
+                        if let Message::Bitfield(bitfield) = msg {
+                            self.handle_bitfield_msg(&mut sink, bitfield).await?;
+                        } else {
+                            // since we expect peer to be a seed, we *must* get
+                            // a bitfield message, as otherwise we assume the
+                            // peer to be a leech with no pieces to share (which
+                            // is not good for our purposes of downloading
+                            // a file)
+                            log::warn!(
+                                "Peer {} hasn't sent bitfield, cannot download",
+                                self.addr
+                            );
+                            return Err(Error::PeerNotSeed);
+                        }
 
-                    // go to the next message (the message is consumed in this
-                    // branch)
-                    continue;
-                } else {
-                    // since we expect peer to be a seed, we *must* get
-                    // a bitfield message, as otherwise we assume the peer to be
-                    // a leech with no pieces to share (which is not good for
-                    // our purposes of downloading a file)
-                    log::warn!(
-                        "Peer {} hasn't sent bitfield, cannot download",
-                        self.addr
-                    );
-                    return Err(Error::PeerNotSeed);
-                }
-            }
-
-            // handle rest of the protocol messages
-            match msg {
-                Message::Bitfield(_) => {
-                    log::info!(
-                        "Peer {} sent bitfield message not after handshake",
-                        self.addr
-                    );
-                    return Err(Error::BitfieldNotAfterHandshake);
-                }
-                Message::KeepAlive => {
-                    log::info!("Peer {} sent keep alive", self.addr);
-                }
-                Message::Choke => {
-                    if !self.status.is_choked {
-                        log::info!("Peer {} choked us", self.addr);
-                        // since we're choked we don't expect to receive blocks
-                        // for our pending requests
-                        self.outgoing_requests.clear();
-                        self.status.is_choked = true;
-                    }
-                }
-                Message::Unchoke => {
-                    if self.status.is_choked {
-                        log::info!("Peer {} unchoked us", self.addr);
-                        self.status.is_choked = false;
-                        // now that we are allowed to request blocks, start the
-                        // download pipeline if we're interested
-                        self.make_requests(&mut sink).await?;
-                    }
-                }
-                Message::Interested => {
-                    if !self.status.is_peer_interested {
-                        log::info!("Peer {} is interested", self.addr);
-                        self.status.is_peer_interested = true;
-                    }
-                }
-                Message::NotInterested => {
-                    if self.status.is_peer_interested {
-                        log::info!("Peer {} is not interested", self.addr);
-                        self.status.is_peer_interested = false;
-                    }
-                }
-                Message::Block {
-                    piece_index,
-                    offset,
-                    data,
-                } => {
-                    if data.len() != BLOCK_LEN as usize {
+                        // enter connected state
+                        self.status.state = State::Connected;
                         log::info!(
-                            "Peer {} sent block with invalid length ({})",
+                            "Peer {} session state: {:?}",
                             self.addr,
-                            data.len()
+                            self.status.state
                         );
-                        return Err(Error::InvalidBlockLength);
-                    }
-
-                    let block_info = BlockInfo::new(piece_index, offset);
-                    self.handle_block_msg(block_info, data).await;
-
-                    let missing_piece_count =
-                        self.piece_picker.read().await.count_missing_pieces();
-                    log::debug!("Piece(s) left: {}", missing_piece_count);
-
-                    // check if we finished the download with this block
-                    //
-                    // TODO(https://github.com/mandreyel/cratetorrent/issues/13):
-                    // we don't actually need to check this after every received
-                    // block, it's enough to check if a piece has been completed
-                    if missing_piece_count == 0 {
-                        log::info!("Finished torrent download");
-                        return Ok(());
                     } else {
-                        // otherwise we may be able to make more requests now
-                        // that a block has arrived
-                        self.make_requests(&mut sink).await?;
+                        self.handle_msg(&mut sink, msg).await?;
                     }
                 }
-                // these messages are not expected until seed functionality is added
-                Message::Have { .. } => {
-                    log::warn!(
-                        "Seed {} sent unexpected message: {:?}",
-                        self.addr,
-                        MessageId::Have
-                    );
-                }
-                Message::Request(_) => {
-                    log::warn!(
-                        "Seed {} sent unexpected message: {:?}",
-                        self.addr,
-                        MessageId::Request
-                    );
-                }
-                Message::Cancel(_) => {
-                    log::warn!(
-                        "Seed {} sent unexpected message: {:?}",
-                        self.addr,
-                        MessageId::Cancel
-                    );
+                cmd = self.cmd_port.select_next_some() => {
+                    match cmd {
+                        Command::Shutdown => {
+                            log::info!("Shutting down peer {} session", self.addr);
+                            break;
+                        }
+                    }
                 }
             }
         }
 
-        // if we're here, it means the receiving side of the connection was
-        // closed
         Ok(())
     }
 
-    // Fills the session's download pipeline with the optimal number of
-    // requests.
-    //
-    // To see what this means, please refer to the
-    // `Status::best_request_queue_len` or the relevant section in DESIGN.md.
+    /// Handles a message expected in the `AvailabilityExchange` state
+    /// (currently only the bitfield message).
+    async fn handle_bitfield_msg(
+        &mut self,
+        sink: &mut SplitSink<Framed<TcpStream, PeerCodec>, Message>,
+        bitfield: Bitfield,
+    ) -> Result<()> {
+        debug_assert_eq!(self.status.state, State::AvailabilityExchange);
+        log::info!("Handling peer {} Bitfield message", self.addr);
+
+        // if peer is not a seed, we abort the connection as we only
+        // support downloading and for that we must be connected to
+        // a seed (otherwise we couldn't download the whole torrent)
+        if !bitfield.all() {
+            log::warn!("Peer {} is not a seed, cannot download", self.addr);
+            return Err(Error::PeerNotSeed);
+        }
+
+        // register peer's pieces with piece picker
+        let mut piece_picker = self.piece_picker.write().await;
+        piece_picker.register_availability(&bitfield);
+        self.status.is_interested = piece_picker.is_interested(&bitfield);
+        debug_assert!(self.status.is_interested);
+        if let Some(peer_info) = &mut self.peer_info {
+            peer_info.pieces = Some(bitfield);
+        }
+
+        // send interested message to peer
+        log::info!("Interested in peer {}", self.addr);
+        sink.send(Message::Interested).await?;
+        // This is the start of the download, so set the request
+        // queue size so we can request blocks. Set it
+        // optimistically to 4 for now, but later we'll have a TCP
+        // like slow start algorithm for quickly finding the ideal
+        // request queue size.
+        self.status.best_request_queue_len = Some(4);
+
+        Ok(())
+    }
+
+    /// Handles messages expected in the `Connected` state.
+    async fn handle_msg(
+        &mut self,
+        sink: &mut SplitSink<Framed<TcpStream, PeerCodec>, Message>,
+        msg: Message,
+    ) -> Result<()> {
+        match msg {
+            Message::Bitfield(_) => {
+                log::info!(
+                    "Peer {} sent bitfield message not after handshake",
+                    self.addr
+                );
+                return Err(Error::BitfieldNotAfterHandshake);
+            }
+            Message::KeepAlive => {
+                log::info!("Peer {} sent keep alive", self.addr);
+            }
+            Message::Choke => {
+                if !self.status.is_choked {
+                    log::info!("Peer {} choked us", self.addr);
+                    // since we're choked we don't expect to receive blocks
+                    // for our pending requests
+                    self.outgoing_requests.clear();
+                    self.status.is_choked = true;
+                }
+            }
+            Message::Unchoke => {
+                if self.status.is_choked {
+                    log::info!("Peer {} unchoked us", self.addr);
+                    self.status.is_choked = false;
+                    // now that we are allowed to request blocks, start the
+                    // download pipeline if we're interested
+                    self.make_requests(sink).await?;
+                }
+            }
+            Message::Interested => {
+                if !self.status.is_peer_interested {
+                    log::info!("Peer {} is interested", self.addr);
+                    self.status.is_peer_interested = true;
+                }
+            }
+            Message::NotInterested => {
+                if self.status.is_peer_interested {
+                    log::info!("Peer {} is not interested", self.addr);
+                    self.status.is_peer_interested = false;
+                }
+            }
+            Message::Block {
+                piece_index,
+                offset,
+                data,
+            } => {
+                if data.len() != BLOCK_LEN as usize {
+                    log::info!(
+                        "Peer {} sent block with invalid length ({})",
+                        self.addr,
+                        data.len()
+                    );
+                    return Err(Error::InvalidBlockLength);
+                }
+
+                let block_info = BlockInfo::new(piece_index, offset);
+                self.handle_block_msg(block_info, data).await?;
+
+                // we may be able to make more requests now that a block has
+                // arrived
+                self.make_requests(sink).await?;
+            }
+            // these messages are not expected until seed functionality is added
+            Message::Have { .. } => {
+                log::warn!(
+                    "Seed {} sent unexpected message: {:?}",
+                    self.addr,
+                    MessageId::Have
+                );
+            }
+            Message::Request(_) => {
+                log::warn!(
+                    "Seed {} sent unexpected message: {:?}",
+                    self.addr,
+                    MessageId::Request
+                );
+            }
+            Message::Cancel(_) => {
+                log::warn!(
+                    "Seed {} sent unexpected message: {:?}",
+                    self.addr,
+                    MessageId::Cancel
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Fills the session's download pipeline with the optimal number of
+    /// requests.
+    ///
+    /// To see what this means, please refer to the
+    /// `Status::best_request_queue_len` or the relevant section in DESIGN.md.
     async fn make_requests(
         &mut self,
         sink: &mut SplitSink<Framed<TcpStream, PeerCodec>, Message>,
@@ -483,8 +533,10 @@ impl PeerSession {
             if let Some(index) = piece_picker.pick_piece() {
                 log::info!("Session {} picked piece {}", self.addr, index);
 
-                let mut download =
-                    PieceDownload::new(index, self.torrent.piece_len(index)?);
+                let mut download = PieceDownload::new(
+                    index,
+                    self.torrent.storage.piece_len(index)?,
+                );
 
                 // request blocks and register in our outgoing requests queue
                 let blocks = download.pick_blocks(request_queue_len);
@@ -507,10 +559,14 @@ impl PeerSession {
         Ok(())
     }
 
-    // Verifies block validity, registers the download (and finishes a piece
-    // download if this was the last missing block in piece) and updates
-    // statistics about the download.
-    async fn handle_block_msg(&mut self, block_info: BlockInfo, data: Vec<u8>) {
+    /// Verifies block validity, registers the download (and finishes a piece
+    /// download if this was the last missing block in piece) and updates
+    /// statistics about the download.
+    async fn handle_block_msg(
+        &mut self,
+        block_info: BlockInfo,
+        data: Vec<u8>,
+    ) -> Result<()> {
         log::info!("Peer {} sent block: {:?}", self.addr, block_info);
 
         // find block in the list of pending requests
@@ -527,15 +583,13 @@ impl PeerSession {
                     block_info,
                 );
                 // silently ignore this block if we didn't expected
-                // it (don't abort the connection as this could be a
-                // block that arrived after peer unchoked us or we
-                // cancelled the request)
+                // it
                 //
                 // TODO(https://github.com/mandreyel/cratetorrent/issues/10): In
                 // the future we could add logic that accepts blocks within
                 // a window after the last request. If not done, peer could DoS
                 // us by sending unwanted blocks repeatedly.
-                return;
+                return Ok(());
             }
         };
 
@@ -571,10 +625,13 @@ impl PeerSession {
             self.downloads.remove(download_pos);
         }
 
-        // TODO(https://github.com/mandreyel/cratetorrent/issues/12): validate
-        // and save the block to disk (this is part of the next MR)
+        // validate and save the block to disk by sending a write command to the
+        // disk task
+        self.disk.write_block(self.torrent.id, block_info, data)?;
 
         // adjust request statistics
         self.status.downloaded_block_bytes_count += block_info.len as u64;
+
+        Ok(())
     }
 }

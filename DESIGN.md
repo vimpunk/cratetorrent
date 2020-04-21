@@ -15,11 +15,23 @@ it is developed, in a near real world scenario helps to integrate feedback
 immediately.
 
 
+## Documentation
+
+This document is focused on the high-level design of cratetorrent, but the code
+has ample of inline documentation (beyond the documentation of public APIs). To
+view it, you need to run the following command from the repo root:
+```bash
+cargo doc --document-private-items --open --exclude cratetorrent-cli 
+```
+
+
 ## Sources
 
 - The official protocol specification: http://bittorrent.org/beps/bep_0003.html
 - My previous torrent engine implementation (in C++), Tide: (https://github.com/mandreyel/tide)
 - The libtorrent blog: https://blog.libtorrent.org/
+
+**NOTE**: This document assumes familiarity with the official protocol.
 
 
 ## Overview
@@ -30,7 +42,7 @@ few components (each detailed in its own section):
 
 - [metainfo](#metainfo), which contains necessary information to start the
   torrent;
-- [disk IO](#disk-io), which saves downloaded file pieces;
+- [engine](#engine), which orchestrates all components of the torrent engine,
 - [torrent](#torrent), which coordinates the download of a torrent;
 - a [piece picker](#piece-picker) per torrent, that selects the next piece to
   download;
@@ -38,7 +50,11 @@ few components (each detailed in its own section):
   downloader), which implement the peer protocol and perform the actual
   download;
 - in progress [piece download](#piece-download), which track the state of an
-  ongoing piece download.
+  ongoing piece download;
+- [disk IO](#disk-io), which saves downloaded file pieces.
+
+At the end of the document, there is an [overview](#anatomy-of-a-block-fetch) of
+a block fetch, incorporating the above key components.
 
 The binary takes as command line arguments the single seed IP address and port
 pair, the torrent metainfo, and sets up a single torrent, piece picker, and a single peer
@@ -74,7 +90,7 @@ Trackers are not implemented so this is disregarded for now.
 - **`piece length`**: Files are split up into _pieces_, and the length of a
   piece is the number of bytes in a piece, except for possibly the last piece,
   which may be shorter. This value is usually a power of two, and usually some
-  multiple of 4KiB. File pieces are indexed from zero.
+  multiple of 16 KiB. File pieces are indexed from zero.
 - **`pieces`**: A list of SHA1 hashes, that represent the expected value of
   hashing each of the file pieces.
 - **`length`** exclusive or **`files`**:
@@ -101,10 +117,10 @@ A better approach would be to keep the underlying raw source (as in Tide), but
   this is not currently possible with the current solution of using `serde`.
 
 
-## Disk IO
+## Engine
 
-Currently, due to the experimental state of the crate, downloaded blocks are not
-saved to disk. This section is to be added when the functionality is implemented.
+Currently there is no explicit entity, but simply an engine module that provides
+a public method to start a torrent.
 
 
 ## Torrent
@@ -121,6 +137,9 @@ saved to disk. This section is to be added when the functionality is implemented
   sorts of lifetime issues by running the torrent and the peer session in the
   same task's async loop. More research on this and alternatives needs to be
   done.
+- Communication with peer sessions would happen through `tokio`'s `mpsc` queues,
+  since a peer session is spawned on a task which may be run by a different
+  thread on which torrent is executing
 
 
 ## Piece picker
@@ -286,8 +305,9 @@ premature optimization.
 What is needed for this to work reliably is timing out requests, but as of this
 writing that is not yet implemented.
 
-For now, though, the download pipeline is set to a fixed size of 4, but this is
-to be added as a separate step under the optimization milestone.
+For now, though, the download pipeline is set to a fixed size of 4, but
+automatically adjusting it as a function of bandwidth-delay is to be added as a
+separate step under the optimization milestone.
 
 ### Session algorithm
 
@@ -493,3 +513,186 @@ arrives.
 A piece download tracks the piece completion of an ongoing piece download. It
   will play an important role in optimizing download performance, but none of
   that is implemented for now (see research notes).
+
+
+## Disk IO
+
+This entity (called `Disk` in the code) is responsible for everything disk
+storage related. This includes:
+- allocating a torrent's files at download start;
+- hashing downloaded file pieces and saving them to disk;
+- once seeding functionality is implemented: reading blocks from disk.
+
+### High level architecture
+
+All disk related activity is spawned on a separate task by the torrent engine,
+and communication with it happens through `mpsc` channels. The alternative is
+for `Disk` to not be on its own task but simply be referenced (through an `Arc`)
+by all entities using it. In this case, we would have the following issues:
+- While disk IO itself is spawned on blocking tasks (see below), we need to
+  await its result. This means that for e.g. block writes initiated from a peer
+  session task, the peer session task would be blocked (since await calls in the
+  same `async` block are sequential). This is the most crucial one.
+- Increased complexity due to lifetime and synchronization issues with multiple
+  peer session tasks referring to the same `Disk`, whereas with the task based
+  solution `Disk` is the only one accessing its internal state.
+- Worse separation of concerns, leading to code that is more difficult to reason
+  about and thus potentially more bugs. Whereas having `Disk` on a separate task
+  allows for a sequential model of execution, which is clearer and less
+  error-prone.
+
+Spawning the disk task returns a command channel (aka disk handle) and a global
+alert port (aka receiver): the former is used for sending commands to disk and
+the latter is used to receive back the results of certain commands. However,
+because `mpsc` channels can only have a single receiver and because each torrent
+needs its own alert port, we a second layer of alert channels for torrents.
+
+Thus, when `Disk` receives a command to create a torrent, it creates the torrent
+specific alert channel's send and receive halves, and the latter is returned in
+the torrent allocation command result via the global alert channel, so engine
+can hand it down to the new torrent. A step by step example follows.
+
+#### Example workflow
+1. `Engine` creates a new torrent, and part of this routine allocates the torrent
+   on disk via the disk command channel.
+2. `Disk` creates a `Torrent` in-memory entry and allocates torrent and creates a
+   new alert channel pair and sends the receiving half via the global alert
+   port.
+3. `Engine` listens on the alert port for the allocation result containing the
+   torrent alert port (or an error).
+4. `Engine` creates a `Torrent`, which spawns `PeerSession`s with a copy of the disk
+   handle, and starts downloading blocks.
+5. Each peer session saves blocks to disk by sending block write commands to
+   `Disk` via the handle.
+6. Blocks are usually buffered until their piece is complete, at which point the
+   blocks are written to disk. The result of the disk write is advertised to
+   torrent via its alert channel.
+7. Torrent receives and handles the block write result.
+
+Caveat emptor: the performance implications of this indirection needs to be
+tested, `mpsc` is not guaranteed to be the good choice here.
+
+To summarize, sending alerts from the disk task is two-tiered:
+- global (e.g. the result of allocating a new torrent),
+- per torrent (e.g. the result of writing blocks to disk).
+
+### Responsibilities
+
+#### Torrent file allocation
+Currently only a single file download is supported, so the file allocation is
+very simple: the to-be-downloaded file is checked for existence and the first
+write creates the file.
+Late we will want to pre-allocate sparse files truncated to the download length.
+
+#### Saving to disk
+The primary purpose of `Disk` right now is to buffer downloaded blocks in memory
+until the piece is complete, hash the piece, notify torrent of the result, and,
+if the resulting hash matches the expected one, save to disk.
+
+Efficiency is key here; a torrent application is twofold IO bound: on disk
+and on the network. To achieve the fastest download given a fixed network
+bandwidth is to buffer the whole download in memory and write a file to disk in
+one go, i.e. to not produce disk backpressure for the download.
+
+However, this is not practical in most cases. For one, the download host may be
+shut down mid-download, which would lead to the loss of the existing downloaded
+data. The other reason is the desire to constrain memory usage as the user may
+not have enough RAM to buffer an entire download, or even if they do, they would
+likely wish that other programs running in parallel would also have sufficient
+RAM.
+
+For these reasons cratetorrent will be highly configurable to serve all needs,
+but will aim to provide sane, good enough defaults for most use cases. For now,
+though, the implementation is very simple: we download sequentially, and buffer
+blocks of a piece until the piece is complete, after which that piece is flushed
+to disk. The rationale for saving a piece to disk as soon as it is complete is
+twofold:
+- being defensive: so that in an event of shutdown, as much data is persisted as
+  possible;
+- simplicity of the implementation of the MVP. (Later it will be possible to
+  configure cratetorrent to buffer several pieces before flushing them to disk,
+  or buffer at most `n` blocks, which may be fewer than is in a torrent's
+  piece.)
+
+##### Vectored IO
+A peer downloads pieces in 4 KiB blocks and to save overhead of concatenating
+these buffers these blocks are stored in the disk write buffer as is, i.e the
+write buffer is a vector of byte vectors.
+Writing each block to disk as a separate system call would incur tremendous
+overhead (relative to the other operations in most of cratetorrent), especially
+that context switches into kernel space have become far more expensive lately to
+mitigate risks of speculative execution, so these buffers are flushed to disk in
+one system call, using [vectored
+IO](http://man7.org/linux/man-pages/man2/readv.2.html).
+
+While in most of the code asynchrony is provided for by `tokio`, all disk IO is
+synchronous because `tokio_fs`'s vectored write implementation is just a wrapper
+around repeatedly calling `write` for each buffer, defeating any performance
+gains. For these instance of blocking IO, we make use of `tokio`'s builtin
+threadpool and spawn the blocking IO
+[tasks](https://docs.rs/tokio/0.2.17/tokio/task/fn.spawn_blocking.html) on it.
+
+For now `writev` is used, as that's the API that the standard lib `File`
+[exposes](https://doc.rust-lang.org/std/io/trait.Write.html#method.write_vectored),
+however, this requires that the file cursor is at the correct position, and
+requires seeking to the correct position if it's not. Since this needlessly
+adds another context switch, but ideally
+[`pwritev`](https://docs.rs/nix/0.17.0/nix/sys/uio/fn.pwritev.html) would be
+used (where the position of the write is specified as part of the write
+operation). For now the standard lib is used for simplicity as this is not yet
+an issue due to downloading sequentially, but this will be changed later.
+
+
+## Anatomy of a block fetch
+
+1. `PeerSession` requests `n` blocks from peer.
+2. For each received block, `DiskHandle::write_block` is called which sends a
+   message via the command channel to instruct `Disk` to place the block in the
+   write buffer.
+3. Once the corresponding piece has all blocks in it, it is hashed and, if the
+   hash matches the expected hash, saved to disk.
+4. The written blocks and the hash result is communicated back to torrent via a
+   channel (or the IO error if any occurred).
+5. `Torrent` receives this message, processes it, and forwards it to the peer
+   session.
+
+
+## Error handling
+
+Particular emphasis is placed on correct error handling; both internally and
+the way the API consumer may handle errors.
+
+Errors are distinguished as **fatal** and **fallible**. Fatal errors cause the
+system to stop, while fallible errors are such as would occur on a time-to-time
+basis (more frequently network IO failure, less frequently disk IO failure)
+which should not be grounds for stopping the engine.
+
+The distinction is made due to the ability to effortlessly propagate errors via
+Rust's try (`?`) operator, as otherwise with a single `Error` type, encompassing
+all possible errors of the crate (as is common in the Rust ecosystem), it would
+be all too easy to forget to handle errors in critical places. For this reason
+not only are the two types of errors distinct types, they don't provide
+automatic conversion either.
+
+As an example, take disk IO errors: they are generally not expected to occur,
+but it could be that the user has moved the download file while the download was
+ongoing, or that disk storage has been used up. This, however, should not bring
+the entire engine to halt and instead these errors should be logged, routed to
+the responsible entity, and the operation re-attempted at a later time point.
+
+Now recovery is not implemented in cratetorrent yet, but the error distinction
+is: there is a general `Error` type, and a `WriteError`. The disk task is
+run until a fatal error is encountered (e.g. `mpsc` channel failure) and so all
+it's internal methods only return `Error` on fatal error; non-fatal errors are
+communicated via the alert channels. Because of this we know that in the
+following code a disk write won't abort the event loop because of IO failure,
+only because of channel sending failure (which is for now the desired behavior):
+```rust
+while let Some(cmd) = self.cmd_port.recv().await {
+    match cmd {
+        Command::BlockWrite(block) => {
+            self.write_block(block)?;
+        }
+    }
+}
+```
