@@ -21,7 +21,7 @@ This document is focused on the high-level design of cratetorrent, but the code
 has ample of inline documentation (beyond the documentation of public APIs). To
 view it, you need to run the following command from the repo root:
 ```bash
-cargo doc --document-private-items --open --exclude cratetorrent-cli 
+cargo doc --document-private-items --workspace --exclude cratetorrent-cli --open
 ```
 
 
