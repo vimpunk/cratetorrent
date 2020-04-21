@@ -78,12 +78,12 @@ impl DiskHandle {
     }
 }
 
-// The channel for sendng commands to the disk task.
+/// The channel for sendng commands to the disk task.
 type CommandSender = UnboundedSender<Command>;
-// The channel the disk task uses to listen for commands.
+/// The channel the disk task uses to listen for commands.
 type CommandReceiver = UnboundedReceiver<Command>;
 
-// The type of commands that the disk can execute.
+/// The type of commands that the disk can execute.
 enum Command {
     // Allocate a new torrent.
     NewTorrent {
@@ -101,7 +101,7 @@ enum Command {
     Shutdown,
 }
 
-// The type of channel used to alert the engine about global events.
+/// The type of channel used to alert the engine about global events.
 type AlertSender = UnboundedSender<Alert>;
 /// The channel on which the engine can listen for global disk events.
 pub(crate) type AlertReceiver = UnboundedReceiver<Alert>;
@@ -125,7 +125,7 @@ pub(crate) struct TorrentAllocation {
     pub alert_port: TorrentAlertReceiver,
 }
 
-// The type of channel used to alert a torrent about torrent specific events.
+/// The type of channel used to alert a torrent about torrent specific events.
 type TorrentAlertSender = UnboundedSender<TorrentAlert>;
 /// The type of channel on which a torrent can listen for block write
 /// completions.

@@ -1,35 +1,39 @@
 use crate::Bitfield;
 
-// Metadata about a piece relevant for the piece picker.
+/// Metadata about a piece relevant for the piece picker.
 #[derive(Clone, Copy, Default)]
 struct Piece {
-    // The frequency of this piece in the torrent swarm.
+    /// The frequency of this piece in the torrent swarm.
     frequency: usize,
-    // Whether we have already picked this piece and are currently downloading
-    // it. This flag is set to true when the piece is picked.
-    //
-    // This is to prevent picking the same piece we are already downloading in
-    // the scenario in which we want to pick a new piece before the already
-    // downloadng piece finishes. Not having this check would lead us to always
-    // pick this piece until we tell the piece picker that we have it and thus
-    // wouldn't be able to download multiple pieces simultaneously (an important
-    // optimizaiton step).
+    /// Whether we have already picked this piece and are currently downloading
+    /// it. This flag is set to true when the piece is picked.
+    ///
+    /// This is to prevent picking the same piece we are already downloading in
+    /// the scenario in which we want to pick a new piece before the already
+    /// downloadng piece finishes. Not having this check would lead us to always
+    /// pick this piece until we tell the piece picker that we have it and thus
+    /// wouldn't be able to download multiple pieces simultaneously (an
+    /// important optimizaiton step).
     is_pending: bool,
 }
 
 pub(crate) struct PiecePicker {
-    // Represents the pieces that we have downloaded.
-    //
-    // The bitfield is pre-allocated to the number of pieces in the torrent and
-    // each field that we have is set to true.
+    /// Represents the pieces that we have downloaded.
+    ///
+    /// The bitfield is pre-allocated to the number of pieces in the torrent and
+    /// each field that we have is set to true.
     own_pieces: Bitfield,
-    // We collect metadata about pieces in the torrent swarm in this vector.
-    //
-    // The vector is pre-allocated to the number of pieces in the torrent.
+    /// We collect metadata about pieces in the torrent swarm in this vector.
+    ///
+    /// The vector is pre-allocated to the number of pieces in the torrent.
     pieces: Vec<Piece>,
 }
 
 impl PiecePicker {
+    /// Creates a new empty piece picker for the given number of pieces.
+    ///
+    /// Empty means that we don't have any of the pieces yet, so piece picker
+    /// will pick all of them, if available from our peers.
     pub fn new(piece_count: usize) -> Self {
         let mut pieces = Vec::new();
         pieces.resize_with(piece_count, Piece::default);

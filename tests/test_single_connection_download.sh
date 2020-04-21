@@ -103,9 +103,9 @@ fi
 echo
 echo "Comparing downloaded file ${download_path} to source file ${source_path}"
 if cmp --silent "${download_path}" "${source_path}"; then
-    echo "Success! Downloaded file matches source file"
+    echo "SUCCESS: downloaded file matches source file"
     exit 0
 else
-    echo "Failure: downloaded file does not match source file"
+    echo "FAILURE: downloaded file does not match source file"
     exit "${invalid_download}"
 fi

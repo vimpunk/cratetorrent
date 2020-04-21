@@ -62,42 +62,43 @@ impl Default for State {
     }
 }
 
-// The status of a peer session.
-//
-// By default, both sides of the connection start off as choked and not
-// interested in the other.
+/// The status of a peer session.
+///
+/// By default, both sides of the connection start off as choked and not
+/// interested in the other.
 #[derive(Clone, Copy, Debug)]
 struct Status {
-    // The current state of the session.
+    /// The current state of the session.
     state: State,
-    // If we're cohked, peer doesn't allow us to download pieces from them.
+    /// If we're cohked, peer doesn't allow us to download pieces from them.
     is_choked: bool,
-    // If we're interested, peer has pieces that we don't have.
+    /// If we're interested, peer has pieces that we don't have.
     is_interested: bool,
-    // If peer is choked, we don't allow them to download pieces from us.
+    /// If peer is choked, we don't allow them to download pieces from us.
     is_peer_choked: bool,
-    // If peer is interested in us, they mean to download pieces that we have.
+    /// If peer is interested in us, they mean to download pieces that we have.
     is_peer_interested: bool,
-    // The request queue size, which is the number of block requests we keep
-    // outstanding to fully saturate the link.
-    //
-    // each peer session needs to maintain an "optimal request queue size" value
-    // (approximately the bandwidth-delay product), which is the  number of
-    // block requests it keeps outstanding to fully saturate the link.
-    //
-    // This value is derived by collecting a running average of the downloaded
-    // bytes per second, as well as the average request latency, to arrive at
-    // the bandwidth-delay product B x D. This value is recalculated every time
-    // we receive a block, in order to always keep the link fully saturated.
-    //
-    // https://en.wikipedia.org/wiki/Bandwidth-delay_product
-    //
-    // Only set once we start downloading.
+    /// The request queue size, which is the number of block requests we keep
+    /// outstanding to fully saturate the link.
+    ///
+    /// Each peer session needs to maintain an "optimal request queue size"
+    /// value (approximately the bandwidth-delay product), which is the  number
+    /// of block requests it keeps outstanding to fully saturate the link.
+    ///
+    /// This value is derived by collecting a running average of the downloaded
+    /// bytes per second, as well as the average request latency, to arrive at
+    /// the bandwidth-delay product B x D. This value is recalculated every time
+    /// we receive a block, in order to always keep the link fully saturated.
+    ///
+    /// See more on
+    /// [Wikipedia](https://en.wikipedia.org/wiki/Bandwidth-delay_product).
+    ///
+    /// Only set once we start downloading.
     best_request_queue_len: Option<usize>,
-    // The total number of bytes downloaded (protocol chatter and downloaded
-    // files).
+    /// The total number of bytes downloaded (protocol chatter and downloaded
+    /// files).
     downloaded_bytes_count: u64,
-    // The number of piece/block bytes downloaded.
+    /// The number of piece/block bytes downloaded.
     downloaded_block_bytes_count: u64,
 }
 
@@ -117,45 +118,46 @@ impl Default for Status {
 }
 
 struct PeerInfo {
-    // Peer's 20 byte BitTorrent id.
+    /// Peer's 20 byte BitTorrent id.
     peer_id: PeerId,
-    // All pieces peer has, updated when it announces to us a new piece.
+    /// All pieces peer has, updated when it announces to us a new piece.
     pieces: Option<Bitfield>,
 }
 
 pub(crate) struct PeerSession {
-    // Shared information of the torrent.
+    /// Shared information of the torrent.
     torrent: Arc<SharedStatus>,
+    /// The piece picker picks the next most optimal piece to download and is
+    /// shared by other entities in the same torrent.
     piece_picker: Arc<RwLock<PiecePicker>>,
-    // The entity used to save downloaded file blocks to disk.
+    /// The entity used to save downloaded file blocks to disk.
     disk: DiskHandle,
-    // The port on which peer session receives commands.
+    /// The port on which peer session receives commands.
     cmd_port: Fuse<Receiver>,
-    // The remote address of the peer.
+    /// The remote address of the peer.
     addr: SocketAddr,
-    // Session related information.
+    /// Session related information.
     status: Status,
-    // These are the active piece downloads in which this session is
-    // participating.
+    /// These are the active piece downloads in which this session is
+    /// participating.
     downloads: Vec<PieceDownload>,
-    // Our pending requests that we sent to peer. It represents the blocks that
-    // we are expecting. Thus, if we receive a block that is not in this list,
-    // it is dropped. If we receive a block whose request entry is in here, the
-    // entry is removed.
-    //
-    // Since the Fast extension is not supported (yet), this is emptied when
-    // we're choked, as in that case we don't expect outstanding requests to be
-    // served.
-    //
-    // Note that if a reuest for a piece's block is in this queue, there _must_
-    // be a corresponding entry for the piece download in `downloads`.
-    //
+    /// Our pending requests that we sent to peer. It represents the blocks that
+    /// we are expecting. Thus, if we receive a block that is not in this list,
+    /// it is dropped. If we receive a block whose request entry is in here, the
+    /// entry is removed.
+    ///
+    /// Since the Fast extension is not supported (yet), this is emptied when
+    /// we're choked, as in that case we don't expect outstanding requests to be
+    /// served.
+    ///
+    /// Note that if a reuest for a piece's block is in this queue, there _must_
+    /// be a corresponding entry for the piece download in `downloads`.
     // TODO(https://github.com/mandreyel/cratetorrent/issues/11): Can we store
     // this information in just PieceDownload so that we don't have to enforce
     // this invariant (keeping in mind that later PieceDownloads will be shared
     // among PeerSessions)?
     outgoing_requests: Vec<BlockInfo>,
-    // Information about a peer that is set after a successful handshake.
+    /// Information about a peer that is set after a successful handshake.
     peer_info: Option<PeerInfo>,
 }
 
@@ -262,10 +264,10 @@ impl PeerSession {
         Ok(())
     }
 
-    // Runs the session after connection to peer is established.
-    //
-    // This is the main session "loop" and performs the core of the session
-    // logic: exchange of messages, timeout logic, etc.
+    /// Runs the session after connection to peer is established.
+    ///
+    /// This is the main session "loop" and performs the core of the session
+    /// logic: exchange of messages, timeout logic, etc.
     async fn run(
         &mut self,
         socket: Framed<TcpStream, PeerCodec>,
@@ -332,8 +334,8 @@ impl PeerSession {
         Ok(())
     }
 
-    // Handles a message expected in the `AvailabilityExchange` state (currently
-    // only the bitfield message).
+    /// Handles a message expected in the `AvailabilityExchange` state
+    /// (currently only the bitfield message).
     async fn handle_bitfield_msg(
         &mut self,
         sink: &mut SplitSink<Framed<TcpStream, PeerCodec>, Message>,
@@ -372,7 +374,7 @@ impl PeerSession {
         Ok(())
     }
 
-    // Handles messages expected in the `Connected` state.
+    /// Handles messages expected in the `Connected` state.
     async fn handle_msg(
         &mut self,
         sink: &mut SplitSink<Framed<TcpStream, PeerCodec>, Message>,
@@ -467,11 +469,11 @@ impl PeerSession {
         Ok(())
     }
 
-    // Fills the session's download pipeline with the optimal number of
-    // requests.
-    //
-    // To see what this means, please refer to the
-    // `Status::best_request_queue_len` or the relevant section in DESIGN.md.
+    /// Fills the session's download pipeline with the optimal number of
+    /// requests.
+    ///
+    /// To see what this means, please refer to the
+    /// `Status::best_request_queue_len` or the relevant section in DESIGN.md.
     async fn make_requests(
         &mut self,
         sink: &mut SplitSink<Framed<TcpStream, PeerCodec>, Message>,
@@ -555,9 +557,9 @@ impl PeerSession {
         Ok(())
     }
 
-    // Verifies block validity, registers the download (and finishes a piece
-    // download if this was the last missing block in piece) and updates
-    // statistics about the download.
+    /// Verifies block validity, registers the download (and finishes a piece
+    /// download if this was the last missing block in piece) and updates
+    /// statistics about the download.
     async fn handle_block_msg(
         &mut self,
         block_info: BlockInfo,

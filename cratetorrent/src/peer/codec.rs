@@ -4,6 +4,8 @@ use std::convert::{TryFrom, TryInto};
 use std::io;
 use tokio_util::codec::{Decoder, Encoder};
 
+/// The message sent at the beginning of a peer session by both sides of the
+/// connection.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Handshake {
     /// The protocol string, which must equal "BitTorrent protocol", as
@@ -20,6 +22,8 @@ pub(crate) struct Handshake {
 }
 
 impl Handshake {
+    /// Creates a new protocol version 1 handshake with the given info hash and
+    /// peer id.
     pub fn new(info_hash: [u8; 20], peer_id: [u8; 20]) -> Self {
         let mut prot = [0; 19];
         prot.copy_from_slice(PROTOCOL_STRING.as_bytes());
@@ -32,81 +36,17 @@ impl Handshake {
     }
 }
 
-#[repr(u8)]
-#[derive(Copy, Clone, Debug)]
-pub(crate) enum MessageId {
-    Choke = 0,
-    Unchoke = 1,
-    Interested = 2,
-    NotInterested = 3,
-    Have = 4,
-    Bitfield = 5,
-    Request = 6,
-    Block = 7,
-    Cancel = 8,
-}
-
-impl TryFrom<u8> for MessageId {
-    type Error = io::Error;
-    fn try_from(k: u8) -> Result<Self, Self::Error> {
-        use MessageId::*;
-        match k {
-            k if k == Choke as u8 => Ok(Choke),
-            k if k == Unchoke as u8 => Ok(Unchoke),
-            k if k == Interested as u8 => Ok(Interested),
-            k if k == NotInterested as u8 => Ok(NotInterested),
-            k if k == Have as u8 => Ok(Have),
-            k if k == Bitfield as u8 => Ok(Bitfield),
-            k if k == Request as u8 => Ok(Request),
-            k if k == Block as u8 => Ok(Block),
-            k if k == Cancel as u8 => Ok(Cancel),
-            _ => Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "Unknown message id",
-            )),
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) enum Message {
-    KeepAlive,
-    Bitfield(Bitfield),
-    Choke,
-    Unchoke,
-    Interested,
-    NotInterested,
-    Have {
-        piece_index: usize,
-    },
-    Request(BlockInfo),
-    Block {
-        piece_index: usize,
-        offset: u32,
-        data: Vec<u8>,
-    },
-    Cancel(BlockInfo),
-}
-
-impl Message {
-    pub fn id(&self) -> Option<MessageId> {
-        match self {
-            Self::KeepAlive => None,
-            Self::Bitfield(_) => Some(MessageId::Bitfield),
-            Self::Choke => Some(MessageId::Choke),
-            Self::Unchoke => Some(MessageId::Unchoke),
-            Self::Interested => Some(MessageId::Interested),
-            Self::NotInterested => Some(MessageId::NotInterested),
-            Self::Have { .. } => Some(MessageId::Have),
-            Self::Request(_) => Some(MessageId::Request),
-            Self::Block { .. } => Some(MessageId::Block),
-            Self::Cancel(_) => Some(MessageId::Cancel),
-        }
-    }
-}
-
+/// The protocol version 1 string included in the handshake.
 pub(crate) const PROTOCOL_STRING: &str = "BitTorrent protocol";
 
+/// Codec for encoding and decoding handshakes.
+///
+/// This has to be a separate codec as the handshake has a different structure
+/// than the rest of the messages. Moreover, handshakes may only be sent once at
+/// the beginning of a connection, preceding all other messages. Thus, after
+/// receiving and sending a handshake the codec should be switched to
+/// [`PeerCodec`], but care should be taken not to discard the underlying
+/// receive and send buffers.
 pub(crate) struct HandshakeCodec;
 
 impl Encoder for HandshakeCodec {
@@ -204,6 +144,85 @@ impl Decoder for HandshakeCodec {
     }
 }
 
+/// The actual messages exchanged by peers.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum Message {
+    KeepAlive,
+    Bitfield(Bitfield),
+    Choke,
+    Unchoke,
+    Interested,
+    NotInterested,
+    Have {
+        piece_index: usize,
+    },
+    Request(BlockInfo),
+    Block {
+        piece_index: usize,
+        offset: u32,
+        data: Vec<u8>,
+    },
+    Cancel(BlockInfo),
+}
+
+impl Message {
+    /// Returns the ID of the message, if it has one (e.g. keep alive doesn't).
+    pub fn id(&self) -> Option<MessageId> {
+        match self {
+            Self::KeepAlive => None,
+            Self::Bitfield(_) => Some(MessageId::Bitfield),
+            Self::Choke => Some(MessageId::Choke),
+            Self::Unchoke => Some(MessageId::Unchoke),
+            Self::Interested => Some(MessageId::Interested),
+            Self::NotInterested => Some(MessageId::NotInterested),
+            Self::Have { .. } => Some(MessageId::Have),
+            Self::Request(_) => Some(MessageId::Request),
+            Self::Block { .. } => Some(MessageId::Block),
+            Self::Cancel(_) => Some(MessageId::Cancel),
+        }
+    }
+}
+
+/// The ID of a message, which is included as a prefix in most messages.
+///
+/// The handshake and keep alive messages don't have explicit IDs.
+#[repr(u8)]
+#[derive(Copy, Clone, Debug)]
+pub(crate) enum MessageId {
+    Choke = 0,
+    Unchoke = 1,
+    Interested = 2,
+    NotInterested = 3,
+    Have = 4,
+    Bitfield = 5,
+    Request = 6,
+    Block = 7,
+    Cancel = 8,
+}
+
+impl TryFrom<u8> for MessageId {
+    type Error = io::Error;
+
+    fn try_from(k: u8) -> Result<Self, Self::Error> {
+        use MessageId::*;
+        match k {
+            k if k == Choke as u8 => Ok(Choke),
+            k if k == Unchoke as u8 => Ok(Unchoke),
+            k if k == Interested as u8 => Ok(Interested),
+            k if k == NotInterested as u8 => Ok(NotInterested),
+            k if k == Have as u8 => Ok(Have),
+            k if k == Bitfield as u8 => Ok(Bitfield),
+            k if k == Request as u8 => Ok(Request),
+            k if k == Block as u8 => Ok(Block),
+            k if k == Cancel as u8 => Ok(Cancel),
+            _ => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Unknown message id",
+            )),
+        }
+    }
+}
+
 impl BlockInfo {
     /// Encodes the block info in the network binary protocol's format into the
     /// given buffer.
@@ -219,6 +238,8 @@ impl BlockInfo {
     }
 }
 
+/// Codec for encoding and decoding messages exchanged by peers (other than the
+/// handshake).
 pub(crate) struct PeerCodec;
 
 impl Encoder for PeerCodec {
