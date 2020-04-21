@@ -4,13 +4,15 @@ use {
         CommandReceiver, CommandSender, TorrentAlert, TorrentAlertReceiver,
         TorrentAlertSender, TorrentAllocation,
     },
-    crate::{block_count, BlockInfo, Sha1Hash, TorrentId, torrent::StorageInfo},
+    crate::{
+        block_count, torrent::StorageInfo, BlockInfo, Sha1Hash, TorrentId,
+    },
     sha1::{Digest, Sha1},
     std::{
         collections::{BTreeMap, HashMap},
         fs::OpenOptions,
         io::{IoSlice, Write},
-        path::{Path},
+        path::Path,
     },
     tokio::{
         sync::{mpsc, RwLock},

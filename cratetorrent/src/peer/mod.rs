@@ -533,8 +533,10 @@ impl PeerSession {
             if let Some(index) = piece_picker.pick_piece() {
                 log::info!("Session {} picked piece {}", self.addr, index);
 
-                let mut download =
-                    PieceDownload::new(index, self.torrent.storage.piece_len(index)?);
+                let mut download = PieceDownload::new(
+                    index,
+                    self.torrent.storage.piece_len(index)?,
+                );
 
                 // request blocks and register in our outgoing requests queue
                 let blocks = download.pick_blocks(request_queue_len);
