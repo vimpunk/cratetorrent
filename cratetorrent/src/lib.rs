@@ -52,7 +52,7 @@ pub(crate) struct BlockInfo {
     pub piece_index: usize,
     /// The zero-based byte offset into the piece.
     pub offset: u32,
-    /// The block's length in bytes. Always 4KiB (0x4000 bytes), for now.
+    /// The block's length in bytes. Always 16 KiB (0x4000 bytes), for now.
     pub len: u32,
 }
 

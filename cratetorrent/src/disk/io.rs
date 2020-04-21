@@ -337,7 +337,7 @@ struct Piece {
     /// number of blocks in piece, the piece is complete and, if the hash is
     /// correct, saved to disk.
     ///
-    /// Each block must be 4 KiB and is mapped to its offset within piece, and
+    /// Each block must be 16 KiB and is mapped to its offset within piece, and
     /// we're using a BTreeMap to keep keys sorted. This is important when
     /// iterating over the map to hash each block after one another.
     blocks: BTreeMap<u32, Vec<u8>>,

@@ -19,7 +19,7 @@ pub enum Error {
     Channel,
     /// Disk IO related errors.
     Disk(disk::Error),
-    /// The block length is not 4 KiB.
+    /// The block length is not 16 KiB.
     InvalidBlockLength,
     /// The torrent download location is not valid.
     // TODO: consider adding more variations (path exists, doesn't exist,
