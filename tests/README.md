@@ -5,8 +5,10 @@ cratetorrent.
 
 In general all tests use Docker containers and a Docker virtual network to
 simulate a primitive network of peers (later on this may be expanded so that
-peers are not on a LAN), and one or more of the containers will run established
-torrent clients against which to test cratetorrent's protocol compliance, i.e.
+peers are not on the same LAN), and one or more of the containers will be the
+the established
+[Transmission](https://manpages.ubuntu.com/manpages/bionic/man1/transmission-cli.1.html)
+torrent clients, against which to test cratetorrent's protocol compliance, i.e.
 to make sure that cratetorrent works with torrent clients used in the wild.
 
 To ensure reproducible test results, it is always the same file that is going to
@@ -20,60 +22,70 @@ Moreover, various file sizes are going to be tested to ensure that
 cratetorrent works correctly with small and large files, with different piece
 sizes and other parameters.
 
+On how test environments are set up, read more [below](#set-up-test-environment)
+
 
 ## Prerequisites
 
 To run the tests, you first first need to build the `cratetorrent-cli` binary
-and its corresponding docker image. For instructions, see the project readme.
+and its corresponding docker image. For instructions, see the [project
+readme](../README.md).
 
 
-## Single file download
+## Test environment
 
-```bash
-./test_single_connection_download.sh
-```
+Each test case sets up its own environment (e.g. a seed container and files to
+seed), using the [`start_container.sh`](./start_container.sh) and
+[`seed_new_torrent.sh`](./seed_new_torrent.sh) utility scripts. After the local
+environment is set up, tests will be able to reuse their environment, meaning
+they need not be generated again (which is on purpose, so that one can perform
+testing against the same seed(s) and file(s) repeatedly). However, the generated
+files are not tracked in version control to avoid bloat, so these are only
+"constant" for local development. These files will be placed in the `assets`
+directory (created by the scripts).
 
-The test [script](test_single_connection_download.sh) creates a local Docker
-network of two BitTorrent peer containers, in which one container runs the well
-established Transmission torrent client that has a
-[CLI](https://manpages.ubuntu.com/manpages/bionic/man1/transmission-cli.1.html)
-as well as a pre-packaged [Docker
-image](https://hub.docker.com/r/linuxserver/transmission/). Another container
-runs the cratetorrent test binary.
+To see how to use the above scripts, run them with the `--help` flag.
 
-The Transmission torrent client, with a pre-defined Docker IP address, seeds the
-predefined file, while our client tries to download the file.
+In the below [section](#set-up-test-environment), you will find instructions on
+how to set up such a test environment manually. You generally won't need to do
+this, it's included as documentation for how these scripts work.
 
-The test binary takes as argument the address of the single seed, and the
-various torrent details that are normally found in the torrent metainfo file
-(the one with the `.torrent` suffix). The reason these are given as command line
-arguments to the binary by the test runner is that metainfo parsing is not yet
-implemented, as the very first goal is to just connect to the seed and download
-a file.
+### Test binary
 
-There is a predefined 1MiB file,
-[`1mb-test.txt`](assets/transmission/downloads/completed/1mb-test.txt), along
-with the torrent [metainfo file](assets/transmission/watch/1mb-test.txt) both
-created using the Transmission CLI. (For instructions, see
-[below](#set-up-test-environment)).
+The cratetorrent-cli binary takes as its arguments:
+- the seed's address in the local Docker network,
+- and the download destination directory.
 
-The integration test script sets up the network with the seed container, a leech
-cratetorrent container which is going to download the file into a Docker bind
-mounted directory. The in-progress file is going to have the `.part` suffix
-(this is a feature of many existing clients) which is only removed once the
-download finishes. The test script is going to continuously query for the
-existence of the resulting file, and if it is found, it concludes the download
-finished and compares the downloaded file with the file that was used for
-seeding.
+It runs only as long as the download is in progress. Once it's
+done, it exits, and this fact is used by the test scripts to perform download
+verification afterwards. Later this will change to something more sophisticated,
+like detecting when a download is no longer a partial download (e.g. with the
+`.part` suffix).
+
+
+## Test scenarios
+
+### Single small file download
+
+- **Goal**: the successful download of a single (small) file, asserting basic
+  correctness
+- **Command**: `./test_single_connection_download.sh`
+- **Containers**:
+  - cratetorrent-cli test binary
+  - Transmission seed
+- **File**: 1 MiB file generated at `assets/1mb-test.txt`
 
 
 ## Set up test environment
 
-Instructions are given on how to set up the test environment and the required
-data (found in [`assets`](assets)).
+Instructions are given on how to manually set up the test environment and the required
+data. Prefer the [`start_container.sh`](./start_container.sh) and
+[`seed_new_torrent.sh`](./seed_new_torrent.sh) scripts, this section is just
+documentation for these scripts.
 
 #### Generate test file
-1. `cd assets`
+1. Create the necessary directories, `assets`,
+   `assets/transmission/{downloads,watch,config}`, and `cd assets`.
 2. Truncate the file to the desired size:
   ```bash
   truncate -s 1M 1mb-test.txt
@@ -118,13 +130,13 @@ data (found in [`assets`](assets)).
   ```bash
   docker exec -ti transmission bash
   ```
-9. Inside the container, create the torrent metainfo file. **NOTE**: the file is
-   not created not with the `.torrent` suffix on purpose! This is so that the
-   Transmission daemon doesn't pick it up, as we have a root session in
-   container and thus the file created will be owned by root, but the docker
-   container was specified to run the daemon with the `UID` and `GID` of the host
-   user (most likely not root), so the process would fail to read in the torrent
-   file.
+9. Inside the container, create the torrent metainfo file. **NOTE**: The file is
+   not created with the `.torrent` suffix on purpose! Since the Transmission
+   container can only be run as root, the metainfo file is also created as root.
+   However, this would cause a permission denied error for the transmission
+   container itself, as it is running as the specified user/group.
+   By not specifying the `.torrent` suffix, Transmission won't pick it up, so we
+   get a chance to change its permissions before adding the suffix. 
   ```bash
   transmission-create -o /watch/1mb-test.txt /downloads/complete/1mb-test.txt
   ```
