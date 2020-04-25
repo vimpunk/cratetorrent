@@ -1,9 +1,8 @@
 #!/bin/bash
 
 # This test sets up a single transmission seeder and a cratetorrent leecher and
-# asserts that cratetorrent downloads a single 1MiB file from the seed
+# asserts that cratetorrent downloads a single 1 MiB file from the seed
 # correctly.
-
 
 set -e
 
@@ -21,81 +20,80 @@ invalid_download=5
 # it would be safer to prase the subnet mask or even create our own user-defined
 # bridge network.
 seed_ip=172.17.0.2
+# this is the default Transmission port
 seed_port=51413
 seed_addr="${seed_ip}:${seed_port}"
-seed_cont_name=transmission
+seed_container=tr-seed-1
 
-# provide way to override the log level but default to tracing everything in the
-# cratetorrent lib and binary
-RUST_LOG=${RUST_LOG:-cratetorrent=trace,cratetorrent_cli=trace}
+# start the container (if it's not already running)
+./start_container.sh --name "${seed_container}" --ip "${seed_ip}"
 
-metainfo_path="$(pwd)/assets/1mb-test.txt.torrent"
-metainfo_cont_path=/cratetorrent/1mb-test.txt.torrent
-if [ ! -f "${metainfo_path}" ]; then
-    echo "Metainfo at ${metainfo_path} not found"
-    exit "${metainfo_not_found}"
+assets_dir="$(pwd)/assets"
+torrent_name=1mb-test.txt
+# the seeded file
+source_path="${assets_dir}/${torrent_name}"
+# and its metainfo
+metainfo_path="${source_path}.torrent"
+metainfo_cont_path="/cratetorrent/${torrent_name}.torrent"
+
+# start seeding the torrent, if it doesn't exist yet
+if [ ! -f "${source_path}" ]; then
+    echo "Starting torrent ${torrent_name} seeding"
+    torrent_size=$(( 1024 * 1024 )) # 1 MiB
+    ./seed_new_torrent.sh \
+        --name "${torrent_name}" \
+        --size "${torrent_size}" \
+        --seed "${seed_container}"
 fi
 
-download_dir=/tmp/cratetorrent
-download_cont_dir=/tmp
-
-# the final download destination
-download_path="${download_dir}/1mb-test.txt"
-# the source file's path
-source_path=assets/1mb-test.txt
-# sanity check
+# sanity check that after starting the seeding, the source files
+# were properly generated
+if [ ! -f "${metainfo_path}" ]; then
+    echo "Error: metainfo ${metainfo_path} does not exist!"
+    exit "${metainfo_not_found}"
+fi
 if [ ! -f "${source_path}" ]; then
     echo "Error: source file ${source_path} does not exist!"
     exit "${source_not_found}"
 fi
 
-# initialize download directory to state expcted by the cratetortent-cli
+# where we download our file on the host and in the container
+download_dir=/tmp/cratetorrent
+download_cont_dir=/tmp
+# the final download destination on the host
+download_path="${download_dir}/${torrent_name}"
+
+# initialize download directory to state expected by the cratetortent-cli
 if [ -d "${download_dir}" ]; then
     echo "Clearing download directory ${download_dir}"
     rm -rf "${download_dir}"/*
+elif [ -f "${download_dir}" ]; then
+    echo "Error: file found where download directory ${download_dir} is supposed to be"
+    exit "${dest_in_use}"
 elif [ ! -d "${download_dir}" ]; then
     echo "Creating download directory ${download_dir}"
     mkdir -p "${download_dir}"
-elif [ -f "${download_dir}" ]; then
-    echo "File found where download directory ${download_dir} is supposed to be"
-    exit "${dest_in_use}"
 fi
 
-# start seed container if it isn't running
-if ! docker inspect --format '{{.State.Running}}' "${seed_cont_name}" > /dev/null; then
-    echo "Starting Transmission seed container"
-    docker run \
-        --rm \
-        --name "${seed_cont_name}" \
-        --publish 9091:9091 \
-        --env PUID=$UID \
-        --env PGID=$UID \
-        --mount type=bind,src="$(pwd)/assets/transmission/downloads",dst=/downloads \
-        --mount type=bind,src="$(pwd)/assets/transmission/watch",dst=/watch \
-        --mount type=bind,src="$(pwd)/assets/transmission/config",dst=/config \
-        --ip "${seed_ip}" \
-        --detach \
-        linuxserver/transmission
+# provide way to override the log level but default to tracing everything in the
+# cratetorrent lib and binary
+rust_log=${RUST_LOG:-cratetorrent=trace,cratetorrent_cli=trace}
 
-    # wait for seed to come online
-    sleep 5
-fi
-
-# start cratetorrent leech container, which will run until the torrent is not
+# start cratetorrent leech container, which will run till the torrent is
 # downloaded or an error occurs
 time docker run \
     -ti \
     --env SEED="${seed_addr}" \
     --env METAINFO_PATH="${metainfo_cont_path}" \
     --env DOWNLOAD_DIR="${download_cont_dir}" \
-    --env RUST_LOG="${RUST_LOG}" \
+    --env RUST_LOG="${rust_log}" \
     --mount type=bind,src="${metainfo_path}",dst="${metainfo_cont_path}" \
     --mount type=bind,src="${download_dir}",dst="${download_cont_dir}" \
     cratetorrent-cli
 
 # first check if the file was downloaded in the expected path
 if [ ! -f "${download_path}" ]; then
-    echo "Error: downloaded file ${download_path} does not exist!"
+    echo "FAILURE: downloaded file ${download_path} does not exist!"
     exit "${download_not_found}"
 fi
 
