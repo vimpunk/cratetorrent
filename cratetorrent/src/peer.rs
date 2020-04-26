@@ -253,8 +253,7 @@ impl PeerSession {
 
         // register peer's pieces with piece picker
         let mut piece_picker = self.piece_picker.write().await;
-        piece_picker.register_availability(&bitfield);
-        self.status.is_interested = piece_picker.is_interested(&bitfield);
+        self.status.is_interested = piece_picker.register_availability(&bitfield)?;
         debug_assert!(self.status.is_interested);
         if let Some(peer_info) = &mut self.peer_info {
             peer_info.pieces = Some(bitfield);

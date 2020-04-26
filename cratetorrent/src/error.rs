@@ -1,11 +1,8 @@
+use std::{convert::From, fmt};
+
 pub use {
     serde_bencode::Error as BencodeError,
     tokio::{io::Error as IoError, sync::mpsc::error::SendError},
-};
-
-use {
-    crate::disk,
-    std::{convert::From, fmt},
 };
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -17,8 +14,8 @@ pub enum Error {
     /// The channel on which some component in engine was listening or sending
     /// died.
     Channel,
-    /// Disk IO related errors.
-    Disk(disk::Error),
+    /// The bitfield contained a different number of pieces than our own.
+    InvalidBitfield,
     /// The block length is not 16 KiB.
     InvalidBlockLength,
     /// The torrent download location is not valid.
@@ -88,11 +85,5 @@ impl<T> From<SendError<T>> for Error {
 impl From<BencodeError> for Error {
     fn from(e: BencodeError) -> Self {
         Self::Bencode(e)
-    }
-}
-
-impl From<disk::Error> for Error {
-    fn from(e: disk::Error) -> Self {
-        Self::Disk(e)
     }
 }

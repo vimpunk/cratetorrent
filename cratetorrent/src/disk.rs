@@ -1,16 +1,16 @@
 mod error;
 mod io;
 
-pub use error::*;
-
 use {
-    crate::{torrent::StorageInfo, BlockInfo, TorrentId},
+    crate::{error::Error, torrent::StorageInfo, BlockInfo, TorrentId},
     io::Disk,
     tokio::{
         sync::mpsc::{UnboundedReceiver, UnboundedSender},
         task,
     },
 };
+
+pub(crate) use error::*;
 
 /// Spawns a disk IO task and returns a tuple with the task join handle, the
 /// disk handle used for sending commands, and a channel for receiving

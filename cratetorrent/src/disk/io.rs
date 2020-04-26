@@ -5,7 +5,8 @@ use {
         TorrentAlertSender, TorrentAllocation,
     },
     crate::{
-        block_count, torrent::StorageInfo, BlockInfo, Sha1Hash, TorrentId,
+        block_count, error::Error, torrent::StorageInfo, BlockInfo, Sha1Hash,
+        TorrentId,
     },
     sha1::{Digest, Sha1},
     std::{
@@ -120,6 +121,10 @@ impl Disk {
         log::trace!("Saving torrent {} block {:?} to disk", id, info);
 
         // check torrent id
+        //
+        // TODO: maybe we don't want to crash the disk task due to an invalid
+        // torrent id: could it be that disk requests for a torrent arrive after
+        // a torrent has been removed?
         let torrent = self.torrents.get(&id).ok_or_else(|| {
             log::warn!("Torrent {} not found", id);
             Error::InvalidTorrentId
@@ -362,6 +367,9 @@ impl Piece {
     /// Calculates the piece's hash using all its blocks and returns if it
     /// matches the expected hash.
     fn matches_hash(&self) -> bool {
+        // sanity check that we only call this method if we have all blocks in
+        // piece
+        debug_assert_eq!(self.blocks.len(), block_count(self.len));
         let mut hasher = Sha1::new();
         for block in self.blocks.values() {
             hasher.input(&block);
@@ -376,6 +384,9 @@ impl Piece {
     fn write(&self, part_path: &Path) -> Result<usize, WriteError> {
         let mut block_slices: Vec<_> =
             self.blocks.values().map(|b| IoSlice::new(&b[..])).collect();
+        // TODO(https://github.com/mandreyel/cratetorrent/issues/33): we
+        // shouldn't open file every time we want to write to it--keep a handle
+        // to it open
         let mut file = OpenOptions::new()
             .create(true)
             .append(true)
