@@ -1,4 +1,6 @@
-use {crate::error::Error, std::fmt};
+use std::fmt;
+
+use crate::error::Error;
 
 /// The disk IO result type.
 pub(crate) type Result<T, E = Error> = std::result::Result<T, E>;

@@ -1,13 +1,4 @@
 use {
-    super::{
-        error::*, Alert, AlertReceiver, AlertSender, BatchWrite, Command,
-        CommandReceiver, CommandSender, TorrentAlert, TorrentAlertReceiver,
-        TorrentAlertSender, TorrentAllocation,
-    },
-    crate::{
-        block_count, error::Error, torrent::StorageInfo, BlockInfo, Sha1Hash,
-        TorrentId,
-    },
     sha1::{Digest, Sha1},
     std::{
         collections::{BTreeMap, HashMap},
@@ -18,6 +9,18 @@ use {
     tokio::{
         sync::{mpsc, RwLock},
         task,
+    },
+};
+
+use {
+    super::{
+        error::*, Alert, AlertReceiver, AlertSender, BatchWrite, Command,
+        CommandReceiver, CommandSender, TorrentAlert, TorrentAlertReceiver,
+        TorrentAlertSender, TorrentAllocation,
+    },
+    crate::{
+        block_count, error::Error, torrent::StorageInfo, BlockInfo, Sha1Hash,
+        TorrentId,
     },
 };
 

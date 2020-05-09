@@ -1,12 +1,4 @@
 use {
-    crate::{
-        disk::{DiskHandle, TorrentAlert, TorrentAlertReceiver},
-        error::*,
-        metainfo::Metainfo,
-        peer::{self, PeerSession},
-        piece_picker::PiecePicker,
-        TorrentId, {PeerId, Sha1Hash},
-    },
     futures::{
         select,
         stream::{Fuse, StreamExt},
@@ -18,6 +10,15 @@ use {
         time::{Duration, Instant},
     },
     tokio::{sync::RwLock, task, time},
+};
+
+use crate::{
+    disk::{DiskHandle, TorrentAlert, TorrentAlertReceiver},
+    error::*,
+    metainfo::Metainfo,
+    peer::{self, PeerSession},
+    piece_picker::PiecePicker,
+    TorrentId, {PeerId, Sha1Hash},
 };
 
 pub(crate) struct Torrent {

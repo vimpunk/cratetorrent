@@ -1,12 +1,6 @@
 mod codec;
 
 use {
-    crate::{
-        disk::DiskHandle, download::PieceDownload, error::*,
-        piece_picker::PiecePicker, torrent::SharedStatus, Bitfield, BlockInfo,
-        PeerId, BLOCK_LEN,
-    },
-    codec::*,
     futures::{
         select,
         stream::{Fuse, SplitSink},
@@ -21,6 +15,15 @@ use {
         },
     },
     tokio_util::codec::{Framed, FramedParts},
+};
+
+use {
+    crate::{
+        disk::DiskHandle, download::PieceDownload, error::*,
+        piece_picker::PiecePicker, torrent::SharedStatus, Bitfield, BlockInfo,
+        PeerId, BLOCK_LEN,
+    },
+    codec::*,
 };
 
 pub(crate) struct PeerSession {
@@ -253,7 +256,8 @@ impl PeerSession {
 
         // register peer's pieces with piece picker
         let mut piece_picker = self.piece_picker.write().await;
-        self.status.is_interested = piece_picker.register_availability(&bitfield)?;
+        self.status.is_interested =
+            piece_picker.register_availability(&bitfield)?;
         debug_assert!(self.status.is_interested);
         if let Some(peer_info) = &mut self.peer_info {
             peer_info.pieces = Some(bitfield);

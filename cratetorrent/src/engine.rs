@@ -1,13 +1,14 @@
 use {
-    crate::{
-        disk::{self, Alert},
-        error::*,
-        metainfo::Metainfo,
-        torrent::{StorageInfo, Torrent},
-        PeerId,
-    },
     std::{net::SocketAddr, path::Path},
     tokio::runtime::Runtime,
+};
+
+use crate::{
+    disk::{self, Alert},
+    error::*,
+    metainfo::Metainfo,
+    torrent::{StorageInfo, Torrent},
+    PeerId,
 };
 
 /// Connects to a single seed and downloads the torrent or aborts on error.

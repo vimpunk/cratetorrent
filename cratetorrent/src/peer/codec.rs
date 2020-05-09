@@ -1,8 +1,11 @@
+use {
+    bytes::{Buf, BufMut, BytesMut},
+    std::convert::{TryFrom, TryInto},
+    std::io,
+    tokio_util::codec::{Decoder, Encoder},
+};
+
 use crate::{Bitfield, BlockInfo};
-use bytes::{Buf, BufMut, BytesMut};
-use std::convert::{TryFrom, TryInto};
-use std::io;
-use tokio_util::codec::{Decoder, Encoder};
 
 /// The message sent at the beginning of a peer session by both sides of the
 /// connection.

@@ -1,6 +1,6 @@
-use crate::error::*;
-use crate::Sha1Hash;
 use sha1::{Digest, Sha1};
+
+use {crate::error::*, crate::Sha1Hash};
 
 #[derive(Debug, Deserialize)]
 pub struct Metainfo {

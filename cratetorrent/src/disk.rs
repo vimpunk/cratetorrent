@@ -1,13 +1,14 @@
 mod error;
 mod io;
 
+use tokio::{
+    sync::mpsc::{UnboundedReceiver, UnboundedSender},
+    task,
+};
+
 use {
     crate::{error::Error, torrent::StorageInfo, BlockInfo, TorrentId},
     io::Disk,
-    tokio::{
-        sync::mpsc::{UnboundedReceiver, UnboundedSender},
-        task,
-    },
 };
 
 pub(crate) use error::*;
