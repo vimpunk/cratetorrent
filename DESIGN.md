@@ -120,26 +120,39 @@ A better approach would be to keep the underlying raw source (as in Tide), but
 ## Engine
 
 Currently there is no explicit entity, but simply an engine module that provides
-a public method to start a torrent.
+a public method to start a torrent until completion.
 
 
 ## Torrent
 
 - Contains the piece picker and a single connection to a seed from which to
-  download the file.
+  download the torrent.
 - Also contains other metadata relevant to the torrent, such as its info hash,
   the files it needs to download, the destination directory, and others.
 - Torrent tick: periodically loops through all its peer connections and performs
   actions like stats collections, later choking/unchoking, resume state saving,
   and others.
-- A peer session is spawned on a new
-  [task](https://docs.rs/tokio/0.2.13/tokio/task), as otherwise we'd enter all
-  sorts of lifetime issues by running the torrent and the peer session in the
-  same task's async loop. More research on this and alternatives needs to be
-  done.
-- Communication with peer sessions would happen through `tokio`'s `mpsc` queues,
-  since a peer session is spawned on a task which may be run by a different
-  thread on which torrent is executing
+
+### Peer sessions
+
+A peer session is spawned on a new
+  [task](https://docs.rs/tokio/0.2.13/tokio/task), and torrent and the peer
+  session communicate with each other via async `mpsc` channels. This is
+  necessary as peer is spawned on another task, which from the point of view of
+  the borrow checker is as though it were spawned on another thread, so we can't
+  just call methods of peer session without further synchronization.
+
+It would be possible to spawn the peer task
+[locally](https://docs.rs/tokio/0.2.20/tokio/task/fn.spawn_local.html), but we'd
+still have to use channels for communication as running the peer session and
+calling its methods on the torrent task would cause lifetime issues, due to the
+peer session's run method taking a mutable reference to self, thus preventing
+torrent from calling any of its other methods.
+
+As to whether running all peer sessions and torrent on the same local task
+(since a peer session doesn't do much other than IO) would be more performant
+over running each on a separate task is an open question and more research is
+needed.
 
 
 ## Piece picker
@@ -157,6 +170,7 @@ whether we have it or not and its frequency in the swarm.
 Later the internal data structures of the piece picker will most likely be
 changed to be more optimal for the rarest-pieces-first algorithm (the default
 defined by the standard).
+
 
 ## Peer connection
 
@@ -517,8 +531,9 @@ A piece download tracks the piece completion of an ongoing piece download. It
 
 ## Disk IO
 
-This entity (called `Disk` in the code) is responsible for everything disk
-storage related. This includes:
+This entity (called `Disk` in the code, in the [`disk`
+module](cratetorrent/src/disk.rs]) is responsible for everything disk storage
+related. This includes:
 - allocating a torrent's files at download start;
 - hashing downloaded file pieces and saving them to disk;
 - once seeding functionality is implemented: reading blocks from disk.
@@ -535,7 +550,7 @@ by all entities using it. In this case, we would have the following issues:
   same `async` block are sequential). This is the most crucial one.
 - Increased complexity due to lifetime and synchronization issues with multiple
   peer session tasks referring to the same `Disk`, whereas with the task based
-  solution `Disk` is the only one accessing its internal state.
+  solution `Disk` is the only one accessing its own internal state.
 - Worse separation of concerns, leading to code that is more difficult to reason
   about and thus potentially more bugs. Whereas having `Disk` on a separate task
   allows for a sequential model of execution, which is clearer and less
@@ -578,10 +593,16 @@ To summarize, sending alerts from the disk task is two-tiered:
 
 ### Responsibilities
 
-#### Torrent file allocation
-Currently only a single file download is supported, so the file allocation is
-very simple: the to-be-downloaded file is checked for existence and the first
-write creates the file.
+#### Torrent allocation
+Since a torrent may contain multiple files, they will be downloaded in a
+directory named after the torrent. There may be additional subdirectories in a
+torrent, so the whole torrent's file system structure needs to be set up before
+the download is begun. 
+
+For single file downloads supported the file allocation is very simple: the
+to-be-downloaded file is checked for existence and the first write creates the
+file.
+
 Late we will want to pre-allocate sparse files truncated to the download length.
 
 #### Saving to disk
@@ -613,6 +634,10 @@ twofold:
   configure cratetorrent to buffer several pieces before flushing them to disk,
   or buffer at most `n` blocks, which may be fewer than is in a torrent's
   piece.)
+
+An additional complexity is that a piece may span several files. This way, every
+time we wish to save a piece, we need to look for its file boundaries and thus
+"partition" the piece, saving the partitions to its corresponding file.
 
 ##### Vectored IO
 A peer downloads pieces in 16 KiB blocks and to save overhead of concatenating
