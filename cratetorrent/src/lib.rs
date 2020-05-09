@@ -15,7 +15,10 @@ mod peer;
 mod piece_picker;
 mod torrent;
 
-use bitvec::prelude::{BitVec, Msb0};
+use {
+    bitvec::prelude::{BitVec, Msb0},
+    std::path::PathBuf,
+};
 
 /// Each torrent gets a randomyl assigned ID that is unique within the
 /// application.
@@ -42,6 +45,17 @@ pub type Bitfield = BitVec<Msb0, u8>;
 /// This is the only block length we're dealing with. It is the widely used and
 /// accepted 16 KiB.
 pub(crate) const BLOCK_LEN: u32 = 0x4000;
+
+/// Information about a torrent's file.
+///
+/// This is predominantly used when multiple files are being downloaded.
+#[derive(Clone, Debug)]
+pub struct FileInfo {
+    /// The file's relative path from the download directory.
+    pub path: PathBuf,
+    /// The file's length, in bytes.
+    pub len: u64,
+}
 
 /// A block is a fixed size chunk of a piece, which in turn is a fixed size
 /// chunk of a torrent. Downloading torrents happen at this block level

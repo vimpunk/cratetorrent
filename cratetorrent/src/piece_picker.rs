@@ -123,7 +123,9 @@ struct Piece {
 
 #[cfg(test)]
 mod tests {
-    use {super::*, std::collections::HashSet};
+    use std::collections::HashSet;
+
+    use super::*;
 
     // Tests that repeatedly requesting as many pieces as are in the piece
     // picker returns all pieces, none of them previously picked.

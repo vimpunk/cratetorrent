@@ -495,8 +495,9 @@ impl Decoder for PeerCodec {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use bytes::Bytes;
+
+    use super::*;
 
     // Tests a stream of arbitrary messages to ensure that not only do they
     // encode and then decode correctly (like the individual test cases

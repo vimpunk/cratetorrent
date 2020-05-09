@@ -114,8 +114,9 @@ impl PieceDownload {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::collections::HashSet;
+
+    use super::*;
 
     // Tests that repeatedly requesting as many blocks as are in the piece
     // returns all blocks, none of them previously picked.

@@ -37,9 +37,11 @@ pub(crate) fn spawn(
 pub(crate) struct DiskHandle(CommandSender);
 
 impl DiskHandle {
-    /// Instructs the disk task to set up everything needed for a new torrent,
-    /// which includes in-memory metadata storage and pre-allocating the
-    /// to-be-downloaded file(s).
+    /// Creates a new torrent in the disk task.
+    ///
+    /// This instructs the disk task to set up everything needed for a new
+    /// torrent, which includes in-memory metadata storage and setting up the
+    /// torrent's file system structure on disk.
     pub fn allocate_new_torrent(
         &self,
         id: TorrentId,
@@ -86,19 +88,19 @@ type CommandReceiver = UnboundedReceiver<Command>;
 
 /// The type of commands that the disk can execute.
 enum Command {
-    // Allocate a new torrent.
+    /// Allocate a new torrent in `Disk`.
     NewTorrent {
         id: TorrentId,
         info: StorageInfo,
         piece_hashes: Vec<u8>,
     },
-    // Request to eventually write a block to disk.
+    /// Request to eventually write a block to disk.
     WriteBlock {
         id: TorrentId,
         info: BlockInfo,
         data: Vec<u8>,
     },
-    // Eventually shut down the disk task.
+    /// Eventually shut down the disk task.
     Shutdown,
 }
 
@@ -161,10 +163,13 @@ pub(crate) struct BatchWrite {
 #[cfg(test)]
 mod tests {
     use {
-        super::*,
-        crate::{block_count, BLOCK_LEN},
         sha1::{Digest, Sha1},
         std::{fs, path::PathBuf},
+    };
+
+    use {
+        super::*,
+        crate::{block_count, BLOCK_LEN},
     };
 
     // Tests the allocation of a torrent, and then the allocation of the same

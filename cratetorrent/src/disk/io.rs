@@ -19,8 +19,8 @@ use {
         TorrentAlertSender, TorrentAllocation,
     },
     crate::{
-        block_count, error::Error, torrent::StorageInfo, BlockInfo, Sha1Hash,
-        TorrentId,
+        block_count, error::Error, metainfo::FsStructure, torrent::StorageInfo,
+        BlockInfo, Sha1Hash, TorrentId,
     },
 };
 
@@ -167,6 +167,11 @@ struct Stats {
 }
 
 impl Torrent {
+    /// Creates the file system structure of the torrent.
+    ///
+    /// For a single file, this is currently a noop beyond a path validity check.
+    ///
+    /// For directories, the directory structure is established.
     fn new(
         info: StorageInfo,
         piece_hashes: Vec<u8>,
@@ -179,6 +184,24 @@ impl Torrent {
                 std::io::ErrorKind::AlreadyExists,
                 "Download path already exists",
             )));
+        }
+
+        match &info.structure {
+            FsStructure::File { len } => {
+                log::debug!("Torrent is single {} bytes long file", len);
+            }
+            FsStructure::Archive { files } => {
+                debug_assert!(!files.is_empty());
+                log::debug!("Torrent is multi file: {:?}", files);
+                log::debug!("Setting up directory structure");
+                for file in files.iter() {
+                    // file or subdirectory in download dir must not exist if
+                    // download dir does not exists
+                    debug_assert!(!file.path.exists());
+                    log::warn!("Setting up directory structure");
+                    todo!("Create directory");
+                }
+            }
         }
 
         let (alert_chan, alert_port) = mpsc::unbounded_channel();

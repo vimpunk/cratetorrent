@@ -15,10 +15,10 @@ use {
 use crate::{
     disk::{DiskHandle, TorrentAlert, TorrentAlertReceiver},
     error::*,
-    metainfo::Metainfo,
+    metainfo::{FsStructure, Metainfo},
     peer::{self, PeerSession},
     piece_picker::PiecePicker,
-    TorrentId, {PeerId, Sha1Hash},
+    PeerId, Sha1Hash, TorrentId,
 };
 
 pub(crate) struct Torrent {
@@ -55,6 +55,8 @@ impl Torrent {
         client_id: PeerId,
         seed_addr: SocketAddr,
     ) -> Result<Self> {
+        log::trace!("Creating torrent {} with seed {}", id, seed_addr);
+
         let piece_count = storage_info.piece_count;
         let status = Status {
             shared: Arc::new(SharedStatus {
@@ -257,28 +259,37 @@ pub(crate) struct StorageInfo {
     pub last_piece_len: u32,
     /// The sum of the length of all files in the torrent.
     pub download_len: u64,
-    /// The download destination of the single torrent file.
+    /// The download destination of the torrent.
+    ///
+    /// In case of a single torrent file, this is the path of the file. In case
+    /// of a multi-file torrent, this is the path of the directory containing
+    /// those files.
     pub download_path: PathBuf,
+    /// The paths and lenghts of the torrent files.
+    pub structure: FsStructure,
 }
 
 impl StorageInfo {
     /// Extracts storage related information from the torrent metainfo.
-    pub fn new(metainfo: &Metainfo, download_dir: &Path) -> Result<Self> {
+    pub fn new(metainfo: &Metainfo, download_dir: &Path) -> Self {
         let piece_count = metainfo.piece_count();
-        let download_len = metainfo.download_len()?;
-        let piece_len = metainfo.info.piece_len;
+        let download_len = metainfo.structure.download_len();
+        let piece_len = metainfo.piece_len;
         let last_piece_len =
             download_len - piece_len as u64 * (piece_count - 1) as u64;
         let last_piece_len = last_piece_len as u32;
-        let download_path = download_dir.join(&metainfo.info.name);
+        // the download path for now is the download directory path joined with
+        // the torrent's name as defined in the metainfo
+        let download_path = download_dir.join(&metainfo.name);
 
-        Ok(Self {
+        Self {
             piece_count,
             piece_len,
             last_piece_len,
             download_len,
             download_path,
-        })
+            structure: metainfo.structure.clone(),
+        }
     }
 
     /// Returns the length of the piece at the given index.
