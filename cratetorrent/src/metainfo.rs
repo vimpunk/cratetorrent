@@ -1,4 +1,6 @@
-use crate::{error::*, FileInfo, Sha1Hash};
+use std::path::{Path, PathBuf};
+
+use crate::{error::*, storage_info::FsStructure, FileInfo, Sha1Hash};
 
 /// The parsed and validated torrent metainfo file, containing necessary
 /// arguments for starting a torrent.
@@ -12,7 +14,7 @@ pub struct Metainfo {
     /// The concatenation of the 20 byte SHA-1 hash of each piece in torrent.
     /// This is used to verify the data sent to us by peers.
     pub pieces: Vec<u8>,
-    /// The nominal lenght of a piece, that is, the length of all but
+    /// The nominal lengths of a piece, that is, the length of all but
     /// potentially the last piece, which may be smaller.
     pub piece_len: u32,
     /// The paths and lenths of the downloaded files.
@@ -43,22 +45,64 @@ impl Metainfo {
                 log::warn!("Metainfo cannot contain both `length` and `files`");
                 return Err(Error::InvalidMetainfo);
             }
-            FsStructure::File { len }
+            if len == 0 {
+                log::warn!("File length is 0");
+                return Err(Error::InvalidMetainfo);
+            }
+
+            FsStructure::File(FileInfo {
+                path: metainfo.info.name.clone().into(),
+                offset: 0,
+                len,
+            })
         } else if let Some(files) = &metainfo.info.files {
             if files.is_empty() {
                 log::warn!("Metainfo files must not be empty");
                 return Err(Error::InvalidMetainfo);
             }
 
-            let files = files
-                .iter()
-                .map(|f| FileInfo {
-                    path: f.path.iter().collect(),
-                    len: f.len,
-                })
-                .collect();
+            // map the file information entries to our internal representation
+            let mut file_infos = Vec::with_capacity(files.len());
+            // and sum up the file offsets in the torrent
+            let mut offset = 0;
+            for file in files.into_iter() {
+                // verify that the file length is non-zero
+                if file.len == 0 {
+                    log::warn!("File {:?} length is 0", file.path);
+                    return Err(Error::InvalidMetainfo);
+                }
 
-            FsStructure::Archive { files }
+                // verify that the path is not empty
+                let path: PathBuf = file.path.iter().collect();
+                if path == PathBuf::new() {
+                    log::warn!("Path in metainfo is empty");
+                    return Err(Error::InvalidMetainfo);
+                }
+
+                // verify that the path is not absolute
+                if path.is_absolute() {
+                    log::warn!("Path {:?} is absolute", path);
+                    return Err(Error::InvalidMetainfo);
+                }
+
+                // verify that the path is not the root
+                if path == Path::new("/") {
+                    log::warn!("Path {:?} is root", path);
+                    return Err(Error::InvalidMetainfo);
+                }
+
+                // file is now verified, we can collect it
+                file_infos.push(FileInfo {
+                    path,
+                    offset,
+                    len: file.len,
+                });
+
+                // advance offset for next file
+                offset += file.len;
+            }
+
+            FsStructure::Archive { files: file_infos }
         } else {
             log::warn!("No `length` or `files` key present in metainfo");
             return Err(Error::InvalidMetainfo);
@@ -79,26 +123,6 @@ impl Metainfo {
     /// Returns the number of pieces in this torrent.
     pub fn piece_count(&self) -> usize {
         self.pieces.len() / 20
-    }
-}
-
-/// Defines the file system structure of the download.
-#[derive(Clone, Debug)]
-pub enum FsStructure {
-    File { len: u64 },
-    Archive { files: Vec<FileInfo> },
-}
-
-impl FsStructure {
-    /// Returns the total download size in bytes.
-    ///
-    /// Note that this is an O(n) operation for archive downloads, where n is
-    /// the number of files, so this value should ideally be cached.
-    pub fn download_len(&self) -> u64 {
-        match self {
-            Self::File { len } => *len,
-            Self::Archive { files } => files.iter().map(|f| f.len).sum(),
-        }
     }
 }
 

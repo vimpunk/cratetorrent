@@ -497,7 +497,7 @@ impl Decoder for PeerCodec {
 mod tests {
     use bytes::Bytes;
 
-    use super::*;
+    use {super::*, crate::BLOCK_LEN};
 
     // Tests a stream of arbitrary messages to ensure that not only do they
     // encode and then decode correctly (like the individual test cases

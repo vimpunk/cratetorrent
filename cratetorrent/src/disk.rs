@@ -7,13 +7,13 @@ use tokio::{
 };
 
 use {
-    crate::{error::Error, torrent::StorageInfo, BlockInfo, TorrentId},
+    crate::{error::Error, storage_info::StorageInfo, BlockInfo, TorrentId},
     io::Disk,
 };
 
 pub(crate) use error::*;
 
-/// Spawns a disk IO task and returns a tuple with the task join handle, the
+// Spawns a disk IO task and returns a tuple with the task join handle, the
 /// disk handle used for sending commands, and a channel for receiving
 /// command results and other notifications.
 pub(crate) fn spawn(
@@ -169,7 +169,7 @@ mod tests {
 
     use {
         super::*,
-        crate::{block_count, BLOCK_LEN},
+        crate::{block_count, storage_info::FsStructure, FileInfo, BLOCK_LEN},
     };
 
     // Tests the allocation of a torrent, and then the allocation of the same
@@ -180,14 +180,14 @@ mod tests {
 
         let Env {
             id,
-            pieces,
             piece_hashes,
             info,
+            ..
         } = Env::new();
 
         // allocate torrent via channel
         disk_handle
-            .allocate_new_torrent(id, info, piece_hashes.clone())
+            .allocate_new_torrent(id, info.clone(), piece_hashes.clone())
             .unwrap();
 
         // wait for result on alert port
@@ -229,7 +229,7 @@ mod tests {
 
         // allocate torrent via channel
         disk_handle
-            .allocate_new_torrent(id, info, piece_hashes)
+            .allocate_new_torrent(id, info.clone(), piece_hashes)
             .unwrap();
 
         // wait for result on alert port
@@ -246,12 +246,12 @@ mod tests {
         // write all pieces to disk
         for index in 0..pieces.len() {
             let piece = &pieces[index];
-            for_each_block(index, piece.len() as u32, |info| {
-                let block_end = info.offset + info.len;
-                let data = &piece[info.offset as usize..block_end as usize];
-                debug_assert_eq!(data.len(), info.len as usize);
-                println!("Writing piece {} block {:?}", index, info);
-                disk_handle.write_block(id, info, data.to_vec()).unwrap();
+            for_each_block(index, piece.len() as u32, |block| {
+                let block_end = block.offset + block.len;
+                let data = &piece[block.offset as usize..block_end as usize];
+                debug_assert_eq!(data.len(), block.len as usize);
+                println!("Writing piece {} block {:?}", index, block);
+                disk_handle.write_block(id, block, data.to_vec()).unwrap();
             });
 
             // wait for disk write result
@@ -261,9 +261,9 @@ mod tests {
                 // piece is complete so it should be hashed and be valid
                 assert!(matches!(batch.is_piece_valid, Some(true)));
                 // verify that the message contains all four blocks
-                for_each_block(index, piece.len() as u32, |info| {
-                    let pos = batch.blocks.iter().position(|b| *b == info);
-                    println!("Verifying piece {} block {:?}", index, info);
+                for_each_block(index, piece.len() as u32, |block| {
+                    let pos = batch.blocks.iter().position(|b| *b == block);
+                    println!("Verifying piece {} block {:?}", index, block);
                     assert!(pos.is_some());
                 });
             } else {
@@ -321,7 +321,7 @@ mod tests {
 
         // allocate torrent via channel
         disk_handle
-            .allocate_new_torrent(id, info, piece_hashes)
+            .allocate_new_torrent(id, info.clone(), piece_hashes)
             .unwrap();
 
         // wait for result on alert port
@@ -339,12 +339,13 @@ mod tests {
         let index = 0;
         let invalid_piece: Vec<_> =
             pieces[index].iter().map(|b| b.saturating_add(5)).collect();
-        for_each_block(index, invalid_piece.len() as u32, |info| {
-            let block_end = info.offset + info.len;
-            let data = &invalid_piece[info.offset as usize..block_end as usize];
-            debug_assert_eq!(data.len(), info.len as usize);
-            println!("Writing invalid piece {} block {:?}", index, info);
-            disk_handle.write_block(id, info, data.to_vec()).unwrap();
+        for_each_block(index, invalid_piece.len() as u32, |block| {
+            let block_end = block.offset + block.len;
+            let data =
+                &invalid_piece[block.offset as usize..block_end as usize];
+            debug_assert_eq!(data.len(), block.len as usize);
+            println!("Writing invalid piece {} block {:?}", index, block);
+            disk_handle.write_block(id, block, data.to_vec()).unwrap();
         });
 
         // wait for disk write result
@@ -408,15 +409,21 @@ mod tests {
                     .expect("Failed to clean up disk test torrent file");
             }
 
+            let download_len = pieces.iter().fold(0, |mut len, piece| {
+                len += piece.len() as u64;
+                len
+            });
             let info = StorageInfo {
                 piece_count: pieces.len(),
                 piece_len,
                 last_piece_len,
-                download_len: pieces.iter().fold(0, |mut len, piece| {
-                    len += piece.len() as u64;
-                    len
+                download_len,
+                download_path: download_path.clone(),
+                structure: FsStructure::File(FileInfo {
+                    path: download_path,
+                    offset: 0,
+                    len: download_len,
                 }),
-                download_path,
             };
 
             Self {

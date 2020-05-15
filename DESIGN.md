@@ -591,9 +591,7 @@ To summarize, sending alerts from the disk task is two-tiered:
 - global (e.g. the result of allocating a new torrent),
 - per torrent (e.g. the result of writing blocks to disk).
 
-### Responsibilities
-
-#### Torrent allocation
+### Torrent allocation
 Since a torrent may contain multiple files, they will be downloaded in a
 directory named after the torrent. There may be additional subdirectories in a
 torrent, so the whole torrent's file system structure needs to be set up before
@@ -605,7 +603,9 @@ file.
 
 Late we will want to pre-allocate sparse files truncated to the download length.
 
-#### Saving to disk
+### Saving to disk
+
+#### Buffering
 The primary purpose of `Disk` right now is to buffer downloaded blocks in memory
 until the piece is complete, hash the piece, notify torrent of the result, and,
 if the resulting hash matches the expected one, save to disk.
@@ -635,11 +635,80 @@ twofold:
   or buffer at most `n` blocks, which may be fewer than is in a torrent's
   piece.)
 
-An additional complexity is that a piece may span several files. This way, every
-time we wish to save a piece, we need to look for its file boundaries and thus
-"partition" the piece, saving the partitions to its corresponding file.
+#### Mapping pieces to files
+When writing a piece to disk, we need to determine which file(s) the piece
+belongs to. Further, a piece may span several files. This way, every time we
+wish to save a piece, we need to look for its file boundaries and thus
+"partition" the piece, saving the partitions to their corresponding files.
 
-##### Vectored IO
+To find the files quickly, if we imagine the torrent as a single contiguous byte
+stream, we can pre-compute each file's offset in the entire torrent and use this
+information to check which pieces intersect the files.
+
+More concretely, there are two options:
+- compute what pieces a file intersects with  at the beginning beginning of a
+  torrent, and store it with the file information,
+- or compute what files the piece intersects with when starting a piece
+  download, storing it with the in-progress piece.
+
+The second approach is chosen for several reasons:
+- it's easier to implement and test (particularly structuring the
+  pre-computation);
+- in the first approach, we'd have to loop through all files anyway to find the
+  matching piece indices, so we don't save much computation (though it would be
+  slightly more straightforward to compare piece indices than byte offsets);
+- and also, slightly less memory overhead as we're only storing this data when a
+  piece is being downloaded, not with all files in a torrent, which is wasteful
+  if their pieces are already downloaded.
+
+The concrete algorithm is this:
+- find the first file where
+  `[file.start_offset, file.end_offset).contains(piece.start_offset)`
+- if none is found, return an empty range (`[0..0)`)
+- otherwise initialize the resulting file index range with
+  `[found_index, found_index + 1)`
+- then loop through files after the above found one, while
+  `[piece.start_offset..piece.end_offset].contains(file.start_offset)` returns
+  true and record the file's index in our resulting range's end
+- return the resulting range 
+
+Unless the piece is very large and there are many small files, the second part
+(finding the last file intersecting with piece) should be very quick, with only
+a few iterations. (This is the part that could be optimized by storing which
+a file intersects with with the file information, but as can be seen.)
+
+##### Example
+Let's illustrate with an example. The first row contains 3 pieces, each 16 units
+long (the precise unit doesn't matter now), and indicates their indices and
+offsets within the whole torrent. The second row contains the files in the
+torrent, of various length, indicating their names and their first and last byte
+offsets in the torrent.
+
+```
+--------------------------------------------------------------
+|0:0               |1:16                |2:32                |
+--------------------------------------------------------------
+|a:0,8      |b:9,19    |c:20,26  |d:27,36  |e:37,50          |
+--------------------------------------------------------------
+```
+
+Then, let's assume we got piece 1 and wish to save it to disk and need to
+determine which file(s) the piece belongs to.
+`files_intersecting_piece(1)` should yield the files: `b`, `c`, `d`.
+
+Another example:
+
+```
+-------------------------------------------------------
+|0:0               |1:16                |2:32         |
+-------------------------------------------------------
+|a:0,15            |b:16,19 |c:20,23    |d:32,44      |
+-------------------------------------------------------
+```
+
+Here, `files_intersecting_piece(1)` should yield the files: `b`, `c`.
+
+#### Vectored IO
 A peer downloads pieces in 16 KiB blocks and to save overhead of concatenating
 these buffers these blocks are stored in the disk write buffer as is, i.e the
 write buffer is a vector of byte vectors.

@@ -7,7 +7,8 @@ use crate::{
     disk::{self, Alert},
     error::*,
     metainfo::Metainfo,
-    torrent::{StorageInfo, Torrent},
+    storage_info::StorageInfo,
+    torrent::Torrent,
     PeerId,
 };
 

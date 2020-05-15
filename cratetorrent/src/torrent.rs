@@ -5,7 +5,6 @@ use {
     },
     std::{
         net::SocketAddr,
-        path::{Path, PathBuf},
         sync::Arc,
         time::{Duration, Instant},
     },
@@ -15,9 +14,9 @@ use {
 use crate::{
     disk::{DiskHandle, TorrentAlert, TorrentAlertReceiver},
     error::*,
-    metainfo::{FsStructure, Metainfo},
     peer::{self, PeerSession},
     piece_picker::PiecePicker,
+    storage_info::StorageInfo,
     PeerId, Sha1Hash, TorrentId,
 };
 
@@ -243,64 +242,4 @@ pub(crate) struct SharedStatus {
     pub client_id: PeerId,
     /// Info about the torrent's storage (piece length, download length, etc).
     pub storage: StorageInfo,
-}
-
-/// Information about a torrent's storage details, such as the piece count and
-/// length, download length, etc.
-#[derive(Clone, Debug)]
-pub(crate) struct StorageInfo {
-    /// The number of pieces in the torrent.
-    pub piece_count: usize,
-    /// The nominal length of a piece.
-    pub piece_len: u32,
-    /// The length of the last piece in torrent, which may differ from the
-    /// normal piece length if the download size is not an exact multiple of the
-    /// piece length.
-    pub last_piece_len: u32,
-    /// The sum of the length of all files in the torrent.
-    pub download_len: u64,
-    /// The download destination of the torrent.
-    ///
-    /// In case of a single torrent file, this is the path of the file. In case
-    /// of a multi-file torrent, this is the path of the directory containing
-    /// those files.
-    pub download_path: PathBuf,
-    /// The paths and lenghts of the torrent files.
-    pub structure: FsStructure,
-}
-
-impl StorageInfo {
-    /// Extracts storage related information from the torrent metainfo.
-    pub fn new(metainfo: &Metainfo, download_dir: &Path) -> Self {
-        let piece_count = metainfo.piece_count();
-        let download_len = metainfo.structure.download_len();
-        let piece_len = metainfo.piece_len;
-        let last_piece_len =
-            download_len - piece_len as u64 * (piece_count - 1) as u64;
-        let last_piece_len = last_piece_len as u32;
-        // the download path for now is the download directory path joined with
-        // the torrent's name as defined in the metainfo
-        let download_path = download_dir.join(&metainfo.name);
-
-        Self {
-            piece_count,
-            piece_len,
-            last_piece_len,
-            download_len,
-            download_path,
-            structure: metainfo.structure.clone(),
-        }
-    }
-
-    /// Returns the length of the piece at the given index.
-    pub fn piece_len(&self, index: usize) -> Result<u32> {
-        if index == self.piece_count - 1 {
-            Ok(self.last_piece_len)
-        } else if index < self.piece_count - 1 {
-            Ok(self.piece_len)
-        } else {
-            log::error!("Piece {} is invalid for torrent: {:?}", index, self);
-            Err(Error::InvalidPieceIndex)
-        }
-    }
 }

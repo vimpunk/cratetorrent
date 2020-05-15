@@ -1,4 +1,4 @@
-use crate::{block_count, BlockInfo, BLOCK_LEN};
+use crate::{block_count, BlockInfo, PieceIndex, BLOCK_LEN};
 
 #[derive(Clone, Copy, Debug)]
 enum Block {
@@ -17,7 +17,7 @@ impl Default for Block {
 /// used to request the next block in piece.
 pub(crate) struct PieceDownload {
     /// The piece's index.
-    index: usize,
+    index: PieceIndex,
     /// The piece's length in bytes.
     len: u32,
     /// The blocks in this piece, tracking which are downloaded, pending, or
@@ -27,7 +27,7 @@ pub(crate) struct PieceDownload {
 
 impl PieceDownload {
     /// Creates a new piece download instance for the given piece.
-    pub fn new(index: usize, len: u32) -> Self {
+    pub fn new(index: PieceIndex, len: u32) -> Self {
         let block_count = block_count(len);
         let mut blocks = Vec::new();
         blocks.resize_with(block_count, Default::default);
@@ -35,7 +35,7 @@ impl PieceDownload {
     }
 
     /// Returns the index of the piece that is downloaded.
-    pub fn piece_index(&self) -> usize {
+    pub fn piece_index(&self) -> PieceIndex {
         self.index
     }
 

@@ -13,12 +13,21 @@ pub mod error;
 pub mod metainfo;
 mod peer;
 mod piece_picker;
+mod storage_info;
 mod torrent;
 
-use {
-    bitvec::prelude::{BitVec, Msb0},
-    std::path::PathBuf,
-};
+use bitvec::prelude::{BitVec, Msb0};
+
+pub use storage_info::FileInfo;
+
+/// The type of a piece's index.
+///
+/// On the wire all integers are sent as 4-byte big endian integers, but in the
+/// source code we use `usize` to be consistent with other index types in Rust.
+pub type PieceIndex = usize;
+
+/// The type of a file's index.
+pub type FileIndex = usize;
 
 /// Each torrent gets a randomyl assigned ID that is unique within the
 /// application.
@@ -42,20 +51,9 @@ pub type Sha1Hash = [u8; 20];
 /// value means it doesn't have the piece.
 pub type Bitfield = BitVec<Msb0, u8>;
 
-/// This is the only block length we're dealing with. It is the widely used and
-/// accepted 16 KiB.
+/// This is the only block length we're dealing with (except for possibly the
+/// last block).  It is the widely used and accepted 16 KiB.
 pub(crate) const BLOCK_LEN: u32 = 0x4000;
-
-/// Information about a torrent's file.
-///
-/// This is predominantly used when multiple files are being downloaded.
-#[derive(Clone, Debug)]
-pub struct FileInfo {
-    /// The file's relative path from the download directory.
-    pub path: PathBuf,
-    /// The file's length, in bytes.
-    pub len: u64,
-}
 
 /// A block is a fixed size chunk of a piece, which in turn is a fixed size
 /// chunk of a torrent. Downloading torrents happen at this block level
@@ -63,7 +61,7 @@ pub struct FileInfo {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct BlockInfo {
     /// The index of the piece of which this is a block.
-    pub piece_index: usize,
+    pub piece_index: PieceIndex,
     /// The zero-based byte offset into the piece.
     pub offset: u32,
     /// The block's length in bytes. Always 16 KiB (0x4000 bytes), for now.
@@ -72,7 +70,7 @@ pub(crate) struct BlockInfo {
 
 impl BlockInfo {
     /// Createas a `BlockInfo` instance with the default length of 16 KiB.
-    pub fn new(piece_index: usize, offset: u32) -> Self {
+    pub fn new(piece_index: PieceIndex, offset: u32) -> Self {
         Self {
             piece_index,
             offset,
@@ -82,12 +80,12 @@ impl BlockInfo {
 
     /// Returns the index of the block within its piece, assuming the default
     /// block length of 16 KiB.
-    pub fn index(&self) -> usize {
+    pub fn index(&self) -> PieceIndex {
         // we need to use "lower than or equal" as this may be the last block in
         // which case it may be shorter than the default block length
         debug_assert!(self.len <= BLOCK_LEN);
         debug_assert!(self.len > 0);
-        self.offset as usize / BLOCK_LEN as usize
+        (self.offset / BLOCK_LEN) as PieceIndex
     }
 }
 

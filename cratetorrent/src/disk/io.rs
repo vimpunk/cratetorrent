@@ -2,7 +2,7 @@ use {
     sha1::{Digest, Sha1},
     std::{
         collections::{BTreeMap, HashMap},
-        fs::OpenOptions,
+        fs::{self, File, OpenOptions},
         io::{IoSlice, Write},
         path::Path,
     },
@@ -19,8 +19,10 @@ use {
         TorrentAlertSender, TorrentAllocation,
     },
     crate::{
-        block_count, error::Error, metainfo::FsStructure, torrent::StorageInfo,
-        BlockInfo, Sha1Hash, TorrentId,
+        block_count,
+        error::Error,
+        storage_info::{FsStructure, StorageInfo},
+        BlockInfo, PieceIndex, Sha1Hash, TorrentId,
     },
 };
 
@@ -151,7 +153,10 @@ struct Torrent {
     // TODO(https://github.com/mandreyel/cratetorrent/issues/22): Currently
     // there is no upper bound on the in-memory write buffer, so this may lead
     // to OOM.
-    pieces: HashMap<usize, Piece>,
+    pieces: HashMap<PieceIndex, Piece>,
+    /// Handles of all files in torrent, opened in advance during torrent
+    /// creation.
+    files: Vec<File>,
     /// The concatenation of all expected piece hashes.
     piece_hashes: Vec<u8>,
     /// Disk IO statistics.
@@ -167,11 +172,12 @@ struct Stats {
 }
 
 impl Torrent {
-    /// Creates the file system structure of the torrent.
+    /// Creates the file system structure of the torrent and opens the file
+    /// handles.
     ///
-    /// For a single file, this is currently a noop beyond a path validity check.
-    ///
-    /// For directories, the directory structure is established.
+    /// For a single file, there is a path validity check and then the file is
+    /// opened. For multi-file torrents, if there are any subdirectories in the
+    /// torrent archive, they are created and all files are opened.
     fn new(
         info: StorageInfo,
         piece_hashes: Vec<u8>,
@@ -186,23 +192,57 @@ impl Torrent {
             )));
         }
 
-        match &info.structure {
-            FsStructure::File { len } => {
-                log::debug!("Torrent is single {} bytes long file", len);
+        let open_file = |path| {
+            OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+                .map_err(|e| {
+                    log::warn!("Failed to open file {:?}", path);
+                    NewTorrentError::Io(e)
+                })
+        };
+
+        let files = match &info.structure {
+            FsStructure::File(file) => {
+                log::debug!(
+                    "Torrent is single {} bytes long file {:?}",
+                    file.len,
+                    file.path
+                );
+                vec![open_file(&file.path)?]
             }
             FsStructure::Archive { files } => {
                 debug_assert!(!files.is_empty());
                 log::debug!("Torrent is multi file: {:?}", files);
                 log::debug!("Setting up directory structure");
+                let mut handles = Vec::with_capacity(files.len());
                 for file in files.iter() {
-                    // file or subdirectory in download dir must not exist if
-                    // download dir does not exists
+                    // file or subdirectory in download root must not exist if
+                    // download root does not exists
                     debug_assert!(!file.path.exists());
-                    log::warn!("Setting up directory structure");
-                    todo!("Create directory");
+                    debug_assert!(!file.path.is_absolute());
+
+                    // get the parent of the file path: if there is one (i.e.
+                    // this is not a file in the torrent root), and doesn't
+                    // exists, create it
+                    if let Some(subdir) = file.path.parent() {
+                        if !subdir.exists() {
+                            log::info!("Creating torrent subdir {:?}", subdir);
+                            fs::create_dir_all(&subdir).map_err(|e| {
+                                log::warn!(
+                                    "Failed to create subdir {:?}",
+                                    subdir
+                                );
+                                NewTorrentError::Io(e)
+                            })?;
+                        }
+                    }
+                    handles.push(open_file(&file.path)?)
                 }
+                handles
             }
-        }
+        };
 
         let (alert_chan, alert_port) = mpsc::unbounded_channel();
 
@@ -211,6 +251,7 @@ impl Torrent {
                 info,
                 alert_chan,
                 pieces: HashMap::new(),
+                files,
                 piece_hashes,
                 stats: Stats::default(),
             },
@@ -252,14 +293,6 @@ impl Torrent {
 
             // don't block the reactor with the potentially expensive hashing
             // and sync file writing
-            //
-            // NOTE: Do _NOT_ return on disk write failure, we don't want to
-            // kill the disk task due to potential disk IO errors (which may
-            // happen from time to time). We need to alert torrent of this
-            // failure and return normally.
-            //
-            // TODO(https://github.com/mandreyel/cratetorrent/issues/23): also
-            // place back piece write buffer in torrent and retry later
             let write_result = task::spawn_blocking(move || {
                     let is_piece_valid = piece.matches_hash();
 
@@ -293,6 +326,13 @@ impl Torrent {
                 // are devised, unwrap
                 .expect("disk IO write task panicked");
 
+            // We don't error out on disk write failure as we don't want to
+            // kill the disk task due to potential disk IO errors (which may
+            // happen from time to time). We alert torrent of this failure and
+            // return normally.
+            //
+            // TODO(https://github.com/mandreyel/cratetorrent/issues/23): also
+            // place back piece write buffer in torrent and retry later
             match write_result {
                 Ok((is_piece_valid, write_count, blocks)) => {
                     // record write statistics if the piece is valid
@@ -371,6 +411,8 @@ struct Piece {
     /// Each block must be 16 KiB and is mapped to its offset within piece, and
     /// we're using a BTreeMap to keep keys sorted. This is important when
     /// iterating over the map to hash each block after one another.
+    // TODO: consider whether using a Vec would be more performant due to cache
+    // locality
     blocks: BTreeMap<u32, Vec<u8>>,
 }
 
