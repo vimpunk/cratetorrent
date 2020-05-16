@@ -52,8 +52,8 @@ impl Metainfo {
 
             FsStructure::File(FileInfo {
                 path: metainfo.info.name.clone().into(),
-                offset: 0,
                 len,
+                torrent_offset: 0,
             })
         } else if let Some(files) = &metainfo.info.files {
             if files.is_empty() {
@@ -64,7 +64,7 @@ impl Metainfo {
             // map the file information entries to our internal representation
             let mut file_infos = Vec::with_capacity(files.len());
             // and sum up the file offsets in the torrent
-            let mut offset = 0;
+            let mut torrent_offset = 0;
             for file in files.into_iter() {
                 // verify that the file length is non-zero
                 if file.len == 0 {
@@ -94,12 +94,12 @@ impl Metainfo {
                 // file is now verified, we can collect it
                 file_infos.push(FileInfo {
                     path,
-                    offset,
+                    torrent_offset,
                     len: file.len,
                 });
 
                 // advance offset for next file
-                offset += file.len;
+                torrent_offset += file.len;
             }
 
             FsStructure::Archive { files: file_infos }

@@ -421,7 +421,7 @@ mod tests {
                 download_path: download_path.clone(),
                 structure: FsStructure::File(FileInfo {
                     path: download_path,
-                    offset: 0,
+                    torrent_offset: 0,
                     len: download_len,
                 }),
             };

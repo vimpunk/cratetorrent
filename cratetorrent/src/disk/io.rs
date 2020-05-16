@@ -1,10 +1,11 @@
 use {
+    nix::sys::uio::pwritev,
     sha1::{Digest, Sha1},
     std::{
         collections::{BTreeMap, HashMap},
         fs::{self, File, OpenOptions},
-        io::{IoSlice, Write},
-        path::Path,
+        ops::Range,
+        sync::{Arc, Mutex},
     },
     tokio::{
         sync::{mpsc, RwLock},
@@ -21,8 +22,8 @@ use {
     crate::{
         block_count,
         error::Error,
-        storage_info::{FsStructure, StorageInfo},
-        BlockInfo, PieceIndex, Sha1Hash, TorrentId,
+        storage_info::{FsStructure, IoVec, StorageInfo},
+        BlockInfo, FileIndex, FileInfo, PieceIndex, Sha1Hash, TorrentId,
     },
 };
 
@@ -156,19 +157,17 @@ struct Torrent {
     pieces: HashMap<PieceIndex, Piece>,
     /// Handles of all files in torrent, opened in advance during torrent
     /// creation.
-    files: Vec<File>,
+    ///
+    /// Each writer thread will get exclusive access to the file handle it
+    /// needs, referring to it directly in the vector (hence the arc).
+    ///
+    /// Later we will need to make file access more granular, as multiple
+    /// concurrent writes to the same file that don't overlap are safe to do.
+    files: Arc<Vec<Mutex<TorrentFile>>>,
     /// The concatenation of all expected piece hashes.
     piece_hashes: Vec<u8>,
     /// Disk IO statistics.
     stats: Stats,
-}
-
-#[derive(Default)]
-struct Stats {
-    /// The number of bytes successfully written to disk.
-    write_count: u64,
-    /// The number of times we failed to write to disk.
-    write_failure_count: usize,
 }
 
 impl Torrent {
@@ -192,15 +191,17 @@ impl Torrent {
             )));
         }
 
-        let open_file = |path| {
-            OpenOptions::new()
+        // Helper function for opening a file.
+        let open_file = |info: FileInfo| {
+            let handle = OpenOptions::new()
                 .create(true)
                 .append(true)
-                .open(&path)
+                .open(&info.path)
                 .map_err(|e| {
-                    log::warn!("Failed to open file {:?}", path);
+                    log::warn!("Failed to open file {:?}", &info.path);
                     NewTorrentError::Io(e)
-                })
+                })?;
+            Ok(Mutex::new(TorrentFile { info, handle }))
         };
 
         let files = match &info.structure {
@@ -210,13 +211,13 @@ impl Torrent {
                     file.len,
                     file.path
                 );
-                vec![open_file(&file.path)?]
+                vec![open_file(file.clone())?]
             }
             FsStructure::Archive { files } => {
                 debug_assert!(!files.is_empty());
                 log::debug!("Torrent is multi file: {:?}", files);
                 log::debug!("Setting up directory structure");
-                let mut handles = Vec::with_capacity(files.len());
+                let mut torrent_files = Vec::with_capacity(files.len());
                 for file in files.iter() {
                     // file or subdirectory in download root must not exist if
                     // download root does not exists
@@ -225,7 +226,7 @@ impl Torrent {
 
                     // get the parent of the file path: if there is one (i.e.
                     // this is not a file in the torrent root), and doesn't
-                    // exists, create it
+                    // exist, create it
                     if let Some(subdir) = file.path.parent() {
                         if !subdir.exists() {
                             log::info!("Creating torrent subdir {:?}", subdir);
@@ -238,9 +239,16 @@ impl Torrent {
                             })?;
                         }
                     }
-                    handles.push(open_file(&file.path)?)
+
+                    // open the file and get a handle to it
+                    let file = FileInfo {
+                        path: info.download_path.join(&file.path),
+                        torrent_offset: file.torrent_offset,
+                        len: file.len,
+                    };
+                    torrent_files.push(open_file(file)?);
                 }
-                handles
+                torrent_files
             }
         };
 
@@ -251,7 +259,7 @@ impl Torrent {
                 info,
                 alert_chan,
                 pieces: HashMap::new(),
-                files,
+                files: Arc::new(files),
                 piece_hashes,
                 stats: Stats::default(),
             },
@@ -266,7 +274,8 @@ impl Torrent {
     ) -> Result<()> {
         log::trace!("Saving block {:?} to disk", info);
 
-        if !self.pieces.contains_key(&info.piece_index) {
+        let piece_index = info.piece_index;
+        if !self.pieces.contains_key(&piece_index) {
             if let Err(e) = self.start_new_piece(info) {
                 self.alert_chan.send(TorrentAlert::BatchWrite(Err(e)))?;
                 // return with ok as the disk task itself shouldn't be aborted
@@ -277,7 +286,7 @@ impl Torrent {
         // TODO: don't unwrap here
         let piece = self
             .pieces
-            .get_mut(&info.piece_index)
+            .get_mut(&piece_index)
             .expect("Newly inserted piece not present");
 
         piece.enqueue_block(info.offset, data);
@@ -287,44 +296,46 @@ impl Torrent {
         if piece.is_complete() {
             // TODO: remove from in memory store only if the disk write
             // succeeded (otherwise we need to retry later)
-            let piece = self.pieces.remove(&info.piece_index).unwrap();
-
-            let download_path = self.info.download_path.clone();
+            let piece = self.pieces.remove(&piece_index).unwrap();
+            let piece_len = self.info.piece_len;
+            let files = Arc::clone(&self.files);
 
             // don't block the reactor with the potentially expensive hashing
             // and sync file writing
             let write_result = task::spawn_blocking(move || {
-                    let is_piece_valid = piece.matches_hash();
+                let is_piece_valid = piece.matches_hash();
 
-                    // save piece to disk if it's valid
-                    let (write_count, blocks) = if is_piece_valid {
-                        log::info!("Piece {} is valid", info.piece_index);
-                        let write_count = piece.write(&download_path)?;
 
-                        // collect block infos for torrent to identify which
-                        // blocks were written to disk
-                        let blocks = piece
-                            .blocks
-                            .iter()
-                            .map(|(offset, block)| BlockInfo {
-                                piece_index: info.piece_index,
-                                offset: *offset,
-                                len: block.len() as u32,
-                            })
-                            .collect();
+                // save piece to disk if it's valid
+                let (write_count, blocks) = if is_piece_valid {
+                    log::info!("Piece {} is valid", piece_index);
+                    let piece_torrent_offset = piece_index as u64 * piece_len as u64;
+                    let write_count = piece.write(piece_torrent_offset, &*files)?;
 
-                        (Some(write_count), blocks)
-                    } else {
-                        log::warn!("Piece {} is NOT valid", info.piece_index);
-                        (None, Vec::new())
-                    };
+                    // collect block infos for torrent to identify which
+                    // blocks were written to disk
+                    let blocks = piece
+                        .blocks
+                        .iter()
+                        .map(|(offset, block)| BlockInfo {
+                            piece_index: info.piece_index,
+                            offset: *offset,
+                            len: block.len() as u32,
+                        })
+                        .collect();
 
-                    Ok((is_piece_valid, write_count, blocks))
-                })
-                .await
-                // our code doesn't panic in the task so until better strategies
-                // are devised, unwrap
-                .expect("disk IO write task panicked");
+                    (Some(write_count), blocks)
+                } else {
+                    log::warn!("Piece {} is NOT valid", info.piece_index);
+                    (None, Vec::new())
+                };
+
+                Ok((is_piece_valid, write_count, blocks))
+            })
+            .await
+            // our code doesn't panic in the task so until better strategies
+            // are devised, unwrap here
+            .expect("disk IO write task panicked");
 
             // We don't error out on disk write failure as we don't want to
             // kill the disk task due to potential disk IO errors (which may
@@ -363,6 +374,10 @@ impl Torrent {
         Ok(())
     }
 
+    /// Starts a new in-progress piece, creating metadata for it in self.
+    ///
+    /// This involves getting the expected hash of the piece, its length, and
+    /// calculating the files that it intersects.
     fn start_new_piece(&mut self, info: BlockInfo) -> Result<(), WriteError> {
         log::trace!("Creating piece {} write buffer", info.piece_index);
 
@@ -376,20 +391,31 @@ impl Torrent {
         let hash_slice = &self.piece_hashes[hash_pos..hash_pos + 20];
         let mut expected_hash = [0; 20];
         expected_hash.copy_from_slice(hash_slice);
+        log::debug!(
+            "Piece {} expected hash {}",
+            info.piece_index,
+            hex::encode(&expected_hash)
+        );
 
-        //let len = self.info.piece_len(info.piece_index)?;
-        let len = if info.piece_index == self.info.piece_count - 1 {
-            self.info.last_piece_len
-        } else {
-            self.info.piece_len
-        };
+        // TODO: consider using expect here as piece index should be verified in
+        // Torrent::write_block
+        let len = self
+            .info
+            .piece_len(info.piece_index)
+            .map_err(|_| WriteError::InvalidPieceIndex)?;
+        log::debug!("Piece {} is {} bytes long", info.piece_index, len);
 
-        let blocks = BTreeMap::new();
+        let files = self
+            .info
+            .files_intersecting_piece(info.piece_index)
+            .map_err(|_| WriteError::InvalidPieceIndex)?;
+        log::debug!("Piece {} intersects files: {:?}", info.piece_index, files);
 
         let piece = Piece {
             expected_hash,
             len,
-            blocks,
+            blocks: BTreeMap::new(),
+            files,
         };
         self.pieces.insert(info.piece_index, piece);
 
@@ -397,8 +423,35 @@ impl Torrent {
     }
 }
 
+struct TorrentFile {
+    info: FileInfo,
+    handle: File,
+}
+
+impl TorrentFile {
+    /// TODO: write to file using pwritev, repeteadly if not writing the whole
+    /// chunk
+    fn write_vectored_at(
+        &self,
+        bufs: &[IoVec<&[u8]>],
+    ) -> Result<usize, WriteError> {
+        todo!();
+        // IO syscalls are not guaranteed to write the whole input buffer in one
+        // go, so we need to write until all bytes have been confirmed to be
+        // written to disk (or an error occurs)
+    }
+}
+
+#[derive(Default)]
+struct Stats {
+    /// The number of bytes successfully written to disk.
+    write_count: u64,
+    /// The number of times we failed to write to disk.
+    write_failure_count: usize,
+}
+
 /// An in-progress piece download that keeps in memory the so far downloaded
-/// blocks and a hashing context that's updated with each received block.
+/// blocks and the expected hash of the piece.
 struct Piece {
     /// The expected hash of the whole piece.
     expected_hash: Sha1Hash,
@@ -414,6 +467,11 @@ struct Piece {
     // TODO: consider whether using a Vec would be more performant due to cache
     // locality
     blocks: BTreeMap<u32, Vec<u8>>,
+    /// The files that this piece overlaps with.
+    ///
+    /// This is a left-inclusive range of all all file indices, that can be used
+    /// to index the `Torrent::files` vector to get the file handles.
+    files: Range<FileIndex>,
 }
 
 impl Piece {
@@ -434,6 +492,11 @@ impl Piece {
 
     /// Calculates the piece's hash using all its blocks and returns if it
     /// matches the expected hash.
+    ///
+    /// # Important
+    ///
+    /// This is a long running function and should be executed on a thread pool
+    /// and not the executor.
     fn matches_hash(&self) -> bool {
         // sanity check that we only call this method if we have all blocks in
         // piece
@@ -447,38 +510,188 @@ impl Piece {
         hash.as_slice() == self.expected_hash
     }
 
-    /// Writes the piece's write buffer to disk at the given path and returns
-    /// the number of bytes written.
-    fn write(&self, part_path: &Path) -> Result<usize, WriteError> {
-        let mut block_slices: Vec<_> =
-            self.blocks.values().map(|b| IoSlice::new(&b[..])).collect();
-        // TODO(https://github.com/mandreyel/cratetorrent/issues/33): we
-        // shouldn't open file every time we want to write to it--keep a handle
-        // to it open
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(part_path)
-            .map_err(|e| {
-                log::warn!("Failed to open file {:?}", part_path);
-                WriteError::Io(e)
-            })?;
-        // IO syscalls are not guaranteed to write the whole input buffer in one
-        // go, so we need to write until all bytes have been confirmed to be
-        // written to disk (or an error occurs)
+    /// Writes the piece's blocks to the files the piece overlaps with.
+    ///
+    /// # Important
+    ///
+    /// This performs sync IO and is thus potentially blocking and should be
+    /// executed on a thread pool and not the executor.
+    fn write(
+        &self,
+        piece_torrent_offset: u64,
+        files: &[Mutex<TorrentFile>],
+    ) -> Result<usize, WriteError> {
         let mut total_write_count = 0;
-        while total_write_count < self.len as usize {
-            let write_count =
-                file.write_vectored(&block_slices).map_err(|e| {
-                    log::warn!("Failed to write to file {:?}", part_path);
-                    WriteError::Io(e)
-                })?;
-            // "trim off" the bytes from the block slices that were written to
-            // disk so that they are not written there again
-            IoSlice::advance(&mut block_slices, write_count);
+
+        // need to convert the blocks to IO slices that the underlying
+        // systemcall can deal with
+        let mut blocks: Vec<_> = self
+            .blocks
+            .values()
+            .map(|b| IoVec::from_slice(&b))
+            .collect();
+        let mut iovec = blocks.as_mut_slice();
+        // the offset at which we need to write in torrent, which is updated
+        // with each write
+        let mut write_torrent_offset = piece_torrent_offset;
+
+        // loop through all files piece overlaps with and write that part of
+        // piece to file
+        for file in files.iter() {
+            let file = file.lock().unwrap();
+            // determine which part of the file we need to write to
+            let slice =
+                file.info.get_slice(write_torrent_offset, self.len as u64);
+
+            // get slices of the blocks that overlap with file
+            //
+            // TODO: we don't need to allocate a new vector here: we can just
+            // create a slice if `block_slices` is a vec of iovecs (but this is
+            // too complex for the purposes of testing)
+
+            // take the second half of the buffer
+            let mut split = slice.split_bufs_at_boundary(iovec);
+            // the first half of the split cannot be larger than the file slice
+            // we want to write to
+            debug_assert!(
+                split
+                    .first_half()
+                    .iter()
+                    .map(|iov| iov.as_slice().len() as u64)
+                    .sum::<u64>()
+                    <= slice.len
+            );
+
+            // write to that part of file
+            let write_count = file.write_vectored_at(split.first_half())?;
+
+            //
+            iovec = split.into_second_half();
+
+            write_torrent_offset += write_count as u64;
             total_write_count += write_count;
         }
 
         Ok(total_write_count)
     }
+}
+
+///// Maps the iovecs to another list of iovecs such that their total number of
+///// bytes is at most `max_len`.
+/////
+///// There are three cases that can occur:
+///// 1. The iovecs are already bounded by the given max length, this is a
+/////    noop, and no additional allocations are made.
+///// 2. The iovecs are not yet bounded, but the bound happens to be at an
+/////    exact boundary of two iovecs, the slice is simply sliced further, and no
+/////    additional allocations are made.
+///// 3. The iovecs are not yet bounded and the bound is at some offset within one
+/////    of the iovecs. In this case, we must
+//fn bound_iovec<'a>(
+//blocks: &'a [IoVec<&'a [u8]>],
+//mut max_len: usize,
+//) -> &'a [IoVec<&'a [u8]>] {
+//// TODO: can we take advantage of the fact that all but the last blocks are
+//// the same length? that way we wouldn't have to iterate but could jump over
+//// a few blocks right away
+
+//// find the last block that still has some bytes within the length bound
+//let last_block_pos = match blocks.iter().position(|block| {
+//let block = block.as_slice();
+//if max_len <= block.len() {
+//// the remainig length is smaller than or equal to the block's
+//// length, which means that we found the last block that still has
+//// bytes within the length boundary
+//true
+//} else {
+//// the block is larger than the remaining length, just subtract its
+//// size from it and go on
+//max_len -= block.len();
+//false
+//}
+//}) {
+//Some(pos) => pos,
+//// this happens if `max_len > all blocks len`, meaning that the blocks
+//// are already bounded by `max_len`
+//None => return blocks,
+//};
+
+//// TODO: the block we found may still exceed the max length, trim if
+//// necessary
+//}
+
+///// Trims `write_count` bytes off the front of the given iovec.
+//fn trim_iovec<'a>(
+//blocks: &'a [IoVec<&'a [u8]>],
+//mut write_count: usize,
+//) -> &'a [IoVec<&'a [u8]>] {
+//todo!();
+//[>    // skip the blocks that we've already written to disk<]
+////let mut skipped_block_count = 0;
+////for block in blocks.iter() {
+////// if this block is larger than the amount we need to skip, it means
+////// that block was partially written to disk and we still need to write
+////// to disk its remainder
+////if skip < block.len() {
+////break;
+////} else {
+////skipped_block_count += 1;
+////skip -= block.len();
+////}
+//////we need to adjust the iovec at the previous write boundary
+////let mut iovec = Vec::new();
+////let first_block = IoVec::from_slice(&blocks[0][skip..]);
+////iovec.push(first_block);
+////let blocks = &blocks[1..];
+
+////}
+//}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    //#[test]
+    //fn test_bound_iovec() {
+    //let blocks = vec![
+    //(0..16).collect::<Vec<u8>>(),
+    //(16..32).collect::<Vec<u8>>(),
+    //(32..48).collect::<Vec<u8>>(),
+    //(48..64).collect::<Vec<u8>>(),
+    //];
+    //let iovec: Vec<_> =
+    //blocks.iter().map(|b| IoVec::from_slice(&b)).collect();
+
+    //let assert_with_len = |len| {
+    //// the blocks that `len` spans in `blocks`
+    //let block_count = (len + 15) / 16;
+    //let expected_block_slice = blocks
+    //.iter()
+    //.take(block_count)
+    //.flatten()
+    //.take(len)
+    //.cloned()
+    //.collect::<Vec<_>>();
+
+    //// bound the iovec
+    //let iovecs = bound_iovec(&iovec, 10);
+    //// map the new slice of iovecs into a contiguous byte array for
+    //// easier comparison with the expected blocks
+    //let block_slice: Vec<_> = iovecs
+    //.iter()
+    //.map(|iovec| iovec.as_slice().to_vec())
+    //.flatten()
+    //.collect();
+    //assert_eq!(block_slice, expected_block_slice,);
+    //};
+
+    //// write the first 10 bytes, should only get the first iovec
+    //assert_with_len(10);
+
+    //// write the first 20 bytes, should get the first 2 iovecs
+    //assert_with_len(20);
+
+    //// write the first 40 bytes, should get the first 3 iovecs
+    //assert_with_len(40);
+    //}
 }

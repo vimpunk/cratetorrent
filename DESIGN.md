@@ -642,8 +642,9 @@ wish to save a piece, we need to look for its file boundaries and thus
 "partition" the piece, saving the partitions to their corresponding files.
 
 To find the files quickly, if we imagine the torrent as a single contiguous byte
-stream, we can pre-compute each file's offset in the entire torrent and use this
-information to check which pieces intersect the files.
+stream, we can pre-compute each file's offset in the entire torrent, and compute
+each piece's offset in the torrent, and use this information to check which
+pieces intersect the files.
 
 More concretely, there are two options:
 - compute what pieces a file intersects with  at the beginning beginning of a
@@ -652,14 +653,12 @@ More concretely, there are two options:
   download, storing it with the in-progress piece.
 
 The second approach is chosen for several reasons:
-- it's easier to implement and test (particularly structuring the
-  pre-computation);
-- in the first approach, we'd have to loop through all files anyway to find the
-  matching piece indices, so we don't save much computation (though it would be
-  slightly more straightforward to compare piece indices than byte offsets);
-- and also, slightly less memory overhead as we're only storing this data when a
-  piece is being downloaded, not with all files in a torrent, which is wasteful
-  if their pieces are already downloaded.
+- the way the code is currently laid out it is easier to implement and test;
+- in the first approach, to find the matching piece indices, we'd have to loop
+  through all files anyway, so we don't save much computation;
+- and also, there is slightly less memory overhead as we're only storing this
+  data when a piece is being downloaded, not with all files in a torrent at all
+  times, which is wasteful if their pieces are already downloaded.
 
 The concrete algorithm is this:
 - find the first file where
@@ -675,7 +674,12 @@ The concrete algorithm is this:
 Unless the piece is very large and there are many small files, the second part
 (finding the last file intersecting with piece) should be very quick, with only
 a few iterations. (This is the part that could be optimized by storing which
-a file intersects with with the file information, but as can be seen.)
+pieces a file intersects with in the file information.)
+
+Then, getting the file indices is not sufficient: when writing to each file, we
+also need to know where exactly in the file we need to write the part of the
+piece. For each file to be written to, we query the slice of the file that
+overlaps with the piece, and write to file at that position.
 
 ##### Example
 Let's illustrate with an example. The first row contains 3 pieces, each 16 units
@@ -714,7 +718,7 @@ these buffers these blocks are stored in the disk write buffer as is, i.e the
 write buffer is a vector of byte vectors.
 Writing each block to disk as a separate system call would incur tremendous
 overhead (relative to the other operations in most of cratetorrent), especially
-that context switches into kernel space have become far more expensive lately to
+that context switches into kernel space have become more expensive lately to
 mitigate risks of speculative execution, so these buffers are flushed to disk in
 one system call, using [vectored
 IO](http://man7.org/linux/man-pages/man2/readv.2.html).
@@ -726,15 +730,100 @@ gains. For these instance of blocking IO, we make use of `tokio`'s builtin
 threadpool and spawn the blocking IO
 [tasks](https://docs.rs/tokio/0.2.17/tokio/task/fn.spawn_blocking.html) on it.
 
-For now `writev` is used, as that's the API that the standard lib `File`
-[exposes](https://doc.rust-lang.org/std/io/trait.Write.html#method.write_vectored),
-however, this requires that the file cursor is at the correct position, and
-requires seeking to the correct position if it's not. Since this needlessly
-adds another context switch, but ideally
-[`pwritev`](https://docs.rs/nix/0.17.0/nix/sys/uio/fn.pwritev.html) would be
-used (where the position of the write is specified as part of the write
-operation). For now the standard lib is used for simplicity as this is not yet
-an issue due to downloading sequentially, but this will be changed later.
+The [`pwritev`](https://linux.die.net/man/2/pwritev) syscall is used for the
+concrete IO operation. This syscall allows one to write a vector of byte arrays
+(referred to as "iovec") at a specified position in the file, without having to
+make a separate [`seek`](https://linux.die.net/man/2/lseek) syscall. This means
+that we do not need to write to the file in sequential order.
+
+##### Writing blocks spanning multiple files
+There is an additional complication to this: a block in a piece may span
+multiple files. Therefore, we can't just pass all blocks in a piece to
+`pwritev`, as that could write more than is supposed to be in the file (the
+syscall writes as long as there is data in the passed in iovecs, potentially
+truncating the file to a larger than desired size).
+
+Thus, when the blocks in a piece would extend beyond a file, we need to shrink
+the slice of iovecs passed to `pwritev`. To illustrate:
+```
+------------------
+| file1 | file 2 |
+--------.---------
+| block .        |
+--------.---------
+        ^
+  file boundary
+```
+On the first write, to `file1`, we need to trim the second part of the block.
+Conversely, on the second write, to `file2`, we need to trim the first part.
+
+There is a problem here: trimming the iovec during the first write makes us lose
+the second part of the block (since we're working with references here to
+minimize allocations). There are two solutions:
+- Keep metadata about the trimmed iovec, if any, and restore the trimmed part
+  after the IO, [like in
+  tide](https://github.com/mandreyel/tide/blob/master/src/file.cpp#L403). 
+
+How this would work:
+detect that the file boundary is in the middle of an iovec. If so, we copy the
+iovec (this is cheap, it's just a fat pointer after all) and keep the second
+half (the trimmed off part) in an option, and trim the actual iovec. Once we're
+done, we can restore this iovec.
+One problem I see here is that it needs to work nicely with trimming buffers
+after a write.
+Notice that properly bounded iovecs are written to disk should be zero, so we
+can just throw those away.
+In fact, this leads to a more general solution: we can split iovecs in two at
+each write! The second half will necessarily be an option, for the cases when
+the iovecs are smaller than the file slice.
+
+```rust
+let (blocks_to_write, boundary_block_second_part, remaining_blocks) = self.split_blocks_at_file_boundary();
+```
+
+Note that we're keeping a copy of the original part.
+
+
+- When we detect that the file boundary is in the middle of an iovec, we
+  construct a new vector of iovecs, that is bounded by the length of the file
+  slice that we're writing to (we can use
+  [copy-on-write](https://doc.rust-lang.org/std/borrow/enum.Cow.html) to
+  seamlessly handle the resulting iovecs). This avoids overwriting the original
+  iovecs, at a slight cost.
+
+The second approach is chosen (for now), due to simpler and clearer
+implementation. However, this case should be infrequent and so we can
+avoid allocating a new vector for most file writes when the iovecs don't exceed
+the file's length, keeping the hot path optimized.
+
+Finally, after each write, we must trim the front of the slice of iovecs by the
+number of bytes written, so that for the next file we don't write the wrong
+data (otherwise we'd be writing out-of-order, i.e. wrong data to the file).
+
+#### Anatomy of a piece write
+1. Create a new in-progress piece entry and calculate which files it spans, as
+   per [the above step](#mapping-pieces-to-files).
+2. Buffer all downloaded blocks in piece's write buffer.
+3. When the piece is complete, remove its entry from the torrent and spawn a new
+   blocking task for the hashing and write.
+4. Hash the piece, and if the result is good, continue. Otherwise let torrent
+   know via the alert channel of the bad piece.
+5. Allocate a vector of iovecs pointing to the blocks in the piece.
+6. Create a slice for this vector of iovecs; this will be adjusted with each
+   write.
+7. For each file that the piece spans:
+  8. Get the slice of the file where we need to write the piece.
+  9. Bound the iovec by the length of the file slice, optionally allocating a
+     new vector of iovecs if the provided iovecs exceed the file slice's length.
+  10. Write to the file at the position and for the length of the slice.
+  11. Trim the slice of iovecs by the number of bytes that were written to disk.
+  12. Step 10 and 11 may need to be repeated if not all bytes could be written
+      to disk (as the syscall doesn't guarantee that all provided bytes can be
+      written).
+
+
+### File synchronization
+TODO: write, later read
 
 
 ## Anatomy of a block fetch

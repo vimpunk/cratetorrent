@@ -1,7 +1,5 @@
 // needed by the `select!` macro reaching the default recursion limit
 #![recursion_limit = "256"]
-// use this feature to advance written bytes
-#![feature(io_slice_advance)]
 
 #[macro_use]
 extern crate serde_derive;
