@@ -1,5 +1,6 @@
 mod error;
 mod io;
+pub(crate) mod iovecs;
 
 use tokio::{
     sync::mpsc::{UnboundedReceiver, UnboundedSender},

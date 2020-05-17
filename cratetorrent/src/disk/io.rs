@@ -5,6 +5,7 @@ use {
         collections::{BTreeMap, HashMap},
         fs::{self, File, OpenOptions},
         ops::Range,
+        os::unix::io::AsRawFd,
         sync::{Arc, Mutex},
     },
     tokio::{
@@ -15,14 +16,16 @@ use {
 
 use {
     super::{
-        error::*, Alert, AlertReceiver, AlertSender, BatchWrite, Command,
+        error::*,
+        iovecs::{IoVec, IoVecs},
+        Alert, AlertReceiver, AlertSender, BatchWrite, Command,
         CommandReceiver, CommandSender, TorrentAlert, TorrentAlertReceiver,
         TorrentAlertSender, TorrentAllocation,
     },
     crate::{
         block_count,
         error::Error,
-        storage_info::{FsStructure, IoVec, StorageInfo},
+        storage_info::{FsStructure, StorageInfo},
         BlockInfo, FileIndex, FileInfo, PieceIndex, Sha1Hash, TorrentId,
     },
 };
@@ -431,14 +434,33 @@ struct TorrentFile {
 impl TorrentFile {
     /// TODO: write to file using pwritev, repeteadly if not writing the whole
     /// chunk
-    fn write_vectored_at(
+    ///
+    /// TODO: consider taking just the raw slice and constructing IoVecs here
+    /// (and returning the tail)
+    fn write_vectored_at<'a>(
         &self,
-        bufs: &[IoVec<&[u8]>],
+        iovecs: &mut IoVecs<'a>,
+        offset: u64,
     ) -> Result<usize, WriteError> {
-        todo!();
         // IO syscalls are not guaranteed to write the whole input buffer in one
         // go, so we need to write until all bytes have been confirmed to be
         // written to disk (or an error occurs)
+        let mut total_write_count = 0;
+        while !iovecs.buffers().is_empty() {
+            let write_count = pwritev(
+                self.handle.as_raw_fd(),
+                iovecs.buffers(),
+                offset as i64,
+            )
+            .map_err(|e| {
+                log::warn!("File {:?} write error: {}", self.info.path, e);
+                // FIXME: convert actual error here
+                WriteError::Io(std::io::Error::last_os_error())
+            })?;
+            iovecs.advance(write_count);
+            total_write_count += write_count;
+        }
+        Ok(total_write_count)
     }
 }
 
@@ -530,168 +552,90 @@ impl Piece {
             .values()
             .map(|b| IoVec::from_slice(&b))
             .collect();
-        let mut iovec = blocks.as_mut_slice();
+        let mut bufs = blocks.as_mut_slice();
         // the offset at which we need to write in torrent, which is updated
         // with each write
         let mut write_torrent_offset = piece_torrent_offset;
 
         // loop through all files piece overlaps with and write that part of
         // piece to file
-        for file in files.iter() {
-            let file = file.lock().unwrap();
+        let files = &files[self.files.clone()];
+        debug_assert!(!files.is_empty());
+        // optimize here for single file IO: no need to perform the splitting
+        // buffers etc if we know there is only a single file that piece spans,
+        // we can just write all blocks to that file
+        if files.len() == 1 {
+            // TODO: don't use unwrap here
+            let file = files.first().unwrap().lock().unwrap();
             // determine which part of the file we need to write to
             let slice =
                 file.info.get_slice(write_torrent_offset, self.len as u64);
-
-            // get slices of the blocks that overlap with file
-            //
-            // TODO: we don't need to allocate a new vector here: we can just
-            // create a slice if `block_slices` is a vec of iovecs (but this is
-            // too complex for the purposes of testing)
-
-            // take the second half of the buffer
-            let mut split = slice.split_bufs_at_boundary(iovec);
-            // the first half of the split cannot be larger than the file slice
-            // we want to write to
+            let mut iovecs = IoVecs::unbounded(bufs);
+            // the write buffer cannot be larger than the file slice we want to
+            // write to
             debug_assert!(
-                split
-                    .first_half()
+                iovecs
+                    .buffers()
                     .iter()
                     .map(|iov| iov.as_slice().len() as u64)
                     .sum::<u64>()
                     <= slice.len
             );
 
-            // write to that part of file
-            let write_count = file.write_vectored_at(split.first_half())?;
+            // write to file
+            total_write_count +=
+                file.write_vectored_at(&mut iovecs, slice.offset)?;
 
-            //
-            iovec = split.into_second_half();
+            // the remainder of the write buffer should be empty (still need to
+            // override for below debug assert)
+            bufs = iovecs.into_tail();
+        } else {
+            for file in files.iter() {
+                let file = file.lock().unwrap();
+                // determine which part of the file we need to write to
+                let slice =
+                    file.info.get_slice(write_torrent_offset, self.len as u64);
+                // an empty file slice shouldn't occur as it would mean that piece
+                // was thought to span more files than it actually does
+                debug_assert!(slice.len > 0);
+                // the write buffer should still contain bytes to write
+                debug_assert!(!bufs.is_empty());
+                debug_assert!(!bufs[0].as_slice().is_empty());
 
-            write_torrent_offset += write_count as u64;
-            total_write_count += write_count;
+                // take the second half of the buffer
+                let mut iovecs = IoVecs::bounded(bufs, slice.len as usize);
+                // the write buffer cannot be larger than the file slice we want to
+                // write to
+                debug_assert!(
+                    iovecs
+                        .buffers()
+                        .iter()
+                        .map(|iov| iov.as_slice().len() as u64)
+                        .sum::<u64>()
+                        <= slice.len
+                );
+
+                // write to file
+                let write_count =
+                    file.write_vectored_at(&mut iovecs, slice.offset)?;
+
+                // get the remainder of the buffer for the next rounds, if any
+                bufs = iovecs.into_tail();
+
+                write_torrent_offset += write_count as u64;
+                total_write_count += write_count;
+            }
         }
+
+        // we should have used up all write buffers (i.e. written all blocks to
+        // disk)
+        debug_assert!(bufs.is_empty());
 
         Ok(total_write_count)
     }
 }
 
-///// Maps the iovecs to another list of iovecs such that their total number of
-///// bytes is at most `max_len`.
-/////
-///// There are three cases that can occur:
-///// 1. The iovecs are already bounded by the given max length, this is a
-/////    noop, and no additional allocations are made.
-///// 2. The iovecs are not yet bounded, but the bound happens to be at an
-/////    exact boundary of two iovecs, the slice is simply sliced further, and no
-/////    additional allocations are made.
-///// 3. The iovecs are not yet bounded and the bound is at some offset within one
-/////    of the iovecs. In this case, we must
-//fn bound_iovec<'a>(
-//blocks: &'a [IoVec<&'a [u8]>],
-//mut max_len: usize,
-//) -> &'a [IoVec<&'a [u8]>] {
-//// TODO: can we take advantage of the fact that all but the last blocks are
-//// the same length? that way we wouldn't have to iterate but could jump over
-//// a few blocks right away
-
-//// find the last block that still has some bytes within the length bound
-//let last_block_pos = match blocks.iter().position(|block| {
-//let block = block.as_slice();
-//if max_len <= block.len() {
-//// the remainig length is smaller than or equal to the block's
-//// length, which means that we found the last block that still has
-//// bytes within the length boundary
-//true
-//} else {
-//// the block is larger than the remaining length, just subtract its
-//// size from it and go on
-//max_len -= block.len();
-//false
-//}
-//}) {
-//Some(pos) => pos,
-//// this happens if `max_len > all blocks len`, meaning that the blocks
-//// are already bounded by `max_len`
-//None => return blocks,
-//};
-
-//// TODO: the block we found may still exceed the max length, trim if
-//// necessary
-//}
-
-///// Trims `write_count` bytes off the front of the given iovec.
-//fn trim_iovec<'a>(
-//blocks: &'a [IoVec<&'a [u8]>],
-//mut write_count: usize,
-//) -> &'a [IoVec<&'a [u8]>] {
-//todo!();
-//[>    // skip the blocks that we've already written to disk<]
-////let mut skipped_block_count = 0;
-////for block in blocks.iter() {
-////// if this block is larger than the amount we need to skip, it means
-////// that block was partially written to disk and we still need to write
-////// to disk its remainder
-////if skip < block.len() {
-////break;
-////} else {
-////skipped_block_count += 1;
-////skip -= block.len();
-////}
-//////we need to adjust the iovec at the previous write boundary
-////let mut iovec = Vec::new();
-////let first_block = IoVec::from_slice(&blocks[0][skip..]);
-////iovec.push(first_block);
-////let blocks = &blocks[1..];
-
-////}
-//}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    //#[test]
-    //fn test_bound_iovec() {
-    //let blocks = vec![
-    //(0..16).collect::<Vec<u8>>(),
-    //(16..32).collect::<Vec<u8>>(),
-    //(32..48).collect::<Vec<u8>>(),
-    //(48..64).collect::<Vec<u8>>(),
-    //];
-    //let iovec: Vec<_> =
-    //blocks.iter().map(|b| IoVec::from_slice(&b)).collect();
-
-    //let assert_with_len = |len| {
-    //// the blocks that `len` spans in `blocks`
-    //let block_count = (len + 15) / 16;
-    //let expected_block_slice = blocks
-    //.iter()
-    //.take(block_count)
-    //.flatten()
-    //.take(len)
-    //.cloned()
-    //.collect::<Vec<_>>();
-
-    //// bound the iovec
-    //let iovecs = bound_iovec(&iovec, 10);
-    //// map the new slice of iovecs into a contiguous byte array for
-    //// easier comparison with the expected blocks
-    //let block_slice: Vec<_> = iovecs
-    //.iter()
-    //.map(|iovec| iovec.as_slice().to_vec())
-    //.flatten()
-    //.collect();
-    //assert_eq!(block_slice, expected_block_slice,);
-    //};
-
-    //// write the first 10 bytes, should only get the first iovec
-    //assert_with_len(10);
-
-    //// write the first 20 bytes, should get the first 2 iovecs
-    //assert_with_len(20);
-
-    //// write the first 40 bytes, should get the first 3 iovecs
-    //assert_with_len(40);
-    //}
 }
