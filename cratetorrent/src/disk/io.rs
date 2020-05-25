@@ -16,15 +16,14 @@ use {
 
 use {
     super::{
-        error::*,
-        iovecs::{IoVec, IoVecs},
-        Alert, AlertReceiver, AlertSender, BatchWrite, Command,
+        error::*, Alert, AlertReceiver, AlertSender, BatchWrite, Command,
         CommandReceiver, CommandSender, TorrentAlert, TorrentAlertReceiver,
         TorrentAlertSender, TorrentAllocation,
     },
     crate::{
         block_count,
         error::Error,
+        iovecs::{IoVec, IoVecs},
         storage_info::{FsStructure, StorageInfo},
         BlockInfo, FileIndex, FileInfo, PieceIndex, Sha1Hash, TorrentId,
     },
@@ -446,10 +445,10 @@ impl TorrentFile {
         // go, so we need to write until all bytes have been confirmed to be
         // written to disk (or an error occurs)
         let mut total_write_count = 0;
-        while !iovecs.buffers().is_empty() {
+        while !iovecs.as_slice().is_empty() {
             let write_count = pwritev(
                 self.handle.as_raw_fd(),
-                iovecs.buffers(),
+                iovecs.as_slice(),
                 offset as i64,
             )
             .map_err(|e| {
@@ -575,7 +574,7 @@ impl Piece {
             // write to
             debug_assert!(
                 iovecs
-                    .buffers()
+                    .as_slice()
                     .iter()
                     .map(|iov| iov.as_slice().len() as u64)
                     .sum::<u64>()
@@ -608,7 +607,7 @@ impl Piece {
                 // write to
                 debug_assert!(
                     iovecs
-                        .buffers()
+                        .as_slice()
                         .iter()
                         .map(|iov| iov.as_slice().len() as u64)
                         .sum::<u64>()
