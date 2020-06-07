@@ -183,7 +183,7 @@ mod tests {
             piece_hashes,
             info,
             ..
-        } = Env::new();
+        } = Env::new("allocate_new_torrent");
 
         // allocate torrent via channel
         disk_handle
@@ -197,7 +197,7 @@ mod tests {
                 assert_eq!(allocation.id, id);
             }
             _ => {
-                assert!(false, "Torrent could not be allocated");
+                assert!(false, "torrent could not be allocated");
             }
         }
 
@@ -225,7 +225,7 @@ mod tests {
             pieces,
             piece_hashes,
             info,
-        } = Env::new();
+        } = Env::new("write_all_pieces");
 
         // allocate torrent via channel
         disk_handle
@@ -239,7 +239,7 @@ mod tests {
             {
                 allocation.alert_port
             } else {
-                assert!(false, "Torrent could not be allocated");
+                assert!(false, "torrent could not be allocated");
                 return;
             };
 
@@ -306,8 +306,8 @@ mod tests {
         }
     }
 
-    // Tests writing of an invalid piece and verifying that an alert the invalid
-    // disk is returned by the disk task.
+    // Tests writing of an invalid piece and verifying that an alert of it
+    // is returned by the disk task.
     #[tokio::test]
     async fn test_write_invalid_piece() {
         let (_, disk_handle, mut alert_port) = spawn().unwrap();
@@ -317,7 +317,7 @@ mod tests {
             pieces,
             piece_hashes,
             info,
-        } = Env::new();
+        } = Env::new("write_invalid_piece");
 
         // allocate torrent via channel
         disk_handle
@@ -331,7 +331,7 @@ mod tests {
             {
                 allocation.alert_port
             } else {
-                assert!(false, "Torrent could not be allocated");
+                assert!(false, "torrent could not be allocated");
                 return;
             };
 
@@ -357,12 +357,12 @@ mod tests {
             // verify that the message doesn't contain any blocks
             assert!(batch.blocks.is_empty());
         } else {
-            assert!(false, "Piece could not be written to disk");
+            assert!(false, "piece could not be written to disk");
         }
 
-        // download file should not exists as invalid piece must not be written
-        // to disk
-        assert!(!info.download_path.exists());
+        // download file exists as it's preallocated, but it should be empty as
+        // invalid piece must not be written to disk
+        assert_eq!(info.download_path.metadata().unwrap().len(), 0);
     }
 
     // The disk IO test environment containing information of a valid torrent.
@@ -374,9 +374,15 @@ mod tests {
     }
 
     impl Env {
-        fn new() -> Self {
+        // Creates a new test environment.
+        //
+        // Tests are run in parallel so multiple environments must not clash,
+        // therefore the test name must be unique, which is included in the test
+        // environment's path. This also helps debugging.
+        fn new(test_name: &str) -> Self {
             let id = 0;
-            let download_path = PathBuf::from("/tmp/torrent0");
+            let download_path =
+                PathBuf::from(format!("/tmp/torrent_disk_test_{}", test_name));
             let piece_len: u32 = 4 * 0x4000;
             // last piece is slightly shorter to test that it is handled correctly
             let last_piece_len: u32 = piece_len - 935;

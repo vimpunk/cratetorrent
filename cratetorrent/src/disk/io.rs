@@ -421,7 +421,8 @@ struct TorrentFile {
 }
 
 impl TorrentFile {
-    /// Opens the file in create and write mode at the path defined in file info.
+    /// Opens the file in create and write mode at the path defined in the file
+    /// info.
     fn new(info: FileInfo) -> Result<Self, NewTorrentError> {
         let handle = OpenOptions::new()
             .create(true)
@@ -441,6 +442,11 @@ impl TorrentFile {
     /// It returns the slice of blocks that weren't written to disk, that is,
     /// it returns the second half of `blocks` as though they were split at the
     /// `slice.len` offset (or an empty slice if all blocks were written to disk).
+    ///
+    /// # Important
+    ///
+    /// Since the syscall may be invoked repeatedly to perform the write, this
+    /// means that the file write is not guaranteed to be atomic.
     fn write_blocks<'a>(
         &self,
         file_slice: FileSlice,
@@ -637,7 +643,7 @@ mod tests {
 
     use {super::*, crate::BLOCK_LEN};
 
-    // Tests that writing blocks of a piece to a single file works.
+    // Tests that writing blocks to a single file using `TorrentFile` works.
     #[test]
     fn test_torrent_file_write_blocks() {
         let files = 0..1;

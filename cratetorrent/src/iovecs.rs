@@ -80,7 +80,7 @@
 //! // get write buffers as an immutable slice of iovecs, which will return the
 //! // first 25 bytes, and write the first 25 bytes of buffers
 //! assert_eq!(write_bufs.as_slice().iter().map(|iov| iov.as_slice().len()).sum::<usize>(), file_len);
-//! let write_count = write_vectored_at(&file, &mut write_bufs);
+//! let write_count = write_vectored_at(&file, 0, &mut write_bufs);
 //! assert_eq!(write_count, file_len);
 //!
 //! // after this is done, we can use the second half of the buffers
@@ -90,19 +90,20 @@
 //! // now we can write the rest of the buffers to another file
 //!
 //! /// Writes the slice of iovecs to the file.
-//! fn write_vectored_at<'a>(file: &File, bufs: &mut IoVecs<'a>) -> usize {
+//! fn write_vectored_at<'a>(file: &File, mut offset: i64, iovecs: &mut IoVecs<'a>) -> usize {
 //!     let mut total_write_count = 0;
 //!     while !iovecs.as_slice().is_empty() {
 //!         let write_count = pwritev(
-//!             self.handle.as_raw_fd(),
+//!             file.as_raw_fd(),
 //!             iovecs.as_slice(),
-//!             offset as i64,
+//!             offset,
 //!         )
 //!         .expect("Failed to write to file");
 //!         iovecs.advance(write_count);
 //!         total_write_count += write_count;
+//!         offset += write_count as i64;
 //!     }
-//!     Ok(total_write_count)
+//!     total_write_count
 //! }
 //! ```
 //!
