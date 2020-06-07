@@ -37,7 +37,7 @@ impl FileInfo {
     ///
     /// * `torrent_offset` - A byte offset in the entire torrent.
     /// * `len` - The length of the byte range, starting from the offset. This
-    ///         may be exceed the file length, in which case the returned file
+    ///         may exceed the file length, in which case the returned file
     ///         length will be smaller.
     ///
     /// # Panics
@@ -62,7 +62,7 @@ impl FileInfo {
 }
 
 /// Represents the location of a range of bytes within a file.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct FileSlice {
     /// The byte offset in file, relative to the file's start.
     pub offset: u64,
@@ -241,6 +241,74 @@ impl FsStructure {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_file_get_slice() {
+        let file = FileInfo {
+            // file doesn't need to exist as we're not doing any IO in this test
+            path: PathBuf::from("/tmp/does/not/exist"),
+            len: 500,
+            torrent_offset: 200,
+        };
+
+        assert_eq!(
+            file.get_slice(300, 1000),
+            FileSlice {
+                offset: 300 - 200,
+                len: 500 - (300 - 200),
+            },
+            "file slice for byte range longer than file should return \
+            at most file length long slice"
+        );
+
+        assert_eq!(
+            file.get_slice(300, 10),
+            FileSlice {
+                offset: 300 - 200,
+                len: 10,
+            },
+            "file slice for byte range smaller than file should return \
+            at most byte range long slice"
+        );
+
+        assert_eq!(
+            file.get_slice(200, 500),
+            FileSlice {
+                offset: 0,
+                len: 500,
+            },
+            "file slice for byte range equal to file length should return \
+            the full file slice"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "torrent offset must be larger than file offset")]
+    fn test_file_get_slice_starting_before_file() {
+        let file = FileInfo {
+            // file doesn't need to exist as we're not doing any IO in this test
+            path: PathBuf::from("/tmp/does/not/exist"),
+            len: 500,
+            torrent_offset: 200,
+        };
+        // we can't query a file slace for a byte range starting before the file
+        file.get_slice(100, 400);
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "torrent offset must be smaller than file end offset"
+    )]
+    fn test_file_get_slice_starting_after_file() {
+        let file = FileInfo {
+            // file doesn't need to exist as we're not doing any IO in this test
+            path: PathBuf::from("/tmp/does/not/exist"),
+            len: 500,
+            torrent_offset: 200,
+        };
+        // we can't query a file slace for a byte range starting before the file
+        file.get_slice(200 + 500, 400);
+    }
 
     #[test]
     fn test_files_intersecting_pieces() {

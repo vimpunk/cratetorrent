@@ -121,8 +121,6 @@ pub use nix::sys::uio::IoVec;
 pub struct IoVecs<'a> {
     /// The entire view of the underlying buffers.
     bufs: &'a mut [IoVec<&'a [u8]>],
-    ///// The length of all bytes in the bounded half of the iovecs.
-    //len: usize,
     /// If set, the buffer is bounded by a given boundary, and is effectively
     /// "split". This includes metadata to reconstruct the second half of the
     /// split.
@@ -377,7 +375,6 @@ impl<'a> IoVecs<'a> {
         // count the whole buffers to remove
         for buf in self.as_slice().iter() {
             let buf_len = buf.as_slice().len();
-            dbg!(buf_len);
             // if the last byte to be removed is in this buffer, don't remove
             // buffer, we just need to adjust its offset
             if total_removed_len + buf_len > n {
@@ -390,14 +387,9 @@ impl<'a> IoVecs<'a> {
             }
         }
 
-        dbg!(n);
-        dbg!(bufs_to_remove_count);
-        dbg!(total_removed_len);
-
         // if there is a split and we want to trim off the whole first half, we
-        // must keep the last buffer
+        // must keep the buffer at the split position
         if let Some(split) = &self.split {
-            dbg!(split.pos);
             if bufs_to_remove_count == split.pos + 1 {
                 if n > total_removed_len {
                     panic!("cannot advance iovecs by more than buffers length");
@@ -411,9 +403,6 @@ impl<'a> IoVecs<'a> {
                     .unwrap_or(0);
             }
         }
-        dbg!(bufs_to_remove_count);
-
-        // TODO: verify bufs_to_remove_count and panic if invalid n
 
         // trim buffers off the front of `self.bufs`
         //
@@ -432,7 +421,6 @@ impl<'a> IoVecs<'a> {
             } else {
                 split.pos -= bufs_to_remove_count;
             }
-            dbg!(split.pos);
         }
 
         // if there are buffers left, it may be that the first buffer needs some
@@ -440,10 +428,8 @@ impl<'a> IoVecs<'a> {
         if !self.bufs.is_empty() {
             // adjust the advance count
             let n = n - total_removed_len;
-            dbg!(n);
             if n > 0 {
                 let slice = self.bufs[0].as_slice();
-                dbg!(slice);
                 assert!(slice.len() >= n);
                 let ptr = slice.as_ptr();
                 let slice = unsafe {
@@ -452,7 +438,6 @@ impl<'a> IoVecs<'a> {
                         slice.len() - n,
                     )
                 };
-                dbg!(slice);
                 self.bufs[0] = IoVec::from_slice(slice);
             }
         }

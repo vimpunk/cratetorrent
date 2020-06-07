@@ -24,7 +24,7 @@ use {
         block_count,
         error::Error,
         iovecs::{IoVec, IoVecs},
-        storage_info::{FsStructure, StorageInfo},
+        storage_info::{FileSlice, FsStructure, StorageInfo},
         BlockInfo, FileIndex, FileInfo, PieceIndex, Sha1Hash, TorrentId,
     },
 };
@@ -165,6 +165,10 @@ struct Torrent {
     ///
     /// Later we will need to make file access more granular, as multiple
     /// concurrent writes to the same file that don't overlap are safe to do.
+    // TODO: Is there a way to avoid copying `FileInfo`s here from
+    // `self.info.structure`? We could just pass the file info on demand, but
+    // that woudl require reallocating this vector every time (to pass a new
+    // vector of pairs of `TorrentFile` and `FileInfo`).
     files: Arc<Vec<Mutex<TorrentFile>>>,
     /// The concatenation of all expected piece hashes.
     piece_hashes: Vec<u8>,
@@ -193,19 +197,6 @@ impl Torrent {
             )));
         }
 
-        // Helper function for opening a file.
-        let open_file = |info: FileInfo| {
-            let handle = OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&info.path)
-                .map_err(|e| {
-                    log::warn!("Failed to open file {:?}", &info.path);
-                    NewTorrentError::Io(e)
-                })?;
-            Ok(Mutex::new(TorrentFile { info, handle }))
-        };
-
         let files = match &info.structure {
             FsStructure::File(file) => {
                 log::debug!(
@@ -213,12 +204,13 @@ impl Torrent {
                     file.len,
                     file.path
                 );
-                vec![open_file(file.clone())?]
+                vec![Mutex::new(TorrentFile::new(file.clone())?)]
             }
             FsStructure::Archive { files } => {
                 debug_assert!(!files.is_empty());
                 log::debug!("Torrent is multi file: {:?}", files);
                 log::debug!("Setting up directory structure");
+
                 let mut torrent_files = Vec::with_capacity(files.len());
                 for file in files.iter() {
                     // file or subdirectory in download root must not exist if
@@ -248,7 +240,8 @@ impl Torrent {
                         torrent_offset: file.torrent_offset,
                         len: file.len,
                     };
-                    torrent_files.push(open_file(file)?);
+                    torrent_files
+                        .push(Mutex::new(TorrentFile::new(file.clone())?));
                 }
                 torrent_files
             }
@@ -307,12 +300,11 @@ impl Torrent {
             let write_result = task::spawn_blocking(move || {
                 let is_piece_valid = piece.matches_hash();
 
-
                 // save piece to disk if it's valid
-                let (write_count, blocks) = if is_piece_valid {
+                let blocks = if is_piece_valid {
                     log::info!("Piece {} is valid", piece_index);
                     let piece_torrent_offset = piece_index as u64 * piece_len as u64;
-                    let write_count = piece.write(piece_torrent_offset, &*files)?;
+                    piece.write(piece_torrent_offset, &*files)?;
 
                     // collect block infos for torrent to identify which
                     // blocks were written to disk
@@ -326,13 +318,13 @@ impl Torrent {
                         })
                         .collect();
 
-                    (Some(write_count), blocks)
+                    blocks
                 } else {
                     log::warn!("Piece {} is NOT valid", info.piece_index);
-                    (None, Vec::new())
+                    Vec::new()
                 };
 
-                Ok((is_piece_valid, write_count, blocks))
+                Ok((is_piece_valid, blocks))
             })
             .await
             // our code doesn't panic in the task so until better strategies
@@ -347,12 +339,10 @@ impl Torrent {
             // TODO(https://github.com/mandreyel/cratetorrent/issues/23): also
             // place back piece write buffer in torrent and retry later
             match write_result {
-                Ok((is_piece_valid, write_count, blocks)) => {
+                Ok((is_piece_valid, blocks)) => {
                     // record write statistics if the piece is valid
                     if is_piece_valid {
-                        if let Some(write_count) = write_count {
-                            self.stats.write_count += write_count as u64;
-                        }
+                        self.stats.write_count += piece_len as u64;
                     }
 
                     // alert torrent of block writes and piece completion
@@ -431,16 +421,43 @@ struct TorrentFile {
 }
 
 impl TorrentFile {
-    /// TODO: write to file using pwritev, repeteadly if not writing the whole
-    /// chunk
+    /// Opens the file in create and write mode at the path defined in file info.
+    fn new(info: FileInfo) -> Result<Self, NewTorrentError> {
+        let handle = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .open(&info.path)
+            .map_err(|e| {
+                log::warn!("Failed to open file {:?}", &info.path);
+                NewTorrentError::Io(e)
+            })?;
+        Ok(Self { info, handle })
+    }
+
+    /// Writes to file at most the slice length number of bytes of blocks at the
+    /// file slice's offset, using pwritev, called repeteadly until all blocks are
+    /// written to disk.
     ///
-    /// TODO: consider taking just the raw slice and constructing IoVecs here
-    /// (and returning the tail)
-    fn write_vectored_at<'a>(
+    /// It returns the slice of blocks that weren't written to disk, that is,
+    /// it returns the second half of `blocks` as though they were split at the
+    /// `slice.len` offset (or an empty slice if all blocks were written to disk).
+    fn write_blocks<'a>(
         &self,
-        iovecs: &mut IoVecs<'a>,
-        offset: u64,
-    ) -> Result<usize, WriteError> {
+        file_slice: FileSlice,
+        blocks: &'a mut [IoVec<&'a [u8]>],
+    ) -> Result<&'a mut [IoVec<&'a [u8]>], WriteError> {
+        let mut iovecs = IoVecs::bounded(blocks, file_slice.len as usize);
+        // the write buffer cannot be larger than the file slice we want to
+        // write to
+        debug_assert!(
+            iovecs
+                .as_slice()
+                .iter()
+                .map(|iov| iov.as_slice().len() as u64)
+                .sum::<u64>()
+                <= file_slice.len
+        );
+
         // IO syscalls are not guaranteed to write the whole input buffer in one
         // go, so we need to write until all bytes have been confirmed to be
         // written to disk (or an error occurs)
@@ -449,17 +466,30 @@ impl TorrentFile {
             let write_count = pwritev(
                 self.handle.as_raw_fd(),
                 iovecs.as_slice(),
-                offset as i64,
+                file_slice.offset as i64,
             )
             .map_err(|e| {
                 log::warn!("File {:?} write error: {}", self.info.path, e);
                 // FIXME: convert actual error here
                 WriteError::Io(std::io::Error::last_os_error())
             })?;
-            iovecs.advance(write_count);
+
+            // tally up the total write count
             total_write_count += write_count;
+
+            // no need to advance write buffers cursor if we've written
+            // all of it to file--in that case, we can just split the iovecs
+            // and return the second half, consuming the first half
+            if total_write_count as u64 == file_slice.len {
+                break;
+            }
+
+            // advance the buffer cursor in iovecs by the number of bytes
+            // written
+            iovecs.advance(write_count);
         }
-        Ok(total_write_count)
+
+        Ok(iovecs.into_tail())
     }
 }
 
@@ -482,11 +512,13 @@ struct Piece {
     /// number of blocks in piece, the piece is complete and, if the hash is
     /// correct, saved to disk.
     ///
-    /// Each block must be 16 KiB and is mapped to its offset within piece, and
-    /// we're using a BTreeMap to keep keys sorted. This is important when
-    /// iterating over the map to hash each block after one another.
-    // TODO: consider whether using a Vec would be more performant due to cache
-    // locality
+    /// Each block must be 16 KiB and is mapped to its offset within piece. A
+    /// BTreeMap is used to keep blocks sorted by their offsets, which is
+    /// important when iterating over the map to hash each block in the right
+    /// order.
+    // TODO: consider whether using a preallocated Vec of Options would be more
+    // performant due to cache locality (we would have to count the missing
+    // blocks though, or keep a separate counter)
     blocks: BTreeMap<u32, Vec<u8>>,
     /// The files that this piece overlaps with.
     ///
@@ -536,12 +568,12 @@ impl Piece {
     /// # Important
     ///
     /// This performs sync IO and is thus potentially blocking and should be
-    /// executed on a thread pool and not the executor.
+    /// executed on a thread pool, and not the async executor.
     fn write(
         &self,
         piece_torrent_offset: u64,
         files: &[Mutex<TorrentFile>],
-    ) -> Result<usize, WriteError> {
+    ) -> Result<(), WriteError> {
         let mut total_write_count = 0;
 
         // need to convert the blocks to IO slices that the underlying
@@ -560,81 +592,226 @@ impl Piece {
         // piece to file
         let files = &files[self.files.clone()];
         debug_assert!(!files.is_empty());
-        // optimize here for single file IO: no need to perform the splitting
+        // TODO: optimize here for single file IO: no need to perform the splitting
         // buffers etc if we know there is only a single file that piece spans,
         // we can just write all blocks to that file
-        if files.len() == 1 {
-            // TODO: don't use unwrap here
-            let file = files.first().unwrap().lock().unwrap();
+        for file in files.iter() {
+            let file = file.lock().unwrap();
             // determine which part of the file we need to write to
-            let slice =
-                file.info.get_slice(write_torrent_offset, self.len as u64);
-            let mut iovecs = IoVecs::unbounded(bufs);
-            // the write buffer cannot be larger than the file slice we want to
-            // write to
-            debug_assert!(
-                iovecs
-                    .as_slice()
-                    .iter()
-                    .map(|iov| iov.as_slice().len() as u64)
-                    .sum::<u64>()
-                    <= slice.len
-            );
+            debug_assert!(self.len as u64 > total_write_count);
+            let remaining_piece_len = self.len as u64 - total_write_count;
+            let file_slice = file
+                .info
+                .get_slice(write_torrent_offset, remaining_piece_len);
+            // an empty file slice shouldn't occur as it would mean that piece
+            // was thought to span fewer files than it actually does
+            debug_assert!(file_slice.len > 0);
+            // the write buffer should still contain bytes to write
+            debug_assert!(!bufs.is_empty());
+            debug_assert!(!bufs[0].as_slice().is_empty());
 
             // write to file
-            total_write_count +=
-                file.write_vectored_at(&mut iovecs, slice.offset)?;
+            let tail = file.write_blocks(file_slice, bufs)?;
 
-            // the remainder of the write buffer should be empty (still need to
-            // override for below debug assert)
-            bufs = iovecs.into_tail();
-        } else {
-            for file in files.iter() {
-                let file = file.lock().unwrap();
-                // determine which part of the file we need to write to
-                let slice =
-                    file.info.get_slice(write_torrent_offset, self.len as u64);
-                // an empty file slice shouldn't occur as it would mean that piece
-                // was thought to span more files than it actually does
-                debug_assert!(slice.len > 0);
-                // the write buffer should still contain bytes to write
-                debug_assert!(!bufs.is_empty());
-                debug_assert!(!bufs[0].as_slice().is_empty());
+            // `write_vectored_at` only writes at most `slice.len` bytes of
+            // `bufs` to disk and returns the portion that wasn't
+            // written, which we can use to set the write buffer for the next
+            // round
+            bufs = tail;
 
-                // take the second half of the buffer
-                let mut iovecs = IoVecs::bounded(bufs, slice.len as usize);
-                // the write buffer cannot be larger than the file slice we want to
-                // write to
-                debug_assert!(
-                    iovecs
-                        .as_slice()
-                        .iter()
-                        .map(|iov| iov.as_slice().len() as u64)
-                        .sum::<u64>()
-                        <= slice.len
-                );
-
-                // write to file
-                let write_count =
-                    file.write_vectored_at(&mut iovecs, slice.offset)?;
-
-                // get the remainder of the buffer for the next rounds, if any
-                bufs = iovecs.into_tail();
-
-                write_torrent_offset += write_count as u64;
-                total_write_count += write_count;
-            }
+            write_torrent_offset += file_slice.len as u64;
+            total_write_count += file_slice.len;
         }
 
         // we should have used up all write buffers (i.e. written all blocks to
         // disk)
         debug_assert!(bufs.is_empty());
 
-        Ok(total_write_count)
+        Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::path::PathBuf;
+
+    use {super::*, crate::BLOCK_LEN};
+
+    // Tests that writing blocks of a piece to a single file works.
+    #[test]
+    fn test_torrent_file_write_blocks() {
+        let files = 0..1;
+        let piece = make_piece(files);
+
+        let file = TorrentFile::new(FileInfo {
+            path: PathBuf::from("/tmp/TorrentFile_write_block.test"),
+            torrent_offset: 0,
+            len: 2 * piece.len as u64,
+        })
+        .expect("couldn't create test file");
+
+        let file_slice = file.info.get_slice(0, piece.len as u64);
+        let mut iovecs: Vec<_> = piece
+            .blocks
+            .values()
+            .map(|b| IoVec::from_slice(&b))
+            .collect();
+
+        let tail = file
+            .write_blocks(file_slice, &mut iovecs)
+            .expect("couldn't write piece to file");
+        assert!(tail.is_empty(), "not all blocks were written to disk");
+
+        let file_content =
+            fs::read(&file.info.path).expect("couldn't read test file");
+        assert_eq!(
+            file_content,
+            piece.blocks.values().cloned().flatten().collect::<Vec<_>>(),
+            "file content does not equal piece"
+        );
+
+        // clean up env
+        fs::remove_file(&file.info.path).expect("couldn't remove test file");
+    }
+
+    // Tests that writing piece to a single file works.
+    #[test]
+    fn test_piece_write_single_file() {
+        let files = 0..1;
+        let piece = make_piece(files);
+        let file = TorrentFile::new(FileInfo {
+            path: PathBuf::from("/tmp/Piece_write_single_file.test"),
+            torrent_offset: 0,
+            len: 2 * piece.len as u64,
+        })
+        .expect("couldn't create test file");
+        let files = &[Mutex::new(file)];
+
+        // piece starts at the beginning of files
+        let piece_torrent_offset = 0;
+        piece
+            .write(piece_torrent_offset, files)
+            .expect("Could not write piece to file");
+
+        // compare file content to piece
+        let file = files[0].lock().unwrap();
+        let file_content =
+            fs::read(&file.info.path).expect("couldn't read test file");
+        assert_eq!(
+            file_content,
+            piece.blocks.values().cloned().flatten().collect::<Vec<_>>(),
+            "file {:?} content does not equal piece",
+            file.info
+        );
+
+        // clean up env
+        fs::remove_file(&file.info.path).expect("couldn't remove test file");
+    }
+
+    // Tests that writing piece to multiple files works.
+    #[test]
+    fn test_piece_write_multiple_files() {
+        // piece spans 3 files
+        let files = 0..3;
+        let piece = make_piece(files);
+        let file1 = TorrentFile::new(FileInfo {
+            path: PathBuf::from("/tmp/Piece_write_files1.test"),
+            torrent_offset: 0,
+            len: BLOCK_LEN as u64 + 3,
+        })
+        .expect("couldn't create test file 1");
+        let file2 = TorrentFile::new(FileInfo {
+            path: PathBuf::from("/tmp/Piece_write_files2.test"),
+            torrent_offset: file1.info.len,
+            len: BLOCK_LEN as u64 - 1500,
+        })
+        .expect("couldn't create test file 2");
+        let file3 = TorrentFile::new(FileInfo {
+            path: PathBuf::from("/tmp/Piece_write_files3.test"),
+            torrent_offset: file2.info.torrent_offset + file2.info.len,
+            len: piece.len as u64 - (file1.info.len + file2.info.len),
+        })
+        .expect("couldn't create test file 3");
+        let files = &[Mutex::new(file1), Mutex::new(file2), Mutex::new(file3)];
+
+        // piece starts at the beginning of files
+        let piece_torrent_offset = 0;
+        piece
+            .write(piece_torrent_offset, files)
+            .expect("Could not write piece to file");
+
+        // compare contents of files to piece
+        for file in files.iter() {
+            let file = file.lock().unwrap();
+            let file_content =
+                fs::read(&file.info.path).expect("couldn't read test file");
+            // compare the content of file to the portion that corresponds to
+            // piece
+            assert_eq!(
+                file_content,
+                piece
+                    .blocks
+                    .values()
+                    .cloned()
+                    .flatten()
+                    .skip(file.info.torrent_offset as usize)
+                    .take(file.info.len as usize)
+                    .collect::<Vec<_>>(),
+                "file {:?} content does not equal piece",
+                file.info
+            );
+        }
+
+        // clean up env
+        for file in files.iter() {
+            fs::remove_file(&file.lock().unwrap().info.path)
+                .expect("couldn't remove test file");
+        }
+    }
+
+    // Creates a piece for testing that has 4 blocks of length `BLOCK_LEN`.
+    fn make_piece(files: Range<FileIndex>) -> Piece {
+        let blocks = vec![
+            (0 * BLOCK_LEN..1 * BLOCK_LEN)
+                .map(|b| b % u8::MAX as u32)
+                .map(|b| b as u8)
+                .collect::<Vec<u8>>(),
+            (1 * BLOCK_LEN..2 * BLOCK_LEN)
+                .map(|b| b % u8::MAX as u32)
+                .map(|b| b as u8)
+                .collect::<Vec<u8>>(),
+            (2 * BLOCK_LEN..3 * BLOCK_LEN)
+                .map(|b| b % u8::MAX as u32)
+                .map(|b| b as u8)
+                .collect::<Vec<u8>>(),
+            (3 * BLOCK_LEN..4 * BLOCK_LEN)
+                .map(|b| b % u8::MAX as u32)
+                .map(|b| b as u8)
+                .collect::<Vec<u8>>(),
+        ];
+        let expected_hash = {
+            let mut hasher = Sha1::new();
+            for block in blocks.iter() {
+                hasher.input(&block);
+            }
+            hasher.result().into()
+        };
+        let len = blocks.len() as u32 * BLOCK_LEN;
+        // convert blocks to a b-tree map
+        let (blocks, _) = blocks.into_iter().fold(
+            (BTreeMap::new(), 0u32),
+            |(mut map, mut offset), block| {
+                let block_len = block.len();
+                map.insert(offset, block);
+                offset += block_len as u32;
+                (map, offset)
+            },
+        );
+        Piece {
+            expected_hash,
+            len,
+            blocks,
+            files,
+        }
+    }
 }
