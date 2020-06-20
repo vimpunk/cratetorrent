@@ -201,6 +201,13 @@ mod tests {
             }
         }
 
+        // check that file was created on disk
+        let file = match &info.structure {
+            FsStructure::File(file) => file,
+            _ => unreachable!(),
+        };
+        assert!(file.path.is_file());
+
         // try to allocate the same torrent a second time
         disk_handle
             .allocate_new_torrent(id, info, piece_hashes)
@@ -272,7 +279,7 @@ mod tests {
         }
 
         // clean up test env
-        fs::remove_file(&info.download_path)
+        fs::remove_file(&info.download_dir)
             .expect("Failed to clean up disk test torrent file");
     }
 
@@ -362,7 +369,7 @@ mod tests {
 
         // download file exists as it's preallocated, but it should be empty as
         // invalid piece must not be written to disk
-        assert_eq!(info.download_path.metadata().unwrap().len(), 0);
+        assert_eq!(info.download_dir.metadata().unwrap().len(), 0);
     }
 
     // The disk IO test environment containing information of a valid torrent.
@@ -424,7 +431,7 @@ mod tests {
                 piece_len,
                 last_piece_len,
                 download_len,
-                download_path: download_path.clone(),
+                download_dir: download_path.clone(),
                 structure: FsStructure::File(FileInfo {
                     path: download_path,
                     torrent_offset: 0,

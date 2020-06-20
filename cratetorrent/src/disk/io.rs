@@ -6,6 +6,7 @@ use {
         fs::{self, File, OpenOptions},
         ops::Range,
         os::unix::io::AsRawFd,
+        path::Path,
         sync::{Arc, Mutex},
     },
     tokio::{
@@ -189,11 +190,11 @@ impl Torrent {
     ) -> Result<(Self, TorrentAlertReceiver), NewTorrentError> {
         // TODO: since this is done as part of a tokio::task, should we use
         // tokio_fs here?
-        if info.download_path.exists() {
-            log::warn!("Download path {:?} exists", info.download_path);
+        if !info.download_dir.is_dir() {
+            log::warn!("Download directory {:?} not found", info.download_dir);
             return Err(NewTorrentError::Io(std::io::Error::new(
-                std::io::ErrorKind::AlreadyExists,
-                "Download path already exists",
+                std::io::ErrorKind::NotFound,
+                "Download directory not found",
             )));
         }
 
@@ -204,7 +205,10 @@ impl Torrent {
                     file.len,
                     file.path
                 );
-                vec![Mutex::new(TorrentFile::new(file.clone())?)]
+                vec![Mutex::new(TorrentFile::new(
+                    &info.download_dir,
+                    file.clone(),
+                )?)]
             }
             FsStructure::Archive { files } => {
                 debug_assert!(!files.is_empty());
@@ -213,15 +217,16 @@ impl Torrent {
 
                 let mut torrent_files = Vec::with_capacity(files.len());
                 for file in files.iter() {
+                    let path = info.download_dir.join(&file.path);
                     // file or subdirectory in download root must not exist if
                     // download root does not exists
-                    debug_assert!(!file.path.exists());
-                    debug_assert!(!file.path.is_absolute());
+                    debug_assert!(!path.exists());
+                    debug_assert!(path.is_absolute());
 
                     // get the parent of the file path: if there is one (i.e.
                     // this is not a file in the torrent root), and doesn't
                     // exist, create it
-                    if let Some(subdir) = file.path.parent() {
+                    if let Some(subdir) = path.parent() {
                         if !subdir.exists() {
                             log::info!("Creating torrent subdir {:?}", subdir);
                             fs::create_dir_all(&subdir).map_err(|e| {
@@ -235,13 +240,13 @@ impl Torrent {
                     }
 
                     // open the file and get a handle to it
-                    let file = FileInfo {
-                        path: info.download_path.join(&file.path),
-                        torrent_offset: file.torrent_offset,
-                        len: file.len,
-                    };
-                    torrent_files
-                        .push(Mutex::new(TorrentFile::new(file.clone())?));
+                    //
+                    // TODO: is there a clean way of avoiding creating the path
+                    // buffer twice?
+                    torrent_files.push(Mutex::new(TorrentFile::new(
+                        &info.download_dir,
+                        file.clone(),
+                    )?));
                 }
                 torrent_files
             }
@@ -278,7 +283,6 @@ impl Torrent {
                 return Ok(());
             }
         }
-        // TODO: don't unwrap here
         let piece = self
             .pieces
             .get_mut(&piece_index)
@@ -423,15 +427,25 @@ struct TorrentFile {
 impl TorrentFile {
     /// Opens the file in create and write mode at the path defined in the file
     /// info.
-    fn new(info: FileInfo) -> Result<Self, NewTorrentError> {
+    fn new(
+        download_dir: &Path,
+        info: FileInfo,
+    ) -> Result<Self, NewTorrentError> {
+        log::trace!(
+            "Opening and creating file {:?} in dir {:?}",
+            info,
+            download_dir
+        );
+        let path = download_dir.join(&info.path);
         let handle = OpenOptions::new()
             .create(true)
             .write(true)
-            .open(&info.path)
+            .open(&path)
             .map_err(|e| {
-                log::warn!("Failed to open file {:?}", &info.path);
+                log::warn!("Failed to open file {:?}", path);
                 NewTorrentError::Io(e)
             })?;
+        debug_assert!(path.exists());
         Ok(Self { info, handle })
     }
 
@@ -554,8 +568,8 @@ impl Piece {
     ///
     /// # Important
     ///
-    /// This is a long running function and should be executed on a thread pool
-    /// and not the executor.
+    /// This is potentialyl a computationally expensive function and should be
+    /// executed on a thread pool and not the executor.
     fn matches_hash(&self) -> bool {
         // sanity check that we only call this method if we have all blocks in
         // piece
@@ -645,7 +659,7 @@ mod tests {
 
     // Tests that writing blocks to a single file using `TorrentFile` works.
     #[test]
-    fn test_torrent_file_write_blocks() {
+    fn should_write_blocks_to_torrent_file() {
         let files = 0..1;
         let piece = make_piece(files);
 
@@ -682,7 +696,7 @@ mod tests {
 
     // Tests that writing piece to a single file works.
     #[test]
-    fn test_piece_write_single_file() {
+    fn should_write_piece_to_single_file() {
         let files = 0..1;
         let piece = make_piece(files);
         let file = TorrentFile::new(FileInfo {
@@ -716,7 +730,7 @@ mod tests {
 
     // Tests that writing piece to multiple files works.
     #[test]
-    fn test_piece_write_multiple_files() {
+    fn should_write_piece_to_multiple_files() {
         // piece spans 3 files
         let files = 0..3;
         let piece = make_piece(files);

@@ -60,7 +60,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut client_id = [0; 20];
     client_id.copy_from_slice(CLIENT_ID.as_bytes());
 
-    run_torrent(client_id, &download_dir, metainfo, seed)?;
+    run_torrent(client_id, download_dir, metainfo, seed)?;
 
     Ok(())
 }

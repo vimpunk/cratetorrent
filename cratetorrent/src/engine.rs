@@ -1,5 +1,5 @@
 use {
-    std::{net::SocketAddr, path::Path},
+    std::{net::SocketAddr, path::PathBuf},
     tokio::runtime::Runtime,
 };
 
@@ -15,7 +15,7 @@ use crate::{
 /// Connects to a single seed and downloads the torrent or aborts on error.
 pub fn run_torrent(
     client_id: PeerId,
-    download_dir: &Path,
+    download_dir: PathBuf,
     metainfo: Metainfo,
     seed_addr: SocketAddr,
 ) -> Result<()> {
@@ -28,7 +28,7 @@ pub fn run_torrent(
 
 async fn start_disk_and_torrent(
     client_id: PeerId,
-    download_dir: &Path,
+    download_dir: PathBuf,
     metainfo: Metainfo,
     seed_addr: SocketAddr,
 ) -> Result<()> {

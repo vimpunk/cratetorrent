@@ -45,7 +45,7 @@ impl PieceDownload {
     // time
     pub fn pick_blocks(&mut self, count: usize) -> Vec<BlockInfo> {
         log::trace!(
-            "Picking {} block(s) in piece {} with length {} and {} block(s)",
+            "Picking {} block(s) in piece {} (length: {}, blocks: {})",
             count,
             self.index,
             self.len,

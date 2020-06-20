@@ -26,7 +26,7 @@ seed_addr="${seed_ip}:${seed_port}"
 seed_container=tr-seed-1
 
 # start the container (if it's not already running)
-./start_container.sh --name "${seed_container}" --ip "${seed_ip}"
+./start_transmission_seed.sh --name "${seed_container}" --ip "${seed_ip}"
 
 assets_dir="$(pwd)/assets"
 torrent_name=1mb-test.txt
@@ -38,11 +38,14 @@ metainfo_cont_path="/cratetorrent/${torrent_name}.torrent"
 
 # start seeding the torrent, if it doesn't exist yet
 if [ ! -f "${source_path}" ]; then
-    echo "Starting torrent ${torrent_name} seeding"
+    echo "Starting seeding of torrent ${torrent_name} seeding"
     torrent_size=$(( 1024 * 1024 )) # 1 MiB
+    # first, we need to generate a random file
+    ./create_random_file.sh --path "${source_path}" --size "${torrent_size}"
+    # then start seeding it
     ./seed_new_torrent.sh \
         --name "${torrent_name}" \
-        --size "${torrent_size}" \
+        --path "${source_path}" \
         --seed "${seed_container}"
 fi
 
@@ -59,9 +62,6 @@ fi
 
 # where we download our file on the host and in the container
 download_dir=/tmp/cratetorrent
-download_cont_dir=/tmp
-# the final download destination on the host
-download_path="${download_dir}/${torrent_name}"
 
 # initialize download directory to state expected by the cratetortent-cli
 if [ -d "${download_dir}" ]; then
@@ -83,13 +83,17 @@ rust_log=${RUST_LOG:-cratetorrent=trace,cratetorrent_cli=trace}
 # downloaded or an error occurs
 time docker run \
     -ti \
+    --rm \
     --env SEED="${seed_addr}" \
     --env METAINFO_PATH="${metainfo_cont_path}" \
-    --env DOWNLOAD_DIR="${download_cont_dir}" \
+    --env DOWNLOAD_DIR="${download_dir}" \
     --env RUST_LOG="${rust_log}" \
     --mount type=bind,src="${metainfo_path}",dst="${metainfo_cont_path}" \
-    --mount type=bind,src="${download_dir}",dst="${download_cont_dir}" \
+    --mount type=bind,src="${download_dir}",dst="${download_dir}" \
     cratetorrent-cli
+
+# the final download destination on the host
+download_path="${download_dir}/${torrent_name}"
 
 # first check if the file was downloaded in the expected path
 if [ ! -f "${download_path}" ]; then
