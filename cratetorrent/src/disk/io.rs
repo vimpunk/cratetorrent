@@ -568,7 +568,7 @@ impl Piece {
     ///
     /// # Important
     ///
-    /// This is potentialyl a computationally expensive function and should be
+    /// This is potentially a computationally expensive function and should be
     /// executed on a thread pool and not the executor.
     fn matches_hash(&self) -> bool {
         // sanity check that we only call this method if we have all blocks in
