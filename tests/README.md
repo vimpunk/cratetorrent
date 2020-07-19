@@ -42,6 +42,7 @@ user	0m0,036s
 sys	0m0,029s
 
 Comparing downloaded file /tmp/cratetorrent/1mb-test.txt to source file ~/code/cratetorrent/tests/assets/1mb-test.txt
+
 SUCCESS: downloaded file matches source file
 ```
 

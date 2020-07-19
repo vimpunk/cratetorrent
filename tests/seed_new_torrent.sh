@@ -117,7 +117,7 @@ fi
 torrent_path="${tr_downloads_dir}/complete/${torrent_name}"
 if [ "${path}" != "${torrent_path}" ]; then
     echo "Copying torrent from source ${path} to seed dir at ${torrent_path}"
-    cp "${path}" "${torrent_path}"
+    cp -r "${path}" "${torrent_path}"
 fi
 
 # create the torrent inside the seed container

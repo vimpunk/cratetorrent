@@ -44,7 +44,7 @@ fi
 
 # make sure there is nothing at path
 if [ -f "${path}" ] || [ -d "${path}" ]; then
-    echo "Error: torrent ${torrent_name} already exists at ${path}"
+    echo "Error: something already exists at ${path}"
     exit 2
 fi
 
