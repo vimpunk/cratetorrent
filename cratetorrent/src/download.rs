@@ -1,4 +1,4 @@
-use crate::{block_count, BlockInfo, PieceIndex, BLOCK_LEN};
+use crate::{block_count, block_len, BlockInfo, PieceIndex, BLOCK_LEN};
 
 #[derive(Clone, Copy, Debug)]
 enum Block {
@@ -40,10 +40,7 @@ impl PieceDownload {
     }
 
     /// Picks the requested number of blocks or fewer, if fewer are remaining.
-    // TODO(https://github.com/mandreyel/cratetorrent/issues/17): place new
-    // requests into an existing buffer to avoid reallocating the vector every
-    // time
-    pub fn pick_blocks(&mut self, count: usize) -> Vec<BlockInfo> {
+    pub fn pick_blocks(&mut self, count: usize, blocks: &mut Vec<BlockInfo>) {
         log::trace!(
             "Picking {} block(s) in piece {} (length: {}, blocks: {})",
             count,
@@ -52,32 +49,40 @@ impl PieceDownload {
             self.blocks.len(),
         );
 
-        let mut blocks = Vec::with_capacity(count);
+        let mut picked = 0;
 
         for (i, block) in self.blocks.iter_mut().enumerate() {
             // don't pick more than requested
-            if blocks.len() == count {
+            if picked == count {
                 break;
             }
 
             // only pick block if it's free
             if let Block::Free = block {
-                blocks.push(BlockInfo::new(self.index, i as u32 * BLOCK_LEN));
+                // FIXME: the last block may not be a multiple of
+                blocks.push(BlockInfo {
+                    piece_index: self.index,
+                    offset: i as u32 * BLOCK_LEN,
+                    len: block_len(self.len, i),
+                });
                 *block = Block::Requested;
+                picked += 1;
             }
 
             // TODO(https://github.com/mandreyel/cratetorrent/issues/18): if we
             // requested block too long ago, time out block
         }
 
-        log::trace!(
-            "Picked {} block(s) for piece {}: {:?}",
-            blocks.len(),
-            self.index,
-            blocks
-        );
-
-        blocks
+        if picked > 0 {
+            log::info!(
+                "Picked {} block(s) for piece {}: {:?}",
+                picked,
+                self.index,
+                blocks
+            );
+        } else {
+            log::info!("Cannot pick any blocks in piece {}", self.index);
+        }
     }
 
     /// Marks the given block as received so that it is not picked again.
@@ -92,9 +97,12 @@ impl PieceDownload {
         debug_assert!(block.len <= self.len);
 
         // we should only receive blocks that we have requested before
-        debug_assert!(matches!(self.blocks[block.index()], Block::Requested));
+        debug_assert!(matches!(
+            self.blocks[block.index_in_piece()],
+            Block::Requested
+        ));
 
-        self.blocks[block.index()] = Block::Received;
+        self.blocks[block.index_in_piece()] = Block::Received;
 
         // TODO(https://github.com/mandreyel/cratetorrent/issues/9): record
         // rount trip time for this block
@@ -133,7 +141,8 @@ mod tests {
 
         // pick all blocks one by one
         for _ in 0..block_count {
-            let blocks = download.pick_blocks(1);
+            let mut blocks = Vec::new();
+            download.pick_blocks(1, &mut blocks);
             assert_eq!(blocks.len(), 1);
             let block = *blocks.first().unwrap();
             // assert that this block hasn't been picked before
@@ -160,7 +169,8 @@ mod tests {
 
         // pick all blocks
         let block_count = block_count(piece_len);
-        let blocks = download.pick_blocks(block_count);
+        let mut blocks = Vec::new();
+        download.pick_blocks(block_count, &mut blocks);
         assert_eq!(blocks.len(), block_count);
 
         // assert that we picked all blocks
@@ -179,7 +189,8 @@ mod tests {
         let mut download = PieceDownload::new(piece_index, piece_len);
 
         let block_count = block_count(piece_len);
-        let blocks = download.pick_blocks(block_count);
+        let mut blocks = Vec::new();
+        download.pick_blocks(block_count, &mut blocks);
         assert_eq!(blocks.len(), block_count);
 
         // mark all blocks as requested
@@ -187,7 +198,8 @@ mod tests {
             download.received_block(block);
         }
 
-        let blocks = download.pick_blocks(block_count);
+        let mut blocks = Vec::new();
+        download.pick_blocks(block_count, &mut blocks);
         assert!(blocks.is_empty());
     }
 
@@ -202,7 +214,8 @@ mod tests {
 
         // pick 4 blocks
         let picked_block_indices = [0, 1, 2, 3];
-        let blocks = download.pick_blocks(picked_block_indices.len());
+        let mut blocks = Vec::new();
+        download.pick_blocks(picked_block_indices.len(), &mut blocks);
         assert_eq!(blocks.len(), picked_block_indices.len());
 
         // mark 3 of them as received
@@ -219,7 +232,8 @@ mod tests {
         );
 
         // pick all remaining free blocks
-        let blocks = download.pick_blocks(block_count);
+        let mut blocks = Vec::new();
+        download.pick_blocks(block_count, &mut blocks);
         assert_eq!(blocks.len(), block_count - picked_block_indices.len());
     }
 }

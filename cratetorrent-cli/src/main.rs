@@ -53,6 +53,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let metainfo = fs::read(metainfo_path)?;
     let metainfo = Metainfo::from_bytes(&metainfo)?;
     println!("metainfo: {:?}", metainfo);
+    println!("piece count: {}", metainfo.piece_count());
     println!("info hash: {}", hex::encode(&metainfo.info_hash));
 
     // arbitrary client id for now

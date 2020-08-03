@@ -42,7 +42,7 @@ impl fmt::Display for NewTorrentError {
     fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
         match self {
             Self::AlreadyExists => {
-                write!(fmt, "disk torrent entry alrady exists")
+                write!(fmt, "disk torrent entry already exists")
             }
             Self::Io(e) => write!(fmt, "{}", e),
         }

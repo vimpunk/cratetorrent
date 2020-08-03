@@ -83,7 +83,7 @@ then
     docker run \
         --rm \
         --name "${name}" \
-        --publish 9091 \
+        --publish 9091:9091 \
         --env PUID=$UID \
         --env PGID=$UID \
         --mount type=bind,src="${tr_config_dir}",dst=/config \

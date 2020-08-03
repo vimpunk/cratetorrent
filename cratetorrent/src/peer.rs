@@ -21,7 +21,7 @@ use {
     crate::{
         disk::DiskHandle, download::PieceDownload, error::*,
         piece_picker::PiecePicker, torrent::SharedStatus, Bitfield, BlockInfo,
-        PeerId, BLOCK_LEN,
+        PeerId,
     },
     codec::*,
 };
@@ -241,10 +241,17 @@ impl PeerSession {
     async fn handle_bitfield_msg(
         &mut self,
         sink: &mut SplitSink<Framed<TcpStream, PeerCodec>, Message>,
-        bitfield: Bitfield,
+        mut bitfield: Bitfield,
     ) -> Result<()> {
         debug_assert_eq!(self.status.state, State::AvailabilityExchange);
         log::info!("Handling peer {} Bitfield message", self.addr);
+        log::trace!("Bitfield: {:?}", bitfield);
+
+        // The bitfield raw data that is sent over the write may be longer than
+        // the logical pieces it represents, if there the number of pieces in
+        // torrent is not a multiple of 8. Therefore, we need to slice off the
+        // last part of the bitfield.
+        bitfield.resize(self.torrent.storage.piece_count, false);
 
         // if peer is not a seed, we abort the connection as we only
         // support downloading and for that we must be connected to
@@ -328,16 +335,11 @@ impl PeerSession {
                 offset,
                 data,
             } => {
-                if data.len() != BLOCK_LEN as usize {
-                    log::info!(
-                        "Peer {} sent block with invalid length ({})",
-                        self.addr,
-                        data.len()
-                    );
-                    return Err(Error::InvalidBlockLength);
-                }
-
-                let block_info = BlockInfo::new(piece_index, offset);
+                let block_info = BlockInfo {
+                    piece_index,
+                    offset,
+                    len: data.len() as u32,
+                };
                 self.handle_block_msg(block_info, data).await?;
 
                 // we may be able to make more requests now that a block has
@@ -382,6 +384,9 @@ impl PeerSession {
     ) -> Result<()> {
         log::trace!("Making requests to peer {}", self.addr);
 
+        // TODO: optimize this by preallocating the vector in self
+        let mut blocks = Vec::new();
+
         // If we have active downloads, prefer to continue those. This will
         // result in less in-progress pieces.
         for download in self.downloads.iter_mut() {
@@ -405,13 +410,11 @@ impl PeerSession {
                 break;
             }
 
+            // TODO: should we not check first that we aren't already
+            // downloading all of the piece's blocks?
+
             // request blocks and register in our outgoing requests queue
-            let blocks = download.pick_blocks(to_request_count);
-            self.outgoing_requests.extend_from_slice(&blocks);
-            // make the actual requests
-            for block in blocks.iter() {
-                sink.send(Message::Request(*block)).await?;
-            }
+            download.pick_blocks(to_request_count, &mut blocks);
         }
 
         // while we can make more requests we start new download(s)
@@ -441,14 +444,9 @@ impl PeerSession {
                 );
 
                 // request blocks and register in our outgoing requests queue
-                let blocks = download.pick_blocks(request_queue_len);
-                self.outgoing_requests.extend_from_slice(&blocks);
+                download.pick_blocks(request_queue_len, &mut blocks);
                 // save download
                 self.downloads.push(download);
-                // make the actual requests
-                for block in blocks.iter() {
-                    sink.send(Message::Request(*block)).await?;
-                }
             } else {
                 log::debug!(
                     "Could not pick more pieces from peer {}",
@@ -456,6 +454,13 @@ impl PeerSession {
                 );
                 break;
             }
+        }
+
+        // save current volley of requests
+        self.outgoing_requests.extend_from_slice(&blocks);
+        // make the actual requests
+        for block in blocks.iter() {
+            sink.send(Message::Request(*block)).await?;
         }
 
         Ok(())
@@ -469,7 +474,7 @@ impl PeerSession {
         block_info: BlockInfo,
         data: Vec<u8>,
     ) -> Result<()> {
-        log::info!("Peer {} sent block: {:?}", self.addr, block_info);
+        log::info!("Received block from peer {}: {:?}", self.addr, block_info);
 
         // find block in the list of pending requests
         let block_pos = match self
@@ -479,7 +484,7 @@ impl PeerSession {
         {
             Some(pos) => pos,
             None => {
-                log::info!(
+                log::warn!(
                     "Peer {} sent not requested block: {:?}",
                     self.addr,
                     block_info,
@@ -518,6 +523,11 @@ impl PeerSession {
         // finish download of piece if this was the last missing block in it
         let missing_blocks_count = download.count_missing_blocks();
         if missing_blocks_count == 0 {
+            log::info!(
+                "Finished piece {} via peer {}",
+                block_info.piece_index,
+                self.addr
+            );
             // register received piece
             self.piece_picker
                 .write()

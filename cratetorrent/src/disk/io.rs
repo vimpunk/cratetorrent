@@ -299,6 +299,13 @@ impl Torrent {
             let piece_len = self.info.piece_len;
             let files = Arc::clone(&self.files);
 
+            log::info!(
+                "Piece {} is complete ({} bytes), flushing {} block(s) to disk",
+                info.piece_index,
+                piece_len,
+                piece.blocks.len()
+            );
+
             // don't block the reactor with the potentially expensive hashing
             // and sync file writing
             let write_result = task::spawn_blocking(move || {
@@ -657,17 +664,22 @@ mod tests {
 
     use {super::*, crate::BLOCK_LEN};
 
+    const DOWNLOAD_DIR: &str = "/tmp";
+
     // Tests that writing blocks to a single file using `TorrentFile` works.
     #[test]
     fn should_write_blocks_to_torrent_file() {
         let files = 0..1;
         let piece = make_piece(files);
 
-        let file = TorrentFile::new(FileInfo {
-            path: PathBuf::from("/tmp/TorrentFile_write_block.test"),
-            torrent_offset: 0,
-            len: 2 * piece.len as u64,
-        })
+        let file = TorrentFile::new(
+            Path::new(DOWNLOAD_DIR),
+            FileInfo {
+                path: PathBuf::from("TorrentFile_write_block.test"),
+                torrent_offset: 0,
+                len: 2 * piece.len as u64,
+            },
+        )
         .expect("couldn't create test file");
 
         let file_slice = file.info.get_slice(0, piece.len as u64);
@@ -699,11 +711,14 @@ mod tests {
     fn should_write_piece_to_single_file() {
         let files = 0..1;
         let piece = make_piece(files);
-        let file = TorrentFile::new(FileInfo {
-            path: PathBuf::from("/tmp/Piece_write_single_file.test"),
-            torrent_offset: 0,
-            len: 2 * piece.len as u64,
-        })
+        let file = TorrentFile::new(
+            Path::new(DOWNLOAD_DIR),
+            FileInfo {
+                path: PathBuf::from("Piece_write_single_file.test"),
+                torrent_offset: 0,
+                len: 2 * piece.len as u64,
+            },
+        )
         .expect("couldn't create test file");
         let files = &[Mutex::new(file)];
 
@@ -734,23 +749,32 @@ mod tests {
         // piece spans 3 files
         let files = 0..3;
         let piece = make_piece(files);
-        let file1 = TorrentFile::new(FileInfo {
-            path: PathBuf::from("/tmp/Piece_write_files1.test"),
-            torrent_offset: 0,
-            len: BLOCK_LEN as u64 + 3,
-        })
+        let file1 = TorrentFile::new(
+            Path::new(DOWNLOAD_DIR),
+            FileInfo {
+                path: PathBuf::from("Piece_write_files1.test"),
+                torrent_offset: 0,
+                len: BLOCK_LEN as u64 + 3,
+            },
+        )
         .expect("couldn't create test file 1");
-        let file2 = TorrentFile::new(FileInfo {
-            path: PathBuf::from("/tmp/Piece_write_files2.test"),
-            torrent_offset: file1.info.len,
-            len: BLOCK_LEN as u64 - 1500,
-        })
+        let file2 = TorrentFile::new(
+            Path::new(DOWNLOAD_DIR),
+            FileInfo {
+                path: PathBuf::from("Piece_write_files2.test"),
+                torrent_offset: file1.info.len,
+                len: BLOCK_LEN as u64 - 1500,
+            },
+        )
         .expect("couldn't create test file 2");
-        let file3 = TorrentFile::new(FileInfo {
-            path: PathBuf::from("/tmp/Piece_write_files3.test"),
-            torrent_offset: file2.info.torrent_offset + file2.info.len,
-            len: piece.len as u64 - (file1.info.len + file2.info.len),
-        })
+        let file3 = TorrentFile::new(
+            Path::new(DOWNLOAD_DIR),
+            FileInfo {
+                path: PathBuf::from("Piece_write_files3.test"),
+                torrent_offset: file2.info.torrent_offset + file2.info.len,
+                len: piece.len as u64 - (file1.info.len + file2.info.len),
+            },
+        )
         .expect("couldn't create test file 3");
         let files = &[Mutex::new(file1), Mutex::new(file2), Mutex::new(file3)];
 

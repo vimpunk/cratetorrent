@@ -126,12 +126,13 @@ impl Metainfo {
     }
 }
 
-/// Contains the types that we directly deserialize into, but is not to be used
-/// by the rest of the crate, as the validity of the parsed structure is not
-/// ensured at this level. The semantic validation happens in the [`Metainfo`]
-/// type, which is essentially a mapping of [`raw::Metainfo`], but with semantic
-/// requirements encoded in the type system..
 mod raw {
+    //! Contains the types that we directly deserialize into, but is not to be used
+    //! by the rest of the crate, as the validity of the parsed structure is not
+    //! ensured at this level. The semantic validation happens in the [`Metainfo`]
+    //! type, which is essentially a mapping of [`raw::Metainfo`], but with semantic
+    //! requirements encoded in the type system..
+
     use sha1::{Digest, Sha1};
 
     use super::{Result, Sha1Hash};

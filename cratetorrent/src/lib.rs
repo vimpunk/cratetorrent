@@ -72,18 +72,9 @@ pub(crate) struct BlockInfo {
 }
 
 impl BlockInfo {
-    /// Createas a `BlockInfo` instance with the default length of 16 KiB.
-    pub fn new(piece_index: PieceIndex, offset: u32) -> Self {
-        Self {
-            piece_index,
-            offset,
-            len: BLOCK_LEN,
-        }
-    }
-
     /// Returns the index of the block within its piece, assuming the default
     /// block length of 16 KiB.
-    pub fn index(&self) -> PieceIndex {
+    pub fn index_in_piece(&self) -> PieceIndex {
         // we need to use "lower than or equal" as this may be the last block in
         // which case it may be shorter than the default block length
         debug_assert!(self.len <= BLOCK_LEN);
@@ -92,10 +83,56 @@ impl BlockInfo {
     }
 }
 
+/// Returns the length of the block at the index in piece.
+///
+/// If the piece is not a multiple of the default block length, the returned
+/// value is smalled.
+///
+/// # Panics
+///
+/// Panics if the index multiplied by the default block length would exceed the
+/// piece length.
+pub(crate) fn block_len(piece_len: u32, index: usize) -> u32 {
+    let index = index as u32;
+    let block_offset = index * BLOCK_LEN;
+    assert!(piece_len > block_offset);
+    std::cmp::min(piece_len - block_offset, BLOCK_LEN)
+}
+
 /// Returns the number of blocks in a piece of the given length.
 pub(crate) fn block_count(piece_len: u32) -> usize {
     // all but the last piece are a multiple of the block length, but the
     // last piece may be shorter so we need to account for this by rounding
     // up before dividing to get the number of blocks in piece
     (piece_len as usize + (BLOCK_LEN as usize - 1)) / BLOCK_LEN as usize
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_block_len() {
+        const BLOCK_LEN_MULTIPLE_PIECE_LEN: u32 = 2 * BLOCK_LEN;
+        assert_eq!(block_len(BLOCK_LEN_MULTIPLE_PIECE_LEN, 0), BLOCK_LEN);
+        assert_eq!(block_len(BLOCK_LEN_MULTIPLE_PIECE_LEN, 1), BLOCK_LEN);
+
+        const OVERLAP: u32 = 234;
+        const UNEVEN_PIECE_LEN: u32 = 2 * BLOCK_LEN + OVERLAP;
+        assert_eq!(block_len(UNEVEN_PIECE_LEN, 0), BLOCK_LEN);
+        assert_eq!(block_len(UNEVEN_PIECE_LEN, 1), BLOCK_LEN);
+        assert_eq!(block_len(UNEVEN_PIECE_LEN, 2), OVERLAP);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_block_len_invalid_index_panic() {
+        const BLOCK_LEN_MULTIPLE_PIECE_LEN: u32 = 2 * BLOCK_LEN;
+        block_len(BLOCK_LEN_MULTIPLE_PIECE_LEN, 2);
+    }
+
+    #[test]
+    fn test_block_count() {
+        todo!();
+    }
 }
