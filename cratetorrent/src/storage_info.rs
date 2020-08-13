@@ -83,8 +83,14 @@ pub(crate) struct StorageInfo {
     pub download_len: u64,
     /// The download destination directory of the torrent.
     ///
-    /// This is the directory that will contain either the single torrent file
-    /// or the torrent directory, once downloaded.
+    /// In case of single file downloads, this is the directory where the file
+    /// is downloaded, named as the torrent.
+    /// In case of archive downloads, this directory is the download directory
+    /// joined by the torrent's name. This is because in case of a torrent that
+    /// has multiple top-level entries, the downloaded files would be scattered
+    /// across the download directory, which is an annoyance we want to avoid.
+    /// E.g. downloading files into ~/Downloads/<torrent> instead of just
+    /// ~/Downloads.
     pub download_dir: PathBuf,
     /// The paths and lengths of the torrent files.
     pub structure: FsStructure,
@@ -100,12 +106,18 @@ impl StorageInfo {
             download_len - piece_len as u64 * (piece_count - 1) as u64;
         let last_piece_len = last_piece_len as u32;
 
+        // if this is an archive, download files into torrent's own dir
+        let download_dir = if metainfo.structure.is_archive() {
+            download_dir.join(&metainfo.name)
+        } else {
+            download_dir
+        };
+
         Self {
             piece_count,
             piece_len,
             last_piece_len,
             download_len,
-            // TODO: should the download path be the torrent name?
             download_dir,
             structure: metainfo.structure.clone(),
         }
@@ -146,10 +158,13 @@ impl StorageInfo {
 pub enum FsStructure {
     /// This is a single file download.
     // TODO: consider changing this back to just File { len: u64 } to not have
-    // to copy the path
+    // to copy the path unnecessarily, since in this case it's just going to be
+    // the download dir + torrent name
     File(FileInfo),
     /// The download is for multiple files, possibly with nested directories.
     Archive {
+        /// A flattened list of all files in the archive.
+        ///
         /// When all files in the torrent are viewed as a single contiguous byte
         /// array, we can get the offset of a file in torrent. The file's last
         /// byte offset in torrent is the key of this map, for helping us with
@@ -159,6 +174,11 @@ pub enum FsStructure {
 }
 
 impl FsStructure {
+    /// Returns true if the download is for an archive.
+    pub fn is_archive(&self) -> bool {
+        matches!(self, Self::Archive { .. })
+    }
+
     /// Returns the total download size in bytes.
     ///
     /// Note that this is an O(n) operation for archive downloads, where n is

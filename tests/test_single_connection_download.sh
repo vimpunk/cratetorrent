@@ -57,7 +57,7 @@ download_dir=/tmp/cratetorrent
 # initialize download directory to state expected by the cratetortent-cli
 if [ -d "${download_dir}" ]; then
     echo "Clearing download directory ${download_dir}"
-    rm -rf "${download_dir}"/*
+    sudo rm -rf "${download_dir}"/*
 elif [ -f "${download_dir}" ]; then
     echo "Error: file found where download directory ${download_dir} is supposed to be"
     exit "${dest_in_use}"

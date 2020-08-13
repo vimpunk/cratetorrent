@@ -191,11 +191,12 @@ impl Torrent {
         // TODO: since this is done as part of a tokio::task, should we use
         // tokio_fs here?
         if !info.download_dir.is_dir() {
-            log::warn!("Download directory {:?} not found", info.download_dir);
-            return Err(NewTorrentError::Io(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "Download directory not found",
-            )));
+            log::warn!(
+                "Creating missing download directory {:?}",
+                info.download_dir
+            );
+            fs::create_dir_all(&info.download_dir)?;
+            log::info!("Download directory {:?} created", info.download_dir);
         }
 
         let files = match &info.structure {

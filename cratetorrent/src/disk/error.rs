@@ -38,6 +38,12 @@ pub(crate) enum NewTorrentError {
     Io(std::io::Error),
 }
 
+impl From<std::io::Error> for NewTorrentError {
+    fn from(e: std::io::Error) -> Self {
+        Self::Io(e)
+    }
+}
+
 impl fmt::Display for NewTorrentError {
     fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
         match self {
