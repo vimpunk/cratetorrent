@@ -1,8 +1,11 @@
+use {
+    bytes::{Buf, BufMut, BytesMut},
+    std::convert::{TryFrom, TryInto},
+    std::io,
+    tokio_util::codec::{Decoder, Encoder},
+};
+
 use crate::{Bitfield, BlockInfo};
-use bytes::{Buf, BufMut, BytesMut};
-use std::convert::{TryFrom, TryInto};
-use std::io;
-use tokio_util::codec::{Decoder, Encoder};
 
 /// The message sent at the beginning of a peer session by both sides of the
 /// connection.
@@ -492,8 +495,9 @@ impl Decoder for PeerCodec {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use bytes::Bytes;
+
+    use {super::*, crate::BLOCK_LEN};
 
     // Tests a stream of arbitrary messages to ensure that not only do they
     // encode and then decode correctly (like the individual test cases

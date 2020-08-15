@@ -10,9 +10,9 @@ if it's not already running.
 USAGE: $1 --name <name>
 
 OPTIONS:
-    -n|--name   The name of the torrent (currently the name of the file).
+    -n|--name   The name to give to the container.
     -i|--ip     The IP address of the container.
-    -h|--help       Print this help message.
+    -h|--help   Print this help message.
     "
 }
 
@@ -83,7 +83,7 @@ then
     docker run \
         --rm \
         --name "${name}" \
-        --publish 9091 \
+        --publish 9091:9091 \
         --env PUID=$UID \
         --env PGID=$UID \
         --mount type=bind,src="${tr_config_dir}",dst=/config \

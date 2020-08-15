@@ -1,26 +1,9 @@
-use {
-    std::{convert::From, fmt},
-    tokio::sync::mpsc::error::SendError,
-};
+use std::fmt;
+
+use crate::error::Error;
 
 /// The disk IO result type.
 pub(crate) type Result<T, E = Error> = std::result::Result<T, E>;
-
-/// The unrecoverable errors that may occur on the disk task.
-#[derive(Debug)]
-pub enum Error {
-    /// The specified torrent was not found among the disk task's torrent
-    /// entries.
-    InvalidTorrentId,
-    /// The channel on which disk was listening or sending died.
-    Channel,
-}
-
-impl<T> From<SendError<T>> for Error {
-    fn from(_: SendError<T>) -> Self {
-        Self::Channel
-    }
-}
 
 /// Error type returned on failed block writes.
 ///
@@ -30,9 +13,6 @@ impl<T> From<SendError<T>> for Error {
 pub(crate) enum WriteError {
     /// The block's piece index is invalid.
     InvalidPieceIndex,
-    /// The file download was finished but it could not be moved to its
-    /// destination path (removing the `.part` suffix).
-    DestPath,
     /// An IO error ocurred.
     Io(std::io::Error),
 }
@@ -41,9 +21,6 @@ impl fmt::Display for WriteError {
     fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
         match self {
             Self::InvalidPieceIndex => write!(fmt, "invalid piece index"),
-            Self::DestPath => {
-                write!(fmt, "could not move downloaded file to path")
-            }
             Self::Io(e) => write!(fmt, "{}", e),
         }
     }
@@ -61,11 +38,17 @@ pub(crate) enum NewTorrentError {
     Io(std::io::Error),
 }
 
+impl From<std::io::Error> for NewTorrentError {
+    fn from(e: std::io::Error) -> Self {
+        Self::Io(e)
+    }
+}
+
 impl fmt::Display for NewTorrentError {
     fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
         match self {
             Self::AlreadyExists => {
-                write!(fmt, "disk torrent entry alrady exists")
+                write!(fmt, "disk torrent entry already exists")
             }
             Self::Io(e) => write!(fmt, "{}", e),
         }

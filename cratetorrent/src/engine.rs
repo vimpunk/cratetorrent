@@ -1,19 +1,21 @@
 use {
-    crate::{
-        disk::{self, Alert},
-        error::*,
-        metainfo::Metainfo,
-        torrent::{StorageInfo, Torrent},
-        PeerId,
-    },
-    std::{net::SocketAddr, path::Path},
+    std::{net::SocketAddr, path::PathBuf},
     tokio::runtime::Runtime,
+};
+
+use crate::{
+    disk::{self, Alert},
+    error::*,
+    metainfo::Metainfo,
+    storage_info::StorageInfo,
+    torrent::Torrent,
+    PeerId,
 };
 
 /// Connects to a single seed and downloads the torrent or aborts on error.
 pub fn run_torrent(
     client_id: PeerId,
-    download_dir: &Path,
+    download_dir: PathBuf,
     metainfo: Metainfo,
     seed_addr: SocketAddr,
 ) -> Result<()> {
@@ -26,7 +28,7 @@ pub fn run_torrent(
 
 async fn start_disk_and_torrent(
     client_id: PeerId,
-    download_dir: &Path,
+    download_dir: PathBuf,
     metainfo: Metainfo,
     seed_addr: SocketAddr,
 ) -> Result<()> {
@@ -34,12 +36,12 @@ async fn start_disk_and_torrent(
 
     // allocate torrent on disk
     let id = 0;
-    let info_hash = metainfo.create_info_hash()?;
-    let storage_info = StorageInfo::new(&metainfo, download_dir)?;
+    let info_hash = metainfo.info_hash;
+    let storage_info = StorageInfo::new(&metainfo, download_dir);
     log::info!("Torrent {} storage info: {:?}", id, storage_info);
 
     // allocate torrent and wait for its result
-    disk.allocate_new_torrent(id, storage_info.clone(), metainfo.info.pieces)?;
+    disk.allocate_new_torrent(id, storage_info.clone(), metainfo.pieces)?;
     let torrent_disk_alert_port =
         if let Some(Alert::TorrentAllocation(allocation_result)) =
             alert_port.recv().await

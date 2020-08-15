@@ -5,10 +5,10 @@ cratetorrent.
 
 In general all tests use Docker containers and a Docker virtual network to
 simulate a primitive network of peers (later on this may be expanded so that
-peers are not on the same LAN), and one or more of the containers will be the
-the established
+peers are not on the same LAN), and one or more of the containers will use the
+established
 [Transmission](https://manpages.ubuntu.com/manpages/bionic/man1/transmission-cli.1.html)
-torrent clients, against which to test cratetorrent's protocol compliance, i.e.
+torrent client, against which to test cratetorrent's protocol compliance, i.e.
 to make sure that cratetorrent works with torrent clients used in the wild.
 
 To ensure reproducible test results, it is always the same file that is going to
@@ -18,12 +18,33 @@ BitTorrent trackers or the DHT, that may introduce variable test runs. These are
 supposed to be tested separately at a later time point, when functionality is
 added.
 
-Moreover, various file sizes are going to be tested to ensure that
-cratetorrent works correctly with small and large files, with different piece
-sizes and other parameters.
+Moreover, various file sizes are going to be tested to ensure that cratetorrent
+works correctly with small and large files, with different piece sizes and other
+parameters.
 
-On how test environments are set up, read more [below](#set-up-test-environment)
+A successful test run should look like the following:
+```
+[2020-07-19T11:59:22Z INFO  cratetorrent::torrent] Finished torrent download, exiting
+[2020-07-19T11:59:22Z TRACE cratetorrent::storage_info] Returning files intersecting piece 31
+[2020-07-19T11:59:22Z TRACE cratetorrent::disk] Shutting down disk IO task
+[2020-07-19T11:59:22Z DEBUG cratetorrent::disk::io] Piece 31 intersects files: 0..1
+[2020-07-19T11:59:22Z INFO  cratetorrent::peer] Shutting down peer 172.17.0.2:51413 session
+[2020-07-19T11:59:22Z DEBUG cratetorrent::disk::io] Disk received command
+[2020-07-19T11:59:22Z TRACE cratetorrent::disk::io] Saving torrent 0 block BlockInfo { piece_index: 31, offset: 16384, len: 16384 } to disk
+[2020-07-19T11:59:22Z TRACE cratetorrent::disk::io] Saving block BlockInfo { piece_index: 31, offset: 16384, len: 16384 } to disk
+[2020-07-19T11:59:22Z DEBUG cratetorrent::disk::io] Piece hash: 8048e7746ba19b1e52ea6396bfcc8d5240b021f3
+[2020-07-19T11:59:22Z INFO  cratetorrent::disk::io] Piece 31 is valid
+[2020-07-19T11:59:22Z DEBUG cratetorrent::disk::io] Disk received command
+[2020-07-19T11:59:22Z INFO  cratetorrent::disk::io] Shutting down disk event loop
 
+real	0m14,614s
+user	0m0,036s
+sys	0m0,029s
+
+Comparing downloaded file /tmp/cratetorrent/1mb-test.txt to source file ~/code/cratetorrent/tests/assets/1mb-test.txt
+
+SUCCESS: downloaded file matches source file
+```
 
 ## Prerequisites
 
@@ -32,35 +53,31 @@ and its corresponding docker image. For instructions, see the [project
 readme](../README.md).
 
 
-## Test environment
+## Environment
 
 Each test case sets up its own environment (e.g. a seed container and files to
-seed), using the [`start_container.sh`](./start_container.sh) and
-[`seed_new_torrent.sh`](./seed_new_torrent.sh) utility scripts. After the local
-environment is set up, tests will be able to reuse their environment, meaning
-they need not be generated again (which is on purpose, so that one can perform
-testing against the same seed(s) and file(s) repeatedly). However, the generated
-files are not tracked in version control to avoid bloat, so these are only
-"constant" for local development. These files will be placed in the `assets`
-directory (created by the scripts).
+seed), using the [`start_transmission_seed.sh`](./start_transmission_seed.sh)
+and [`seed_new_torrent.sh`](./seed_new_torrent.sh) utility scripts. After the
+local environment is set up, tests will be able to reuse their environment,
+meaning they need not be generated again (which is on purpose, so that one can
+perform testing against the same seed(s) and file(s) repeatedly). However, the
+generated files are not tracked in version control to avoid bloat, so these are
+only "constant" for local development. These files will be placed in the
+`assets` directory (created by the scripts).
 
-To see how to use the above scripts, run them with the `--help` flag.
-
-In the below [section](#set-up-test-environment), you will find instructions on
-how to set up such a test environment manually. You generally won't need to do
-this, it's included as documentation for how these scripts work.
+**Hint**: run any script with the `--help` flag for more info.
 
 ### Test binary
 
-The cratetorrent-cli binary takes as its arguments:
+cratetorrent-cli arguments:
 - the seed's address in the local Docker network,
 - and the download destination directory.
 
-It runs only as long as the download is in progress. Once it's
-done, it exits, and this fact is used by the test scripts to perform download
-verification afterwards. Later this will change to something more sophisticated,
-like detecting when a download is no longer a partial download (e.g. with the
-`.part` suffix).
+It runs only as long as the download is in progress. Once it's done, it exits,
+and this fact is used by the test scripts to perform download verification
+afterwards. Later this will change to something more sophisticated, like
+detecting when a download is no longer a partial download (e.g. with the `.part`
+suffix).
 
 
 ## Test scenarios
@@ -69,19 +86,35 @@ like detecting when a download is no longer a partial download (e.g. with the
 
 - **Goal**: the successful download of a single (small) file, asserting basic
   correctness
-- **Command**: `./test_single_connection_download.sh`
+- **Command**:
+[`./test_single_connection_download.sh`](test_single_connection_download.sh)
 - **Containers**:
-  - cratetorrent-cli test binary
-  - Transmission seed
-- **File**: 1 MiB file generated at `assets/1mb-test.txt`
+  - *seeds:*
+    - transmission
+  - *leeches:*
+    - cratetorrent-cli
+- **Files**: 1 MiB file at `assets/1mb-test.txt`
+
+### Archive (multi-file) download
+
+- **Goal**: the successful download of a (small) archive consisting of a few
+  files and nested directories, asserting basic correctness
+- **Command**:
+  [`./test_single_connection_directory_download.sh.sh`](test_single_connection_directory_download.sh)
+- **Containers**:
+  - *seeds:*
+    - transmission
+  - *leeches:*
+    - cratetorrent-cli
+- **Files**: files in `assets/dir-test`
 
 
 ## Set up test environment
 
-Instructions are given on how to manually set up the test environment and the required
-data. Prefer the [`start_container.sh`](./start_container.sh) and
-[`seed_new_torrent.sh`](./seed_new_torrent.sh) scripts, this section is just
-documentation for these scripts.
+Instructions are given on how to manually set up the test environment and the
+required data. This is for documentation purposes, prefer the
+[`start_transmission_seed.sh`](./start_transmission_seed.sh) and
+[`seed_new_torrent.sh`](./seed_new_torrent.sh) scripts.
 
 #### Generate test file
 1. Create the necessary directories, `assets`,
@@ -90,11 +123,9 @@ documentation for these scripts.
   ```bash
   truncate -s 1M 1mb-test.txt
   ```
-3. Use python 3 to fill it with random printable characters:
-  ```python
-  import random, string
-  with open('1mb-test.txt', 'w') as f:
-      f.write(''.join(random.choices(string.ascii_lowercase + string.ascii_uppercase + string.digits, k=1048576)))
+3. Fill file with random characters
+  ```bash
+  head -c 1048576 < /dev/urandom > 1mb-test.txt
   ```
 
 #### Create torrent env

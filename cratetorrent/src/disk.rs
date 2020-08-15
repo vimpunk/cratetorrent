@@ -1,18 +1,19 @@
 mod error;
 mod io;
 
-pub use error::*;
-
-use {
-    crate::{torrent::StorageInfo, BlockInfo, TorrentId},
-    io::Disk,
-    tokio::{
-        sync::mpsc::{UnboundedReceiver, UnboundedSender},
-        task,
-    },
+use tokio::{
+    sync::mpsc::{UnboundedReceiver, UnboundedSender},
+    task,
 };
 
-/// Spawns a disk IO task and returns a tuple with the task join handle, the
+use {
+    crate::{error::Error, storage_info::StorageInfo, BlockInfo, TorrentId},
+    io::Disk,
+};
+
+pub(crate) use error::*;
+
+// Spawns a disk IO task and returns a tuple with the task join handle, the
 /// disk handle used for sending commands, and a channel for receiving
 /// command results and other notifications.
 pub(crate) fn spawn(
@@ -36,9 +37,11 @@ pub(crate) fn spawn(
 pub(crate) struct DiskHandle(CommandSender);
 
 impl DiskHandle {
-    /// Instructs the disk task to set up everything needed for a new torrent,
-    /// which includes in-memory metadata storage and pre-allocating the
-    /// to-be-downloaded file(s).
+    /// Creates a new torrent in the disk task.
+    ///
+    /// This instructs the disk task to set up everything needed for a new
+    /// torrent, which includes in-memory metadata storage and setting up the
+    /// torrent's file system structure on disk.
     pub fn allocate_new_torrent(
         &self,
         id: TorrentId,
@@ -85,19 +88,19 @@ type CommandReceiver = UnboundedReceiver<Command>;
 
 /// The type of commands that the disk can execute.
 enum Command {
-    // Allocate a new torrent.
+    /// Allocate a new torrent in `Disk`.
     NewTorrent {
         id: TorrentId,
         info: StorageInfo,
         piece_hashes: Vec<u8>,
     },
-    // Request to eventually write a block to disk.
+    /// Request to eventually write a block to disk.
     WriteBlock {
         id: TorrentId,
         info: BlockInfo,
         data: Vec<u8>,
     },
-    // Eventually shut down the disk task.
+    /// Eventually shut down the disk task.
     Shutdown,
 }
 
@@ -160,40 +163,51 @@ pub(crate) struct BatchWrite {
 #[cfg(test)]
 mod tests {
     use {
-        super::*,
-        crate::{block_count, BLOCK_LEN},
         sha1::{Digest, Sha1},
-        std::{fs, path::PathBuf},
+        std::{
+            fs,
+            path::{Path, PathBuf},
+        },
     };
 
-    // Tests the allocation of a torrent, and then the allocation of the same
-    // torrent returning an error.
+    use {
+        super::*,
+        crate::{block_count, storage_info::FsStructure, FileInfo, BLOCK_LEN},
+    };
+
+    /// Tests the allocation of a torrent, and then the allocation of the same
+    /// torrent returning an error.
     #[tokio::test]
     async fn test_allocate_new_torrent() {
         let (_, disk_handle, mut alert_port) = spawn().unwrap();
 
         let Env {
             id,
-            pieces,
             piece_hashes,
             info,
-        } = Env::new();
+            ..
+        } = Env::new("allocate_new_torrent");
 
         // allocate torrent via channel
         disk_handle
-            .allocate_new_torrent(id, info, piece_hashes.clone())
+            .allocate_new_torrent(id, info.clone(), piece_hashes.clone())
             .unwrap();
 
         // wait for result on alert port
         let alert = alert_port.recv().await.unwrap();
         match alert {
-            Alert::TorrentAllocation(Ok(allocation)) => {
-                assert_eq!(allocation.id, id);
-            }
-            _ => {
-                assert!(false, "Torrent could not be allocated");
+            Alert::TorrentAllocation(res) => {
+                assert!(res.is_ok());
+                assert_eq!(res.unwrap().id, id);
             }
         }
+
+        // check that file was created on disk
+        let file = match &info.structure {
+            FsStructure::File(file) => file,
+            _ => unreachable!(),
+        };
+        assert!(info.download_dir.join(&file.path).is_file());
 
         // try to allocate the same torrent a second time
         disk_handle
@@ -208,8 +222,8 @@ mod tests {
         ));
     }
 
-    // Tests writing of a complete valid torrent's pieces and verifying that an
-    // alert of each disk write is returned by the disk task.
+    /// Tests writing of a complete valid torrent's pieces and verifying that an
+    /// alert of each disk write is returned by the disk task.
     #[tokio::test]
     async fn test_write_all_pieces() {
         let (_, disk_handle, mut alert_port) = spawn().unwrap();
@@ -219,11 +233,11 @@ mod tests {
             pieces,
             piece_hashes,
             info,
-        } = Env::new();
+        } = Env::new("write_all_pieces");
 
         // allocate torrent via channel
         disk_handle
-            .allocate_new_torrent(id, info, piece_hashes)
+            .allocate_new_torrent(id, info.clone(), piece_hashes)
             .unwrap();
 
         // wait for result on alert port
@@ -233,19 +247,19 @@ mod tests {
             {
                 allocation.alert_port
             } else {
-                assert!(false, "Torrent could not be allocated");
+                assert!(false, "torrent could not be allocated");
                 return;
             };
 
         // write all pieces to disk
         for index in 0..pieces.len() {
             let piece = &pieces[index];
-            for_each_block(index, piece.len() as u32, |info| {
-                let block_end = info.offset + info.len;
-                let data = &piece[info.offset as usize..block_end as usize];
-                debug_assert_eq!(data.len(), info.len as usize);
-                println!("Writing piece {} block {:?}", index, info);
-                disk_handle.write_block(id, info, data.to_vec()).unwrap();
+            for_each_block(index, piece.len() as u32, |block| {
+                let block_end = block.offset + block.len;
+                let data = &piece[block.offset as usize..block_end as usize];
+                debug_assert_eq!(data.len(), block.len as usize);
+                println!("Writing piece {} block {:?}", index, block);
+                disk_handle.write_block(id, block, data.to_vec()).unwrap();
             });
 
             // wait for disk write result
@@ -255,9 +269,9 @@ mod tests {
                 // piece is complete so it should be hashed and be valid
                 assert!(matches!(batch.is_piece_valid, Some(true)));
                 // verify that the message contains all four blocks
-                for_each_block(index, piece.len() as u32, |info| {
-                    let pos = batch.blocks.iter().position(|b| *b == info);
-                    println!("Verifying piece {} block {:?}", index, info);
+                for_each_block(index, piece.len() as u32, |block| {
+                    let pos = batch.blocks.iter().position(|b| *b == block);
+                    println!("Verifying piece {} block {:?}", index, block);
                     assert!(pos.is_some());
                 });
             } else {
@@ -266,12 +280,16 @@ mod tests {
         }
 
         // clean up test env
-        fs::remove_file(&info.download_path)
+        let file = match &info.structure {
+            FsStructure::File(file) => file,
+            _ => unreachable!(),
+        };
+        fs::remove_file(info.download_dir.join(&file.path))
             .expect("Failed to clean up disk test torrent file");
     }
 
-    // Calls the provided function for each block in piece, passing it the
-    // block's `BlockInfo`.
+    /// Calls the provided function for each block in piece, passing it the
+    /// block's `BlockInfo`.
     fn for_each_block(
         piece_index: usize,
         piece_len: u32,
@@ -300,8 +318,8 @@ mod tests {
         }
     }
 
-    // Tests writing of an invalid piece and verifying that an alert the invalid
-    // disk is returned by the disk task.
+    /// Tests writing of an invalid piece and verifying that an alert of it
+    /// is returned by the disk task.
     #[tokio::test]
     async fn test_write_invalid_piece() {
         let (_, disk_handle, mut alert_port) = spawn().unwrap();
@@ -311,11 +329,11 @@ mod tests {
             pieces,
             piece_hashes,
             info,
-        } = Env::new();
+        } = Env::new("write_invalid_piece");
 
         // allocate torrent via channel
         disk_handle
-            .allocate_new_torrent(id, info, piece_hashes)
+            .allocate_new_torrent(id, info.clone(), piece_hashes)
             .unwrap();
 
         // wait for result on alert port
@@ -325,7 +343,7 @@ mod tests {
             {
                 allocation.alert_port
             } else {
-                assert!(false, "Torrent could not be allocated");
+                assert!(false, "torrent could not be allocated");
                 return;
             };
 
@@ -333,12 +351,13 @@ mod tests {
         let index = 0;
         let invalid_piece: Vec<_> =
             pieces[index].iter().map(|b| b.saturating_add(5)).collect();
-        for_each_block(index, invalid_piece.len() as u32, |info| {
-            let block_end = info.offset + info.len;
-            let data = &invalid_piece[info.offset as usize..block_end as usize];
-            debug_assert_eq!(data.len(), info.len as usize);
-            println!("Writing invalid piece {} block {:?}", index, info);
-            disk_handle.write_block(id, info, data.to_vec()).unwrap();
+        for_each_block(index, invalid_piece.len() as u32, |block| {
+            let block_end = block.offset + block.len;
+            let data =
+                &invalid_piece[block.offset as usize..block_end as usize];
+            debug_assert_eq!(data.len(), block.len as usize);
+            println!("Writing invalid piece {} block {:?}", index, block);
+            disk_handle.write_block(id, block, data.to_vec()).unwrap();
         });
 
         // wait for disk write result
@@ -350,15 +369,11 @@ mod tests {
             // verify that the message doesn't contain any blocks
             assert!(batch.blocks.is_empty());
         } else {
-            assert!(false, "Piece could not be written to disk");
+            assert!(false, "piece could not be written to disk");
         }
-
-        // download file should not exists as invalid piece must not be written
-        // to disk
-        assert!(!info.download_path.exists());
     }
 
-    // The disk IO test environment containing information of a valid torrent.
+    /// The disk IO test environment containing information of a valid torrent.
     struct Env {
         id: TorrentId,
         pieces: Vec<Vec<u8>>,
@@ -367,11 +382,19 @@ mod tests {
     }
 
     impl Env {
-        fn new() -> Self {
+        /// Creates a new test environment.
+        ///
+        /// Tests are run in parallel so multiple environments must not clash,
+        /// therefore the test name must be unique, which is included in the test
+        /// environment's path. This also helps debugging.
+        fn new(test_name: &str) -> Self {
             let id = 0;
-            let download_path = PathBuf::from("/tmp/torrent0");
+            let download_dir = Path::new("/tmp");
+            let download_rel_path =
+                PathBuf::from(format!("torrent_disk_test_{}", test_name));
             let piece_len: u32 = 4 * 0x4000;
-            // last piece is slightly shorter to test that it is handled correctly
+            // last piece is slightly shorter, to test that it is handled
+            // correctly
             let last_piece_len: u32 = piece_len - 935;
             let pieces: Vec<Vec<u8>> = vec![
                 (0..piece_len).map(|b| (b % 256) as u8).collect(),
@@ -397,20 +420,34 @@ mod tests {
             assert_eq!(piece_hashes.len(), pieces.len() * 20);
 
             // clean up any potential previous test env
-            if download_path.exists() {
-                fs::remove_file(&download_path)
-                    .expect("Failed to clean up disk test torrent file");
+            {
+                let download_path = download_dir.join(&download_rel_path);
+                if download_path.is_file() {
+                    fs::remove_file(&download_path).expect(
+                        "Failed to clean up previous disk test torrent file",
+                    );
+                } else if download_path.is_dir() {
+                    fs::remove_dir_all(&download_path).expect(
+                        "Failed to clean up previous disk test torrent dir",
+                    );
+                }
             }
 
+            let download_len = pieces.iter().fold(0, |mut len, piece| {
+                len += piece.len() as u64;
+                len
+            });
             let info = StorageInfo {
                 piece_count: pieces.len(),
                 piece_len,
                 last_piece_len,
-                download_len: pieces.iter().fold(0, |mut len, piece| {
-                    len += piece.len() as u64;
-                    len
+                download_len,
+                download_dir: download_dir.to_path_buf(),
+                structure: FsStructure::File(FileInfo {
+                    path: download_rel_path,
+                    torrent_offset: 0,
+                    len: download_len,
                 }),
-                download_path,
             };
 
             Self {

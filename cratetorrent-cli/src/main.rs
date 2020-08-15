@@ -53,15 +53,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let metainfo = fs::read(metainfo_path)?;
     let metainfo = Metainfo::from_bytes(&metainfo)?;
     println!("metainfo: {:?}", metainfo);
-    let info_hash = metainfo.create_info_hash()?;
-    println!("info hash: {}", hex::encode(&info_hash));
+    println!("piece count: {}", metainfo.piece_count());
+    println!("info hash: {}", hex::encode(&metainfo.info_hash));
 
     // arbitrary client id for now
     const CLIENT_ID: &str = "cbt-2020-03-03-00000";
     let mut client_id = [0; 20];
     client_id.copy_from_slice(CLIENT_ID.as_bytes());
 
-    run_torrent(client_id, &download_dir, metainfo, seed)?;
+    run_torrent(client_id, download_dir, metainfo, seed)?;
 
     Ok(())
 }

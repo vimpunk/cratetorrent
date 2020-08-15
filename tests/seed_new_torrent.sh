@@ -3,21 +3,22 @@
 # This file sets up a test environment with specific details supplied as command
 # line arguments.
 #
-# It creates file and its corresonding torrent metainfo and starts
-# seeding in a Transmission container.
+# It creates a metainfo of the given torrent file or directory and starts
+# seeding it in the given Transmission container.
 
 set -e
 
 function print_help {
     echo -e "
-This script creates a new file to be seeded by the specified container.
-The container must be running.
+This makes the seed container start seeding the given file (generating its necessary metainfo).
+The seed container must be running.
 
-USAGE: $1 --name <name> --size <size[unit]>
+USAGE: $1 --path <path> [--seed <seed>] 
 
 OPTIONS:
     -n|--name       The name of the torrent (currently the name of the file).
-    -s|--size       The size of the file, in bytes.
+    -p|--path       The path of the torrent file or directory to seed. This will
+                    be copied into the container's downloads complete folder.
     --seed          The Transmission seed container's name. Must be running.
                     Defaults to 'transmission'.
     -h|--help       Print this help message.
@@ -29,8 +30,8 @@ for arg in "$@"; do
         -n|--name)
             torrent_name=$2
         ;;
-        -s|--size)
-            size=$2
+        -p|--path)
+            path=$2
         ;;
         --seed)
             seed_container=$2
@@ -49,8 +50,8 @@ if [ -z "${torrent_name}" ]; then
     exit 1
 fi
 
-if [ -z "${size}" ]; then
-    echo "Error: --size must be set"
+if [ -z "${path}" ]; then
+    echo "Error: --path must be set"
     print_help
     exit 1
 fi
@@ -97,34 +98,27 @@ then
 fi
 
 ################################################################################
-# 2. Generate test file
+# 2. Verify file to seed
 ################################################################################
 
-# the path of the torrent
-path="${tr_downloads_dir}/complete/${torrent_name}"
-
-if [ -f "${path}" ] || [ -d "${path}" ]; then
-    echo "Error: torrent ${torrent_name} already exists at ${path}"
+if [ ! -f "${path}" ] && [ ! -d "${path}" ]; then
+    echo "Error: torrent file does not exist at ${path}"
     exit 6
 fi
-
-# truncate file
-echo "Truncating source file ${path} to ${size} bytes"
-truncate -s "${size}" "${path}"
-
-# use urandom to fill it with random characters
-
-echo "Populating source file ${path} with random characters"
-head -c "${size}" < /dev/urandom > "${path}"
 
 ################################################################################
 # 3. Create torrent
 ################################################################################
 
-# link source file at the root of the assets dir for the convenience for other #
-# scripts
-echo "Linking torrent to assets directory root"
-ln -s "${path}" "${assets_dir}/${torrent_name}"
+# The source to be seeded must be inside the container. For this reason, if it
+# is not already there, we copy it in the torrent downloads complete folder.
+# This should be a noop even for large files as we're not actually modifying the
+# source so linux should do a copy-on-write here.
+torrent_path="${tr_downloads_dir}/complete/${torrent_name}"
+if [ "${path}" != "${torrent_path}" ]; then
+    echo "Copying torrent from source ${path} to seed dir at ${torrent_path}"
+    cp -r "${path}" "${torrent_path}"
+fi
 
 # create the torrent inside the seed container
 #
@@ -158,7 +152,7 @@ echo "Adding .torrent suffix to metainfo filename"
 mv "${metainfo_path}" "${metainfo_path}.torrent"
 # wait for Transmission to pick up the file
 sleep 5
-# we need to add the `.added` suffix as that's what Transmission does after
+# we need to add the `.added` suffix to our path as that's what Transmission does after
 # picking up a new metainfo file
 metainfo_path="${metainfo_path}.torrent.added"
 # sanity check
@@ -168,7 +162,7 @@ if [ ! -f "${metainfo_path}" ]; then
 fi
 
 # link metainfo file in the transmission watch directory to the root of the
-# assets dir for the convenience for other
+# assets dir for the convenience of other scripts
 echo "Linking metainfo to assets directory root"
 ln -s "${metainfo_path}" "${assets_dir}/${torrent_name}.torrent"
 

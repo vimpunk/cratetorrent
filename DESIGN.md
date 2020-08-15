@@ -120,26 +120,39 @@ A better approach would be to keep the underlying raw source (as in Tide), but
 ## Engine
 
 Currently there is no explicit entity, but simply an engine module that provides
-a public method to start a torrent.
+a public method to start a torrent until completion.
 
 
 ## Torrent
 
 - Contains the piece picker and a single connection to a seed from which to
-  download the file.
+  download the torrent.
 - Also contains other metadata relevant to the torrent, such as its info hash,
   the files it needs to download, the destination directory, and others.
 - Torrent tick: periodically loops through all its peer connections and performs
   actions like stats collections, later choking/unchoking, resume state saving,
   and others.
-- A peer session is spawned on a new
-  [task](https://docs.rs/tokio/0.2.13/tokio/task), as otherwise we'd enter all
-  sorts of lifetime issues by running the torrent and the peer session in the
-  same task's async loop. More research on this and alternatives needs to be
-  done.
-- Communication with peer sessions would happen through `tokio`'s `mpsc` queues,
-  since a peer session is spawned on a task which may be run by a different
-  thread on which torrent is executing
+
+### Peer sessions
+
+A peer session is spawned on a new
+  [task](https://docs.rs/tokio/0.2.13/tokio/task), and torrent and the peer
+  session communicate with each other via async `mpsc` channels. This is
+  necessary as peer is spawned on another task, which from the point of view of
+  the borrow checker is as though it were spawned on another thread, so we can't
+  just call methods of peer session without further synchronization.
+
+It would be possible to spawn the peer task
+[locally](https://docs.rs/tokio/0.2.20/tokio/task/fn.spawn_local.html), but we'd
+still have to use channels for communication as running the peer session and
+calling its methods on the torrent task would cause lifetime issues, due to the
+peer session's run method taking a mutable reference to self, thus preventing
+torrent from calling any of its other methods.
+
+As to whether running all peer sessions and torrent on the same local task
+(since a peer session doesn't do much other than IO) would be more performant
+over running each on a separate task is an open question and more research is
+needed.
 
 
 ## Piece picker
@@ -157,6 +170,7 @@ whether we have it or not and its frequency in the swarm.
 Later the internal data structures of the piece picker will most likely be
 changed to be more optimal for the rarest-pieces-first algorithm (the default
 defined by the standard).
+
 
 ## Peer connection
 
@@ -517,8 +531,9 @@ A piece download tracks the piece completion of an ongoing piece download. It
 
 ## Disk IO
 
-This entity (called `Disk` in the code) is responsible for everything disk
-storage related. This includes:
+This entity (called `Disk` in the code, in the [`disk`
+module](cratetorrent/src/disk.rs]) is responsible for everything disk storage
+related. This includes:
 - allocating a torrent's files at download start;
 - hashing downloaded file pieces and saving them to disk;
 - once seeding functionality is implemented: reading blocks from disk.
@@ -535,7 +550,7 @@ by all entities using it. In this case, we would have the following issues:
   same `async` block are sequential). This is the most crucial one.
 - Increased complexity due to lifetime and synchronization issues with multiple
   peer session tasks referring to the same `Disk`, whereas with the task based
-  solution `Disk` is the only one accessing its internal state.
+  solution `Disk` is the only one accessing its own internal state.
 - Worse separation of concerns, leading to code that is more difficult to reason
   about and thus potentially more bugs. Whereas having `Disk` on a separate task
   allows for a sequential model of execution, which is clearer and less
@@ -576,15 +591,21 @@ To summarize, sending alerts from the disk task is two-tiered:
 - global (e.g. the result of allocating a new torrent),
 - per torrent (e.g. the result of writing blocks to disk).
 
-### Responsibilities
+### Torrent allocation
+Since a torrent may contain multiple files, they will be downloaded in a
+directory named after the torrent. There may be additional subdirectories in a
+torrent, so the whole torrent's file system structure needs to be set up before
+the download is begun. 
 
-#### Torrent file allocation
-Currently only a single file download is supported, so the file allocation is
-very simple: the to-be-downloaded file is checked for existence and the first
-write creates the file.
+For single file downloads supported the file allocation is very simple: the
+to-be-downloaded file is checked for existence and the first write creates the
+file.
+
 Late we will want to pre-allocate sparse files truncated to the download length.
 
-#### Saving to disk
+### Saving to disk
+
+#### Buffering
 The primary purpose of `Disk` right now is to buffer downloaded blocks in memory
 until the piece is complete, hash the piece, notify torrent of the result, and,
 if the resulting hash matches the expected one, save to disk.
@@ -614,13 +635,90 @@ twofold:
   or buffer at most `n` blocks, which may be fewer than is in a torrent's
   piece.)
 
-##### Vectored IO
+#### Mapping pieces to files
+When writing a piece to disk, we need to determine which file(s) the piece
+belongs to. Further, a piece may span several files. This way, every time we
+wish to save a piece, we need to look for its file boundaries and thus
+"partition" the piece, saving the partitions to their corresponding files.
+
+To find the files quickly, if we imagine the torrent as a single contiguous byte
+stream, we can pre-compute each file's offset in the entire torrent, and compute
+each piece's offset in the torrent, and use this information to check which
+pieces intersect the files.
+
+More concretely, there are two options:
+- compute what pieces a file intersects with  at the beginning of a torrent, and
+  store it with the file information,
+- or compute what files the piece intersects with when starting a piece
+  download, storing it with the in-progress piece.
+
+The second approach is chosen for several reasons:
+- the way the code is currently laid out it is easier to implement and test;
+- in the first approach, to find the matching piece indices, we'd have to loop
+  through all files anyway, so we don't save much computation;
+- and also, there is slightly less memory overhead as we're only storing this
+  data when a piece is being downloaded, not with all files in a torrent at all
+  times, which is wasteful if their pieces are already downloaded.
+
+The concrete algorithm is this:
+- find the first file where
+  `[file.start_offset, file.end_offset).contains(piece.start_offset)`
+- if none is found, return an empty range (`[0..0)`)
+- otherwise initialize the resulting file index range with
+  `[found_index, found_index + 1)`
+- then loop through files after the above found one, while
+  `[piece.start_offset..piece.end_offset].contains(file.start_offset)` returns
+  true and record the file's index in our resulting range's end
+- return the resulting range 
+
+Unless the piece is very large and there are many small files, the second part
+(finding the last file intersecting with piece) should be very quick, with only
+a few iterations. (This is the part that could be optimized by storing which
+pieces a file intersects with in the file information.)
+
+Then, getting the file indices is not sufficient: when writing to each file, we
+also need to know where exactly in the file we need to write the part of the
+piece. For each file to be written to, we query the slice of the file that
+overlaps with the piece, and write to file at that position.
+
+##### Example
+Let's illustrate with an example. The first row contains 3 pieces, each 16 units
+long (the precise unit doesn't matter now), and indicates their indices and
+offsets within the whole torrent. The second row contains the files in the
+torrent, of various length, indicating their names and their first and last byte
+offsets in the torrent.
+
+```
+--------------------------------------------------------------
+|0:0               |1:16                |2:32                |
+--------------------------------------------------------------
+|a:0,8      |b:9,19    |c:20,26  |d:27,36  |e:37,50          |
+--------------------------------------------------------------
+```
+
+Then, let's assume we got piece 1 and wish to save it to disk and need to
+determine which file(s) the piece belongs to.
+`files_intersecting_piece(1)` should yield the files: `b`, `c`, `d`.
+
+Another example:
+
+```
+-------------------------------------------------------
+|0:0               |1:16                |2:32         |
+-------------------------------------------------------
+|a:0,15            |b:16,19 |c:20,23    |d:32,44      |
+-------------------------------------------------------
+```
+
+Here, `files_intersecting_piece(1)` should yield the files: `b`, `c`.
+
+#### Vectored IO
 A peer downloads pieces in 16 KiB blocks and to save overhead of concatenating
 these buffers these blocks are stored in the disk write buffer as is, i.e the
 write buffer is a vector of byte vectors.
 Writing each block to disk as a separate system call would incur tremendous
 overhead (relative to the other operations in most of cratetorrent), especially
-that context switches into kernel space have become far more expensive lately to
+that context switches into kernel space have become more expensive lately to
 mitigate risks of speculative execution, so these buffers are flushed to disk in
 one system call, using [vectored
 IO](http://man7.org/linux/man-pages/man2/readv.2.html).
@@ -632,15 +730,77 @@ gains. For these instance of blocking IO, we make use of `tokio`'s builtin
 threadpool and spawn the blocking IO
 [tasks](https://docs.rs/tokio/0.2.17/tokio/task/fn.spawn_blocking.html) on it.
 
-For now `writev` is used, as that's the API that the standard lib `File`
-[exposes](https://doc.rust-lang.org/std/io/trait.Write.html#method.write_vectored),
-however, this requires that the file cursor is at the correct position, and
-requires seeking to the correct position if it's not. Since this needlessly
-adds another context switch, but ideally
-[`pwritev`](https://docs.rs/nix/0.17.0/nix/sys/uio/fn.pwritev.html) would be
-used (where the position of the write is specified as part of the write
-operation). For now the standard lib is used for simplicity as this is not yet
-an issue due to downloading sequentially, but this will be changed later.
+The [`pwritev`](https://linux.die.net/man/2/pwritev) syscall is used for the
+concrete IO operation. This syscall allows one to write a vector of byte arrays
+(referred to as "iovec") at a specified position in the file, without having to
+make a separate [`seek`](https://linux.die.net/man/2/lseek) syscall. This means
+that we do not need to write to the file in sequential order.
+
+##### Writing blocks spanning multiple files
+There is an additional complication to this: a block in a piece may span
+multiple files. Therefore, we can't just pass all blocks in a piece to
+`pwritev`, as that could write more than is supposed to be in the file (the
+syscall writes as long as there is data in the passed in iovecs, potentially
+truncating the file to a larger than desired size).
+
+Thus, when the blocks in a piece would extend beyond a file, we need to shrink
+the slice of iovecs passed to `pwritev`. To illustrate:
+```
+------------------
+| file1 | file 2 |
+--------.---------
+| block .        |
+--------.---------
+        ^
+  file boundary
+```
+On the first write, to `file1`, we need to trim the second part of the block.
+Conversely, on the second write, to `file2`, we need to trim the first part.
+
+There is a problem here: trimming the iovec during the first write makes us lose
+the second part of the block (since we're working with slices here to
+minimize allocations). There are two solutions:
+- When we detect that the file boundary is in the middle of an iovec, we
+  construct a new vector of iovecs, that is bounded by the length of the file
+  slice that we're writing to (we can use
+  [copy-on-write](https://doc.rust-lang.org/std/borrow/enum.Cow.html) to
+  seamlessly handle the resulting iovecs). This avoids overwriting the original
+  iovecs, at a slight cost.
+- Keep metadata about the trimmed iovec, if any, and restore the trimmed part
+  after the IO, [like in
+  tide](https://github.com/mandreyel/tide/blob/master/src/file.cpp#L403). 
+
+The second part is chosen for performance (as it is one of the main goals of
+cratetorrent), as well as for the joy of optimizing such small and
+self-contained code (this is a spare time project after all). The hairy logic is
+encapsulated in the [`iovecs` module](cratetorrent/src/iovecs.rs), providing a
+simple and safe abstraction.
+
+Finally, after each write, we must trim the front of the slice of iovecs by the
+number of bytes written, so that for the next file we don't write the wrong
+data (otherwise we'd be writing out-of-order, i.e. wrong data to the file). This
+is also taken care of by `IoVecs`.
+
+#### Anatomy of a piece write
+1. Create a new in-progress piece entry and calculate which files it spans, as
+   per [the above step](#mapping-pieces-to-files).
+2. Buffer all downloaded blocks in piece's write buffer.
+3. When the piece is complete, remove its entry from the torrent and spawn a new
+   blocking task for the hashing and write.
+4. Hash the piece, and if the result is good, continue. Otherwise let torrent
+   know via the alert channel of the bad piece.
+5. Allocate a vector of iovecs pointing to the blocks in the piece.
+6. Create a slice for this vector of iovecs; this will be adjusted with each
+   write.
+7. For each file that the piece spans:
+  8. Get the slice of the file where we need to write the piece.
+  9. Bound the iovec by the length of the file slice, optionally allocating a
+     new vector of iovecs if the provided iovecs exceed the file slice's length.
+  10. Write to the file at the position and for the length of the slice.
+  11. Trim the slice of iovecs by the number of bytes that were written to disk.
+  12. Step 10 and 11 may need to be repeated if not all bytes could be written
+      to disk (as the syscall doesn't guarantee that all provided bytes can be
+      written).
 
 
 ## Anatomy of a block fetch

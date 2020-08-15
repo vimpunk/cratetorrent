@@ -31,8 +31,7 @@ The project is split up in two:
 
 ## How to run
 
-Rust nightly is required for the [`io_slice_advance`
-feature](https://github.com/mandreyel/cratetorrent/issues/23).
+Tested on stable Rust (1.43).
 
 ### Binary
 

@@ -4,6 +4,10 @@ This document includes notes about not yet implemented features, optimizations,
 and ideas in general.
 
 
+https://news.ycombinator.com/item?id=23185672
+https://imdl.io/book/references/bittorrent.html
+
+
 ## Piece picker
 
 In order to ensure high availability of all file pieces in a torrent network,
