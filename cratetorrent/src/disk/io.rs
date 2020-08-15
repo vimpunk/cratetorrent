@@ -612,6 +612,7 @@ impl Piece {
             .values()
             .map(|b| IoVec::from_slice(&b))
             .collect();
+        // the actual slice of blocks being worked on
         let mut bufs = blocks.as_mut_slice();
         // the offset at which we need to write in torrent, which is updated
         // with each write
@@ -668,7 +669,7 @@ mod tests {
 
     const DOWNLOAD_DIR: &str = "/tmp";
 
-    // Tests that writing blocks to a single file using `TorrentFile` works.
+    /// Tests that writing blocks to a single file using `TorrentFile` works.
     #[test]
     fn should_write_blocks_to_torrent_file() {
         let files = 0..1;
@@ -713,7 +714,7 @@ mod tests {
             .expect("couldn't remove test file");
     }
 
-    // Tests that writing piece to a single file works.
+    /// Tests that writing piece to a single file works.
     #[test]
     fn should_write_piece_to_single_file() {
         let files = 0..1;
@@ -754,7 +755,7 @@ mod tests {
             .expect("couldn't remove test file");
     }
 
-    // Tests that writing piece to multiple files works.
+    /// Tests that writing piece to multiple files works.
     #[test]
     fn should_write_piece_to_multiple_files() {
         // piece spans 3 files
@@ -827,7 +828,7 @@ mod tests {
         }
     }
 
-    // Creates a piece for testing that has 4 blocks of length `BLOCK_LEN`.
+    /// Creates a piece for testing that has 4 blocks of length `BLOCK_LEN`.
     fn make_piece(files: Range<FileIndex>) -> Piece {
         let blocks = vec![
             (0 * BLOCK_LEN..1 * BLOCK_LEN)

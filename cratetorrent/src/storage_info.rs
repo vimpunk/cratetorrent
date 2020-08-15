@@ -182,7 +182,7 @@ impl FsStructure {
     /// Returns the total download size in bytes.
     ///
     /// Note that this is an O(n) operation for archive downloads, where n is
-    /// the number of files, so this value should ideally be cached.
+    /// the number of files, so the return value should ideally be cached.
     pub fn download_len(&self) -> u64 {
         match self {
             Self::File(file) => file.len,

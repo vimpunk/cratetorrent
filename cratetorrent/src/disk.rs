@@ -175,8 +175,8 @@ mod tests {
         crate::{block_count, storage_info::FsStructure, FileInfo, BLOCK_LEN},
     };
 
-    // Tests the allocation of a torrent, and then the allocation of the same
-    // torrent returning an error.
+    /// Tests the allocation of a torrent, and then the allocation of the same
+    /// torrent returning an error.
     #[tokio::test]
     async fn test_allocate_new_torrent() {
         let (_, disk_handle, mut alert_port) = spawn().unwrap();
@@ -222,8 +222,8 @@ mod tests {
         ));
     }
 
-    // Tests writing of a complete valid torrent's pieces and verifying that an
-    // alert of each disk write is returned by the disk task.
+    /// Tests writing of a complete valid torrent's pieces and verifying that an
+    /// alert of each disk write is returned by the disk task.
     #[tokio::test]
     async fn test_write_all_pieces() {
         let (_, disk_handle, mut alert_port) = spawn().unwrap();
@@ -288,8 +288,8 @@ mod tests {
             .expect("Failed to clean up disk test torrent file");
     }
 
-    // Calls the provided function for each block in piece, passing it the
-    // block's `BlockInfo`.
+    /// Calls the provided function for each block in piece, passing it the
+    /// block's `BlockInfo`.
     fn for_each_block(
         piece_index: usize,
         piece_len: u32,
@@ -318,8 +318,8 @@ mod tests {
         }
     }
 
-    // Tests writing of an invalid piece and verifying that an alert of it
-    // is returned by the disk task.
+    /// Tests writing of an invalid piece and verifying that an alert of it
+    /// is returned by the disk task.
     #[tokio::test]
     async fn test_write_invalid_piece() {
         let (_, disk_handle, mut alert_port) = spawn().unwrap();
@@ -373,7 +373,7 @@ mod tests {
         }
     }
 
-    // The disk IO test environment containing information of a valid torrent.
+    /// The disk IO test environment containing information of a valid torrent.
     struct Env {
         id: TorrentId,
         pieces: Vec<Vec<u8>>,
@@ -382,11 +382,11 @@ mod tests {
     }
 
     impl Env {
-        // Creates a new test environment.
-        //
-        // Tests are run in parallel so multiple environments must not clash,
-        // therefore the test name must be unique, which is included in the test
-        // environment's path. This also helps debugging.
+        /// Creates a new test environment.
+        ///
+        /// Tests are run in parallel so multiple environments must not clash,
+        /// therefore the test name must be unique, which is included in the test
+        /// environment's path. This also helps debugging.
         fn new(test_name: &str) -> Self {
             let id = 0;
             let download_dir = Path::new("/tmp");

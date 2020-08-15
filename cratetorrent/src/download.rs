@@ -59,7 +59,6 @@ impl PieceDownload {
 
             // only pick block if it's free
             if let Block::Free = block {
-                // FIXME: the last block may not be a multiple of
                 blocks.push(BlockInfo {
                     piece_index: self.index,
                     offset: i as u32 * BLOCK_LEN,

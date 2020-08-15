@@ -647,8 +647,8 @@ each piece's offset in the torrent, and use this information to check which
 pieces intersect the files.
 
 More concretely, there are two options:
-- compute what pieces a file intersects with  at the beginning beginning of a
-  torrent, and store it with the file information,
+- compute what pieces a file intersects with  at the beginning of a torrent, and
+  store it with the file information,
 - or compute what files the piece intersects with when starting a piece
   download, storing it with the in-progress piece.
 
@@ -758,47 +758,28 @@ On the first write, to `file1`, we need to trim the second part of the block.
 Conversely, on the second write, to `file2`, we need to trim the first part.
 
 There is a problem here: trimming the iovec during the first write makes us lose
-the second part of the block (since we're working with references here to
+the second part of the block (since we're working with slices here to
 minimize allocations). There are two solutions:
-- Keep metadata about the trimmed iovec, if any, and restore the trimmed part
-  after the IO, [like in
-  tide](https://github.com/mandreyel/tide/blob/master/src/file.cpp#L403). 
-
-How this would work:
-detect that the file boundary is in the middle of an iovec. If so, we copy the
-iovec (this is cheap, it's just a fat pointer after all) and keep the second
-half (the trimmed off part) in an option, and trim the actual iovec. Once we're
-done, we can restore this iovec.
-One problem I see here is that it needs to work nicely with trimming buffers
-after a write.
-Notice that properly bounded iovecs are written to disk should be zero, so we
-can just throw those away.
-In fact, this leads to a more general solution: we can split iovecs in two at
-each write! The second half will necessarily be an option, for the cases when
-the iovecs are smaller than the file slice.
-
-```rust
-let (blocks_to_write, boundary_block_second_part, remaining_blocks) = self.split_blocks_at_file_boundary();
-```
-
-Note that we're keeping a copy of the original part.
-
-
 - When we detect that the file boundary is in the middle of an iovec, we
   construct a new vector of iovecs, that is bounded by the length of the file
   slice that we're writing to (we can use
   [copy-on-write](https://doc.rust-lang.org/std/borrow/enum.Cow.html) to
   seamlessly handle the resulting iovecs). This avoids overwriting the original
   iovecs, at a slight cost.
+- Keep metadata about the trimmed iovec, if any, and restore the trimmed part
+  after the IO, [like in
+  tide](https://github.com/mandreyel/tide/blob/master/src/file.cpp#L403). 
 
-The second approach is chosen (for now), due to simpler and clearer
-implementation. However, this case should be infrequent and so we can
-avoid allocating a new vector for most file writes when the iovecs don't exceed
-the file's length, keeping the hot path optimized.
+The second part is chosen for performance (as it is one of the main goals of
+cratetorrent), as well as for the joy of optimizing such small and
+self-contained code (this is a spare time project after all). The hairy logic is
+encapsulated in the [`iovecs` module](cratetorrent/src/iovecs.rs), providing a
+simple and safe abstraction.
 
 Finally, after each write, we must trim the front of the slice of iovecs by the
 number of bytes written, so that for the next file we don't write the wrong
-data (otherwise we'd be writing out-of-order, i.e. wrong data to the file).
+data (otherwise we'd be writing out-of-order, i.e. wrong data to the file). This
+is also taken care of by `IoVecs`.
 
 #### Anatomy of a piece write
 1. Create a new in-progress piece entry and calculate which files it spans, as
@@ -820,10 +801,6 @@ data (otherwise we'd be writing out-of-order, i.e. wrong data to the file).
   12. Step 10 and 11 may need to be repeated if not all bytes could be written
       to disk (as the syscall doesn't guarantee that all provided bytes can be
       written).
-
-
-### File synchronization
-TODO: write, later read
 
 
 ## Anatomy of a block fetch

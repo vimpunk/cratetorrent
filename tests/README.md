@@ -90,10 +90,23 @@ suffix).
 [`./test_single_connection_download.sh`](test_single_connection_download.sh)
 - **Containers**:
   - *seeds:*
-    - tranasmission
+    - transmission
   - *leeches:*
     - cratetorrent-cli
-- **File**: 1 MiB file at `assets/1mb-test.txt`
+- **Files**: 1 MiB file at `assets/1mb-test.txt`
+
+### Archive (multi-file) download
+
+- **Goal**: the successful download of a (small) archive consisting of a few
+  files and nested directories, asserting basic correctness
+- **Command**:
+  [`./test_single_connection_directory_download.sh.sh`](test_single_connection_directory_download.sh)
+- **Containers**:
+  - *seeds:*
+    - transmission
+  - *leeches:*
+    - cratetorrent-cli
+- **Files**: files in `assets/dir-test`
 
 
 ## Set up test environment

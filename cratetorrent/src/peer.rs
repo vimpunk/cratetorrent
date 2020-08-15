@@ -247,7 +247,7 @@ impl PeerSession {
         log::info!("Handling peer {} Bitfield message", self.addr);
         log::trace!("Bitfield: {:?}", bitfield);
 
-        // The bitfield raw data that is sent over the write may be longer than
+        // The bitfield raw data that is sent over the wire may be longer than
         // the logical pieces it represents, if there the number of pieces in
         // torrent is not a multiple of 8. Therefore, we need to slice off the
         // last part of the bitfield.
