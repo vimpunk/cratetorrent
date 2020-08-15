@@ -111,14 +111,21 @@ pub(crate) fn block_count(piece_len: u32) -> usize {
 mod tests {
     use super::*;
 
+    // An arbitrary piece length that is an exact multiple of the canonical
+    // block length (16 KiB).
+    const BLOCK_LEN_MULTIPLE_PIECE_LEN: u32 = 2 * BLOCK_LEN;
+
+    // An arbitrary piece length that is _not_ a multiple of the canonical block
+    // length and the amount with which it overlaps the nearest exact multiple
+    // value.
+    const OVERLAP: u32 = 234;
+    const UNEVEN_PIECE_LEN: u32 = 2 * BLOCK_LEN + OVERLAP;
+
     #[test]
     fn test_block_len() {
-        const BLOCK_LEN_MULTIPLE_PIECE_LEN: u32 = 2 * BLOCK_LEN;
         assert_eq!(block_len(BLOCK_LEN_MULTIPLE_PIECE_LEN, 0), BLOCK_LEN);
         assert_eq!(block_len(BLOCK_LEN_MULTIPLE_PIECE_LEN, 1), BLOCK_LEN);
 
-        const OVERLAP: u32 = 234;
-        const UNEVEN_PIECE_LEN: u32 = 2 * BLOCK_LEN + OVERLAP;
         assert_eq!(block_len(UNEVEN_PIECE_LEN, 0), BLOCK_LEN);
         assert_eq!(block_len(UNEVEN_PIECE_LEN, 1), BLOCK_LEN);
         assert_eq!(block_len(UNEVEN_PIECE_LEN, 2), OVERLAP);
@@ -127,12 +134,13 @@ mod tests {
     #[test]
     #[should_panic]
     fn test_block_len_invalid_index_panic() {
-        const BLOCK_LEN_MULTIPLE_PIECE_LEN: u32 = 2 * BLOCK_LEN;
         block_len(BLOCK_LEN_MULTIPLE_PIECE_LEN, 2);
     }
 
     #[test]
     fn test_block_count() {
-        todo!();
+        assert_eq!(block_count(BLOCK_LEN_MULTIPLE_PIECE_LEN), 2);
+
+        assert_eq!(block_count(UNEVEN_PIECE_LEN), 3);
     }
 }

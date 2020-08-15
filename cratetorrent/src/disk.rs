@@ -164,7 +164,10 @@ pub(crate) struct BatchWrite {
 mod tests {
     use {
         sha1::{Digest, Sha1},
-        std::{fs, path::PathBuf},
+        std::{
+            fs,
+            path::{Path, PathBuf},
+        },
     };
 
     use {
@@ -193,11 +196,9 @@ mod tests {
         // wait for result on alert port
         let alert = alert_port.recv().await.unwrap();
         match alert {
-            Alert::TorrentAllocation(Ok(allocation)) => {
-                assert_eq!(allocation.id, id);
-            }
-            _ => {
-                assert!(false, "torrent could not be allocated");
+            Alert::TorrentAllocation(res) => {
+                assert!(res.is_ok());
+                assert_eq!(res.unwrap().id, id);
             }
         }
 
@@ -206,7 +207,7 @@ mod tests {
             FsStructure::File(file) => file,
             _ => unreachable!(),
         };
-        assert!(file.path.is_file());
+        assert!(info.download_dir.join(&file.path).is_file());
 
         // try to allocate the same torrent a second time
         disk_handle
@@ -279,7 +280,11 @@ mod tests {
         }
 
         // clean up test env
-        fs::remove_file(&info.download_dir)
+        let file = match &info.structure {
+            FsStructure::File(file) => file,
+            _ => unreachable!(),
+        };
+        fs::remove_file(info.download_dir.join(&file.path))
             .expect("Failed to clean up disk test torrent file");
     }
 
@@ -366,10 +371,6 @@ mod tests {
         } else {
             assert!(false, "piece could not be written to disk");
         }
-
-        // download file exists as it's preallocated, but it should be empty as
-        // invalid piece must not be written to disk
-        assert_eq!(info.download_dir.metadata().unwrap().len(), 0);
     }
 
     // The disk IO test environment containing information of a valid torrent.
@@ -388,10 +389,12 @@ mod tests {
         // environment's path. This also helps debugging.
         fn new(test_name: &str) -> Self {
             let id = 0;
-            let download_path =
-                PathBuf::from(format!("/tmp/torrent_disk_test_{}", test_name));
+            let download_dir = Path::new("/tmp");
+            let download_rel_path =
+                PathBuf::from(format!("torrent_disk_test_{}", test_name));
             let piece_len: u32 = 4 * 0x4000;
-            // last piece is slightly shorter to test that it is handled correctly
+            // last piece is slightly shorter, to test that it is handled
+            // correctly
             let last_piece_len: u32 = piece_len - 935;
             let pieces: Vec<Vec<u8>> = vec![
                 (0..piece_len).map(|b| (b % 256) as u8).collect(),
@@ -417,9 +420,17 @@ mod tests {
             assert_eq!(piece_hashes.len(), pieces.len() * 20);
 
             // clean up any potential previous test env
-            if download_path.exists() {
-                fs::remove_file(&download_path)
-                    .expect("Failed to clean up disk test torrent file");
+            {
+                let download_path = download_dir.join(&download_rel_path);
+                if download_path.is_file() {
+                    fs::remove_file(&download_path).expect(
+                        "Failed to clean up previous disk test torrent file",
+                    );
+                } else if download_path.is_dir() {
+                    fs::remove_dir_all(&download_path).expect(
+                        "Failed to clean up previous disk test torrent dir",
+                    );
+                }
             }
 
             let download_len = pieces.iter().fold(0, |mut len, piece| {
@@ -431,9 +442,9 @@ mod tests {
                 piece_len,
                 last_piece_len,
                 download_len,
-                download_dir: download_path.clone(),
+                download_dir: download_dir.to_path_buf(),
                 structure: FsStructure::File(FileInfo {
-                    path: download_path,
+                    path: download_rel_path,
                     torrent_offset: 0,
                     len: download_len,
                 }),

@@ -433,8 +433,8 @@ struct TorrentFile {
 }
 
 impl TorrentFile {
-    /// Opens the file in create and write mode at the path defined in the file
-    /// info.
+    /// Opens the file in create, read, and write modes at the path of combining the
+    /// download directory and the path defined in the file info.
     fn new(
         download_dir: &Path,
         info: FileInfo,
@@ -448,6 +448,7 @@ impl TorrentFile {
         let handle = OpenOptions::new()
             .create(true)
             .write(true)
+            .read(true)
             .open(&path)
             .map_err(|e| {
                 log::warn!("Failed to open file {:?}", path);
@@ -661,7 +662,7 @@ impl Piece {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::{io::Read, path::PathBuf};
 
     use {super::*, crate::BLOCK_LEN};
 
@@ -673,8 +674,9 @@ mod tests {
         let files = 0..1;
         let piece = make_piece(files);
 
-        let file = TorrentFile::new(
-            Path::new(DOWNLOAD_DIR),
+        let download_dir = Path::new(DOWNLOAD_DIR);
+        let mut file = TorrentFile::new(
+            download_dir,
             FileInfo {
                 path: PathBuf::from("TorrentFile_write_block.test"),
                 torrent_offset: 0,
@@ -683,20 +685,23 @@ mod tests {
         )
         .expect("couldn't create test file");
 
+        // write buffers
         let file_slice = file.info.get_slice(0, piece.len as u64);
         let mut iovecs: Vec<_> = piece
             .blocks
             .values()
             .map(|b| IoVec::from_slice(&b))
             .collect();
-
         let tail = file
             .write_blocks(file_slice, &mut iovecs)
             .expect("couldn't write piece to file");
         assert!(tail.is_empty(), "not all blocks were written to disk");
 
-        let file_content =
-            fs::read(&file.info.path).expect("couldn't read test file");
+        // read and compare
+        let mut file_content = Vec::new();
+        file.handle
+            .read_to_end(&mut file_content)
+            .expect("couldn't read test file");
         assert_eq!(
             file_content,
             piece.blocks.values().cloned().flatten().collect::<Vec<_>>(),
@@ -704,7 +709,8 @@ mod tests {
         );
 
         // clean up env
-        fs::remove_file(&file.info.path).expect("couldn't remove test file");
+        fs::remove_file(download_dir.join(&file.info.path))
+            .expect("couldn't remove test file");
     }
 
     // Tests that writing piece to a single file works.
@@ -712,8 +718,9 @@ mod tests {
     fn should_write_piece_to_single_file() {
         let files = 0..1;
         let piece = make_piece(files);
+        let download_dir = Path::new(DOWNLOAD_DIR);
         let file = TorrentFile::new(
-            Path::new(DOWNLOAD_DIR),
+            download_dir,
             FileInfo {
                 path: PathBuf::from("Piece_write_single_file.test"),
                 torrent_offset: 0,
@@ -730,9 +737,11 @@ mod tests {
             .expect("Could not write piece to file");
 
         // compare file content to piece
-        let file = files[0].lock().unwrap();
-        let file_content =
-            fs::read(&file.info.path).expect("couldn't read test file");
+        let mut file = files[0].lock().unwrap();
+        let mut file_content = Vec::new();
+        file.handle
+            .read_to_end(&mut file_content)
+            .expect("couldn't read test file");
         assert_eq!(
             file_content,
             piece.blocks.values().cloned().flatten().collect::<Vec<_>>(),
@@ -741,7 +750,8 @@ mod tests {
         );
 
         // clean up env
-        fs::remove_file(&file.info.path).expect("couldn't remove test file");
+        fs::remove_file(download_dir.join(&file.info.path))
+            .expect("couldn't remove test file");
     }
 
     // Tests that writing piece to multiple files works.
@@ -750,8 +760,9 @@ mod tests {
         // piece spans 3 files
         let files = 0..3;
         let piece = make_piece(files);
+        let download_dir = Path::new(DOWNLOAD_DIR);
         let file1 = TorrentFile::new(
-            Path::new(DOWNLOAD_DIR),
+            download_dir,
             FileInfo {
                 path: PathBuf::from("Piece_write_files1.test"),
                 torrent_offset: 0,
@@ -760,7 +771,7 @@ mod tests {
         )
         .expect("couldn't create test file 1");
         let file2 = TorrentFile::new(
-            Path::new(DOWNLOAD_DIR),
+            download_dir,
             FileInfo {
                 path: PathBuf::from("Piece_write_files2.test"),
                 torrent_offset: file1.info.len,
@@ -769,7 +780,7 @@ mod tests {
         )
         .expect("couldn't create test file 2");
         let file3 = TorrentFile::new(
-            Path::new(DOWNLOAD_DIR),
+            download_dir,
             FileInfo {
                 path: PathBuf::from("Piece_write_files3.test"),
                 torrent_offset: file2.info.torrent_offset + file2.info.len,
@@ -787,9 +798,11 @@ mod tests {
 
         // compare contents of files to piece
         for file in files.iter() {
-            let file = file.lock().unwrap();
-            let file_content =
-                fs::read(&file.info.path).expect("couldn't read test file");
+            let mut file = file.lock().unwrap();
+            let mut file_content = Vec::new();
+            file.handle
+                .read_to_end(&mut file_content)
+                .expect("couldn't read test file");
             // compare the content of file to the portion that corresponds to
             // piece
             assert_eq!(
@@ -809,8 +822,8 @@ mod tests {
 
         // clean up env
         for file in files.iter() {
-            fs::remove_file(&file.lock().unwrap().info.path)
-                .expect("couldn't remove test file");
+            let path = download_dir.join(&file.lock().unwrap().info.path);
+            fs::remove_file(path).expect("couldn't remove test file");
         }
     }
 
