@@ -36,9 +36,9 @@ cargo doc --document-private-items --workspace --exclude cratetorrent-cli --open
 
 ## Overview
 
-Currently the "engine" is simplified to perform only a download of a single file
-into memory via a single connection. Still, such a simple goal requires quite a
-few components (each detailed in its own section):
+Currently the "engine" is simplified to perform a download via a single
+connection. Still, such a simple goal requires quite a few components (each
+detailed in its own section):
 
 - [metainfo](#metainfo), which contains necessary information to start the
   torrent;
