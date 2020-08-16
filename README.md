@@ -8,7 +8,7 @@ C++.
 
 ## Features
 
-Single download of a file with a single peer connection if given the address of
+Single download of a torrent with a single peer connection if given the address of
 a seed and the path to the torrent metainfo. No multiple torrents, no seeding,
 no optimizations, or any other feature you might expect from a full-fledged
 BitTorrent library.
