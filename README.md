@@ -8,13 +8,13 @@ C++.
 
 ## Features
 
-Single download of a torrent with a single peer connection if given the address of
-a seed and the path to the torrent metainfo. No multiple torrents, no seeding,
-no optimizations, or any other feature you might expect from a full-fledged
-BitTorrent library.
+Single download of a torrent with multiple peer connections, if given their
+addresses and the path to the torrent metainfo. No multiple torrents, no
+seeding, no optimizations, or any other feature you might expect from a
+full-fledged BitTorrent library.
 
 Features are continuously added, please see the [project
-milestones](https://github.com/mandreyel/cratetorrent/issues/26).  Eventually, I
+milestones](https://github.com/mandreyel/cratetorrent/issues/26). Eventually, I
 hope to develop cratetorrent into a full-fledged BitTorrent engine library that
 can be used as the engine underneath torrent clients, so this means that
 features supported by popular clients (such as DHT, magnet links, BitTorrent

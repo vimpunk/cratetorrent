@@ -19,6 +19,12 @@ seed_port=51413
 seed_addr="${seed_ip}:${seed_port}"
 seed_container=tr-seed-1
 
+seed2_ip=172.17.0.3
+# this is the default Transmission port
+seed2_port=51413
+seed2_addr="${seed2_ip}:${seed2_port}"
+seed2_container=tr-seed-2
+
 assets_dir="$(pwd)/assets"
 
 # Verifies that the downloaded file is the same as its source file.

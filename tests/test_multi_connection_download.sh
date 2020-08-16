@@ -1,15 +1,16 @@
 #!/bin/bash
 
-# This test sets up a single transmission seeder and a cratetorrent leecher and
-# asserts that cratetorrent downloads a single 1 MiB file from the seed
+# This test sets up two transmission seeders and a cratetorrent leecher and
+# asserts that cratetorrent downloads a single 1 MiB file from both seeds
 # correctly.
 
 set -e
 
 source common.sh
 
-# start the container (if it's not already running)
+# start the seeds (if not already running)
 ./start_transmission_seed.sh --name "${seed_container}" --ip "${seed_ip}"
+./start_transmission_seed.sh --name "${seed2_container}" --ip "${seed_ip}"
 
 torrent_name=1mb-test.txt
 # the seeded file
@@ -28,11 +29,15 @@ if [ ! -f "${src_path}" ]; then
     torrent_size=$(( 1024 * 1024 )) # 1 MiB
     # first, we need to generate a random file
     ./create_random_file.sh --path "${src_path}" --size "${torrent_size}"
-    # then start seeding it
+    # then start seeding it by both seeds
     ./seed_new_torrent.sh \
         --name "${torrent_name}" \
         --path "${src_path}" \
         --seed "${seed_container}"
+    ./seed_new_torrent.sh \
+        --name "${torrent_name}" \
+        --path "${src_path}" \
+        --seed "${seed2_container}"
 fi
 
 # sanity check that after starting the seeding, the source files
@@ -75,7 +80,7 @@ rust_log=${RUST_LOG:-cratetorrent=trace,cratetorrent_cli=trace}
 time docker run \
     -ti \
     --rm \
-    --env SEEDS="${seed_addr}" \
+    --env SEEDS="${seed_addr},${seed2_addr}" \
     --env METAINFO_PATH="${metainfo_cont_path}" \
     --env DOWNLOAD_DIR="${download_dir}" \
     --env RUST_LOG="${rust_log}" \

@@ -112,59 +112,75 @@ fi
 
 # The source to be seeded must be inside the container. For this reason, if it
 # is not already there, we copy it in the torrent downloads complete folder.
-# This should be a noop even for large files as we're not actually modifying the
-# source so linux should do a copy-on-write here.
+# This should be a cheap even for large files as we're not actually modifying
+# the source so linux should do a copy-on-write here.
 torrent_path="${tr_downloads_dir}/complete/${torrent_name}"
 if [ "${path}" != "${torrent_path}" ]; then
     echo "Copying torrent from source ${path} to seed dir at ${torrent_path}"
     cp -r "${path}" "${torrent_path}"
 fi
 
-# create the torrent inside the seed container
-#
-# NOTE: The file is not created with the `.torrent` suffix on purpose! Since the
-# Transmission container can only be run as root, the metainfo file is also
-# created as root.  However, this would cause a permission denied error for the
-# Transmission container itself, as it is running as the specified user/group.
-# By not specifying the `.torrent` suffix, Transmission won't pick it up, so we
-# get a chance to change its permissions before adding the suffix. 
-#
-# It may be possible to solve this by spawning a subshell with a different EUID
-# and execute the `transmission-create` command there, but currently it is not
-# clear how to do this.
+tr_metainfo_basepath="${tr_watch_dir}/${torrent_name}"
+tr_metainfo_path="${tr_metainfo_basepath}.torrent"
+assets_metainfo_path="${assets_dir}/${torrent_name}.torrent"
 
-echo "Creating torrent metainfo file"
-docker exec "${seed_container}" transmission-create \
-  -o "/watch/${torrent_name}" \
-  "/downloads/complete/${torrent_name}"
+# The metainfo for the torrent may already exist if another seed is already
+# seeding it. If it doesn't, create it inside the seed container and
+# copy the metainfo into the assets folder so that it is available for others.
+# If it exists, we just need to copy the existing metainfo inside the
+# container.
+if [ -f "${assets_metainfo_path}" ]; then
+    # the metainfo in assets is just a symlink so we need to follow it
+    cp --dereference "${assets_metainfo_path}" "${tr_metainfo_path}"
 
-# change ownership of the metainfo file to the same user whose `UID` and `GID`
-# were given to the seed container
-#
-# TODO: make this work without sudo
-echo "Changing metainfo owner from root to $USER"
-metainfo_path="${tr_watch_dir}/${torrent_name}"
-sudo chown $USER:$USER "${metainfo_path}"
+    # wait for Transmission to pick up the file
+    sleep 5
+else 
+    # NOTE: The file is not created with the `.torrent` suffix on purpose! Since the
+    # Transmission container can only be run as root, the metainfo file is also
+    # created as root.  However, this would cause a permission denied error for the
+    # Transmission container itself, as it is running as the specified user/group.
+    # By not specifying the `.torrent` suffix, Transmission won't pick it up, so we
+    # get a chance to change its permissions before adding the suffix. 
+    #
+    # It may be possible to solve this by spawning a subshell with a different EUID
+    # and execute the `transmission-create` command there, but currently it is not
+    # clear how to do this.
 
-# rename the torrent file to have the `.torrent` suffix, which will make the
-# Transmission daemon automatically start seeding the torrent
-echo "Adding .torrent suffix to metainfo filename"
-mv "${metainfo_path}" "${metainfo_path}.torrent"
-# wait for Transmission to pick up the file
-sleep 5
-# we need to add the `.added` suffix to our path as that's what Transmission does after
-# picking up a new metainfo file
-metainfo_path="${metainfo_path}.torrent.added"
-# sanity check
-if [ ! -f "${metainfo_path}" ]; then
-    echo "Error: could not find metainfo ${metainfo_path} after starting torrent"
-    exit 7
+    echo "Creating torrent metainfo file"
+    docker exec "${seed_container}" transmission-create \
+      -o "/watch/${torrent_name}" \
+      "/downloads/complete/${torrent_name}"
+
+    # change ownership of the metainfo file to the same user whose `UID` and `GID`
+    # were given to the seed container
+    #
+    # TODO: make this work without sudo
+    echo "Changing metainfo owner from root to $USER"
+    sudo chown $USER:$USER "${tr_metainfo_basepath}"
+
+    # rename the torrent file to have the `.torrent` suffix, which will make the
+    # Transmission daemon automatically start seeding the torrent
+    echo "Adding .torrent suffix to metainfo filename"
+    mv "${tr_metainfo_basepath}" "${tr_metainfo_path}"
+
+    # wait for Transmission to pick up the file
+    sleep 5
+
+    # we need to add the `.added` suffix to our path as that's what Transmission does after
+    # picking up a new metainfo file
+    tr_metainfo_path="${tr_metainfo_path}.added"
+    # sanity check
+    if [ ! -f "${tr_metainfo_path}" ]; then
+        echo "Error: could not find metainfo ${tr_metainfo_path} after starting torrent"
+        exit 7
+    fi
+
+    # link metainfo file in the transmission watch directory to the root of the
+    # assets dir for use by other scrips
+    echo "Linking metainfo to assets directory root"
+    ln -s "${tr_metainfo_path}" ${assets_metainfo_path}
 fi
-
-# link metainfo file in the transmission watch directory to the root of the
-# assets dir for the convenience of other scripts
-echo "Linking metainfo to assets directory root"
-ln -s "${metainfo_path}" "${assets_dir}/${torrent_name}.torrent"
 
 echo "Done!"
 echo "Torrent ${torrent_name} is seeded by container ${seed_container}"

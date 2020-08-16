@@ -17,12 +17,16 @@ pub fn run_torrent(
     client_id: PeerId,
     download_dir: PathBuf,
     metainfo: Metainfo,
-    seed_addr: SocketAddr,
+    seeds: Vec<SocketAddr>,
 ) -> Result<()> {
+    if seeds.is_empty() {
+        log::warn!("List of seeds is empty, cannot download torrent");
+        return Ok(());
+    }
+
     let mut rt = Runtime::new()?;
     rt.block_on(async move {
-        start_disk_and_torrent(client_id, download_dir, metainfo, seed_addr)
-            .await
+        start_disk_and_torrent(client_id, download_dir, metainfo, seeds).await
     })
 }
 
@@ -30,7 +34,7 @@ async fn start_disk_and_torrent(
     client_id: PeerId,
     download_dir: PathBuf,
     metainfo: Metainfo,
-    seed_addr: SocketAddr,
+    seeds: Vec<SocketAddr>,
 ) -> Result<()> {
     let (disk_join_handle, disk, mut alert_port) = disk::spawn()?;
 
@@ -75,7 +79,7 @@ async fn start_disk_and_torrent(
         info_hash,
         storage_info,
         client_id,
-        seed_addr,
+        &seeds,
     )?;
     // run torrent to completion
     torrent.start().await?;

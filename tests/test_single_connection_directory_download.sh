@@ -131,7 +131,7 @@ rust_log=${RUST_LOG:-cratetorrent=trace,cratetorrent_cli=trace}
 time docker run \
     -ti \
     --rm \
-    --env SEED="${seed_addr}" \
+    --env SEEDS="${seed_addr}" \
     --env METAINFO_PATH="${metainfo_cont_path}" \
     --env DOWNLOAD_DIR="${download_dir}" \
     --env RUST_LOG="${rust_log}" \

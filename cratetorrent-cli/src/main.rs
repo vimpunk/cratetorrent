@@ -11,11 +11,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let matches = App::new("Cratetorrent CLI")
         .version("1.0.0-alpha.1")
         .arg(
-            Arg::with_name("seed")
+            Arg::with_name("seeds")
                 .short("s")
-                .long("seed")
-                .value_name("SOCKET_ADDR")
-                .help("The <ip>:<port> pair of the BitTorrent seed")
+                .long("seeds")
+                .value_name("SOCKET_ADDRS")
+                .help(
+                    "A comma separated list of <ip>:<port> pairs of the seeds",
+                )
                 .takes_value(true),
         )
         .arg(
@@ -37,10 +39,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .get_matches();
 
     // parse cli args
-    let seed = matches
-        .value_of("seed")
-        .ok_or_else(|| "--seed must be set")?
-        .parse()?;
+    let seeds = matches
+        .value_of("seeds")
+        .ok_or_else(|| "--seeds must be set")?
+        .split(",")
+        .filter_map(|s| s.parse().ok())
+        .collect();
     let metainfo_path = matches
         .value_of("metainfo")
         .ok_or_else(|| "--seed must be set")?;
@@ -61,7 +65,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut client_id = [0; 20];
     client_id.copy_from_slice(CLIENT_ID.as_bytes());
 
-    run_torrent(client_id, download_dir, metainfo, seed)?;
+    run_torrent(client_id, download_dir, metainfo, seeds)?;
 
     Ok(())
 }
