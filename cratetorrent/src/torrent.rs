@@ -21,7 +21,7 @@ use crate::{
 };
 
 pub(crate) struct Torrent {
-    /// The only connection the torrent is connecting to.
+    /// The seeds from which we're downloading the torrent.
     seeds: Vec<Peer>,
     /// General status and information about the torrent.
     status: Status,
@@ -54,6 +54,15 @@ impl Torrent {
     ) -> Result<Self> {
         log::trace!("Creating torrent {} with seeds: {:?}", id, seeds);
 
+        let seeds = seeds
+            .iter()
+            .map(|&addr| Peer {
+                addr,
+                chan: None,
+                handle: None,
+            })
+            .collect();
+
         let piece_count = storage_info.piece_count;
         let status = Status {
             shared: Arc::new(SharedStatus {
@@ -72,14 +81,7 @@ impl Torrent {
         let disk_alert_port = disk_alert_port.fuse();
 
         Ok(Self {
-            seeds: seeds
-                .iter()
-                .map(|&addr| Peer {
-                    addr,
-                    chan: None,
-                    handle: None,
-                })
-                .collect(),
+            seeds,
             status,
             piece_picker,
             disk,
@@ -138,10 +140,11 @@ impl Torrent {
                 disk_alert = self.disk_alert_port.select_next_some() => {
                     let should_stop = self.handle_disk_alert(disk_alert).await?;
                     if should_stop {
-                        // we don't particularly care if we weren't successful
-                        // in sending the command (for now)
+                        // send shutdown command to all connected peers
                         for peer in self.seeds.iter() {
                             if let Some(chan) = &peer.chan {
+                                // we don't particularly care if we weren't successful
+                                // in sending the command (for now)
                                 chan.send(peer::Command::Shutdown).ok();
                             }
                         }

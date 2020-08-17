@@ -90,7 +90,7 @@ suffix).
 [`./test_single_connection_download.sh`](test_single_connection_download.sh)
 - **Containers**:
   - *seeds:*
-    - transmission
+    - tr-seed-1
   - *leeches:*
     - cratetorrent-cli
 - **Files**: 1 MiB file at `assets/1mb-test.txt`
@@ -103,10 +103,24 @@ suffix).
   [`./test_single_connection_directory_download.sh.sh`](test_single_connection_directory_download.sh)
 - **Containers**:
   - *seeds:*
-    - transmission
+    - tr-seed-1
   - *leeches:*
     - cratetorrent-cli
 - **Files**: files in `assets/dir-test`
+
+### Multi-peer download
+
+- **Goal**: the successful download of a single (small) file from multiple
+  peers, asserting basic correctness
+- **Command**:
+[`./test_multi_connection_download.sh`](test_multi_connection_download.sh)
+- **Containers**:
+  - *seeds:*
+    - tr-seed-1
+    - tr-seed-2
+  - *leeches:*
+    - cratetorrent-cli
+- **Files**: 1 MiB file at `assets/1mb-test.txt`
 
 
 ## Set up test environment

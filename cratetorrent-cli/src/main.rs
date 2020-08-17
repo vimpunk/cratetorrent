@@ -1,6 +1,6 @@
 use {
     clap::{App, Arg},
-    cratetorrent::{engine::run_torrent, metainfo::*},
+    cratetorrent::metainfo::*,
     std::{fs, path::PathBuf},
 };
 
@@ -65,7 +65,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut client_id = [0; 20];
     client_id.copy_from_slice(CLIENT_ID.as_bytes());
 
-    run_torrent(client_id, download_dir, metainfo, seeds)?;
+    cratetorrent::engine::run_torrent(
+        client_id,
+        download_dir,
+        metainfo,
+        seeds,
+    )?;
 
     Ok(())
 }
