@@ -1,17 +1,18 @@
 #!/bin/bash
 
-# This test sets up a single transmission seeder and a cratetorrent leecher and
-# asserts that cratetorrent downloads a single 1 MiB file from the seed
+# This test sets up two transmission seeders and a cratetorrent leecher and
+# asserts that cratetorrent downloads a single 1 MiB file from both seeds
 # correctly.
 
 set -e
 
 source common.sh
 
-# start the container (if it's not already running)
+# start the seeds (if not already running)
 ./start_transmission_seed.sh --name "${seed_container}"
+./start_transmission_seed.sh --name "${seed2_container}"
 
-torrent_name=1mb-test.txt
+torrent_name=1mb-muti-peer-test.txt
 # the seeded file
 src_path="${assets_dir}/${torrent_name}"
 # and its metainfo
@@ -33,11 +34,15 @@ if [ ! -f "${src_path}" ]; then
     torrent_size=$(( 1024 * 1024 )) # 1 MiB
     # first, we need to generate a random file
     ./create_random_file.sh --path "${src_path}" --size "${torrent_size}"
-    # then start seeding it
+    # then start seeding it by both torrents
     ./seed_new_torrent.sh \
         --name "${torrent_name}" \
         --path "${src_path}" \
         --seed "${seed_container}"
+    ./seed_new_torrent.sh \
+        --name "${torrent_name}" \
+        --path "${src_path}" \
+        --seed "${seed2_container}"
 fi
 
 ################################################################################
@@ -48,7 +53,7 @@ fi
     --src-path "${src_path}" \
     --download-dir "${download_dir}" \
     --metainfo-path "${metainfo_path}" \
-    --seeds "${seed_container}"
+    --seeds "${seed_container},${seed2_container}"
 
 ################################################################################
 # 3. Verification

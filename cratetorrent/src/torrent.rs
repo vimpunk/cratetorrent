@@ -21,10 +21,8 @@ use crate::{
 };
 
 pub(crate) struct Torrent {
-    /// The only connection the torrent is connecting to.
-    // TODO: this will be a hashmap of peers once we support multiple
-    // connections
-    seed: Peer,
+    /// The seeds from which we're downloading the torrent.
+    seeds: Vec<Peer>,
     /// General status and information about the torrent.
     status: Status,
     /// This is passed to peer and tracks the availability of our pieces as well
@@ -52,9 +50,18 @@ impl Torrent {
         info_hash: Sha1Hash,
         storage_info: StorageInfo,
         client_id: PeerId,
-        seed_addr: SocketAddr,
+        seeds: &[SocketAddr],
     ) -> Result<Self> {
-        log::trace!("Creating torrent {} with seed {}", id, seed_addr);
+        log::trace!("Creating torrent {} with seeds: {:?}", id, seeds);
+
+        let seeds = seeds
+            .iter()
+            .map(|&addr| Peer {
+                addr,
+                chan: None,
+                handle: None,
+            })
+            .collect();
 
         let piece_count = storage_info.piece_count;
         let status = Status {
@@ -74,10 +81,7 @@ impl Torrent {
         let disk_alert_port = disk_alert_port.fuse();
 
         Ok(Self {
-            seed: Peer {
-                addr: seed_addr,
-                handle: None,
-            },
+            seeds,
             status,
             piece_picker,
             disk,
@@ -93,15 +97,18 @@ impl Torrent {
         // record the torrent starttime
         self.status.start_time = Some(Instant::now());
 
-        // start the seed peer session
-        let (mut session, peer_chan) = PeerSession::outbound(
-            Arc::clone(&self.status.shared),
-            Arc::clone(&self.piece_picker),
-            self.disk.clone(),
-            self.seed.addr,
-        );
-        let handle = task::spawn(async move { session.start().await });
-        self.seed.handle = Some(handle);
+        // start all seed peer sessions
+        for peer in self.seeds.iter_mut() {
+            let (mut session, chan) = PeerSession::outbound(
+                Arc::clone(&self.status.shared),
+                Arc::clone(&self.piece_picker),
+                self.disk.clone(),
+                peer.addr,
+            );
+            let handle = task::spawn(async move { session.start().await });
+            peer.chan = Some(chan);
+            peer.handle = Some(handle);
+        }
 
         let mut loop_timer = time::interval(Duration::from_secs(1)).fuse();
         let mut prev_instant = None;
@@ -133,9 +140,14 @@ impl Torrent {
                 disk_alert = self.disk_alert_port.select_next_some() => {
                     let should_stop = self.handle_disk_alert(disk_alert).await?;
                     if should_stop {
-                        // we don't particularly care if we weren't successful
-                        // in sending the command (for now)
-                        peer_chan.send(peer::Command::Shutdown).ok();
+                        // send shutdown command to all connected peers
+                        for peer in self.seeds.iter() {
+                            if let Some(chan) = &peer.chan {
+                                // we don't particularly care if we weren't successful
+                                // in sending the command (for now)
+                                chan.send(peer::Command::Shutdown).ok();
+                            }
+                        }
                         return Ok(());
                     }
                 }
@@ -204,8 +216,13 @@ struct Peer {
     /// peer has to be a seed as currently we only support downloading and no
     /// seeding.
     addr: SocketAddr,
-    /// The join handle to the peer session task. This is set when the session
-    /// is started.
+    /// The channel on which to communicate with the peer session.
+    ///
+    /// This is set when the session is started.
+    chan: Option<peer::Sender>,
+    /// The join handle to the peer session task.
+    ///
+    /// This is set when the session is started.
     handle: Option<task::JoinHandle<Result<()>>>,
 }
 

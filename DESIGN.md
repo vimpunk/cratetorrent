@@ -36,8 +36,8 @@ cargo doc --document-private-items --workspace --exclude cratetorrent-cli --open
 
 ## Overview
 
-Currently the "engine" is simplified to perform a download via a single
-connection. Still, such a simple goal requires quite a few components (each
+Currently the "engine" is simplified to perform a download from seed-only
+connections. Still, such a simple goal requires quite a few components (each
 detailed in its own section):
 
 - [metainfo](#metainfo), which contains necessary information to start the
@@ -46,9 +46,8 @@ detailed in its own section):
 - [torrent](#torrent), which coordinates the download of a torrent;
 - a [piece picker](#piece-picker) per torrent, that selects the next piece to
   download;
-- [peer connection](#peer-connection) in a torrent (currently only a single
-  downloader), which implement the peer protocol and perform the actual
-  download;
+- [peer connection](#peer-connection) in a torrent, which implement the peer
+  protocol and perform the actual download (any number may exist);
 - in progress [piece download](#piece-download), which track the state of an
   ongoing piece download;
 - [disk IO](#disk-io), which saves downloaded file pieces.
@@ -56,10 +55,11 @@ detailed in its own section):
 At the end of the document, there is an [overview](#anatomy-of-a-block-fetch) of
 a block fetch, incorporating the above key components.
 
-The binary takes as command line arguments the single seed IP address and port
-pair, the torrent metainfo, and sets up a single torrent, piece picker, and a single peer
-connection to that seed. All IO is done asynchronously, and the torrent has a
-periodic update function, run every second.
+The binary takes as command line arguments the IP address and port pairs of all
+seeds to download from (must be at least one), the torrent metainfo, and sets up
+a single torrent, piece picker, and peer connections to the seeds. All
+IO is done asynchronously, and the torrent has a periodic update function, run
+every second.
 
 
 ## Metainfo
@@ -125,8 +125,8 @@ a public method to start a torrent until completion.
 
 ## Torrent
 
-- Contains the piece picker and a single connection to a seed from which to
-  download the torrent.
+- Contains the piece picker and connections to all seed sfrom which to download
+  the torrent.
 - Also contains other metadata relevant to the torrent, such as its info hash,
   the files it needs to download, the destination directory, and others.
 - Torrent tick: periodically loops through all its peer connections and performs
@@ -136,11 +136,12 @@ a public method to start a torrent until completion.
 ### Peer sessions
 
 A peer session is spawned on a new
-  [task](https://docs.rs/tokio/0.2.13/tokio/task), and torrent and the peer
-  session communicate with each other via async `mpsc` channels. This is
-  necessary as peer is spawned on another task, which from the point of view of
-  the borrow checker is as though it were spawned on another thread, so we can't
-  just call methods of peer session without further synchronization.
+[task](https://docs.rs/tokio/0.2.13/tokio/task), and torrent and the peer
+session communicate with each other via async `mpsc` channels. This is
+necessary as a peer connection is spawned on another task, which from the
+point of view of the borrow checker is as though it were spawned on another
+thread, so we can't just call methods of peer session without further
+synchronization.
 
 It would be possible to spawn the peer task
 [locally](https://docs.rs/tokio/0.2.20/tokio/task/fn.spawn_local.html), but we'd
@@ -597,7 +598,7 @@ directory named after the torrent. There may be additional subdirectories in a
 torrent, so the whole torrent's file system structure needs to be set up before
 the download is begun. 
 
-For single file downloads supported the file allocation is very simple: the
+For single file downloads support the file allocation is very simple: the
 to-be-downloaded file is checked for existence and the first write creates the
 file.
 

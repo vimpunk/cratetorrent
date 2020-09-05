@@ -2,6 +2,8 @@
 
 set -e
 
+source common.sh
+
 function print_help {
     echo -e "
 This script starts a Transmission seed container with the specified parameters,
@@ -11,7 +13,6 @@ USAGE: $1 --name <name>
 
 OPTIONS:
     -n|--name   The name to give to the container.
-    -i|--ip     The IP address of the container.
     -h|--help   Print this help message.
     "
 }
@@ -20,9 +21,6 @@ for arg in "$@"; do
     case "${arg}" in
         -n|--name)
             name=$2
-        ;;
-        -i|--ip)
-            ip=$2
         ;;
         --h|--help)
             print_help
@@ -37,14 +35,6 @@ if [ -z "${name}" ]; then
     print_help
     exit 1
 fi
-
-if [ -z "${ip}" ]; then
-    echo "Error: --ip must be set"
-    print_help
-    exit 1
-fi
-
-seed_ip="${seed_ip:-172.17.0.2}"
 
 # where the torrent file and metainfo are saved
 assets_dir="$(pwd)/assets"
@@ -79,19 +69,20 @@ done
 # check if the seed is running: if not, start it
 if ! docker inspect --format '{{.State.Running}}' "${name}" &> /dev/null
 then
-    echo "Starting Transmission seed container ${name} on IP ${seed_ip} and port 51413"
+    echo "Starting Transmission seed container ${name} listening on port 51413"
     docker run \
         --rm \
         --name "${name}" \
-        --publish 9091:9091 \
         --env PUID=$UID \
         --env PGID=$UID \
         --mount type=bind,src="${tr_config_dir}",dst=/config \
         --mount type=bind,src="${tr_downloads_dir}",dst=/downloads \
         --mount type=bind,src="${tr_watch_dir}",dst=/watch \
-        --ip "${seed_ip}" \
         --detach \
         linuxserver/transmission
+
+    seed_ip="$(get_container_ip "${name}")"
+    echo "Seed available on local Docker net at IP: ${seed_ip}"
 
     # wait for seed to come online
     sleep 5
