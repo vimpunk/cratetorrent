@@ -7,22 +7,9 @@ dest_in_use=3
 download_not_found=4
 invalid_download=5
 
-# the default docker bridge network is on subnet 172.17.0.0/16, the gateway on
-# 172.17.0.1, so we can pin our seed to an IP in that subnet
-#
-# TODO: Is the subnet IP of a docker bridge network dynamically generated? Maybe
-# it would be safer to parse the subnet mask or even create our own user-defined
-# bridge network.
-seed_ip=172.17.0.2
 # this is the default Transmission port
-seed_port=51413
-seed_addr="${seed_ip}:${seed_port}"
+transmission_port=51413
 seed_container=tr-seed-1
-
-seed2_ip=172.17.0.3
-# this is the default Transmission port
-seed2_port=51413
-seed2_addr="${seed2_ip}:${seed2_port}"
 seed2_container=tr-seed-2
 
 assets_dir="$(pwd)/assets"
@@ -47,4 +34,13 @@ function verify_file {
         echo "FAILURE: downloaded file does not match source file"
         exit "${invalid_download}"
     fi
+}
+
+# Returns the container's IP address in the local Docker network.
+#
+# Arguments:
+# - $1 container name
+function get_container_ip {
+    cont=$1
+    docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "${cont}"
 }

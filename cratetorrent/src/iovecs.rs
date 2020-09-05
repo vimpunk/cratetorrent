@@ -287,10 +287,7 @@ impl<'a> IoVecs<'a> {
                 split_buf_first_half.len(),
             )
         };
-        std::mem::replace(
-            &mut bufs[split_pos],
-            IoVec::from_slice(split_buf_first_half),
-        );
+        bufs[split_pos] = IoVec::from_slice(split_buf_first_half);
 
         Self {
             bufs,

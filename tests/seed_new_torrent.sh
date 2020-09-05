@@ -67,7 +67,7 @@ fi
 # 1. Verify seed
 ################################################################################
 
-# where the torrent file and metainfo are saved
+# where the necessary seed directories exist
 assets_dir="$(pwd)/assets"
 if [ ! -d "${assets_dir}" ]; then
     echo "Error: assets directory ${assets_dir} does not exist"
