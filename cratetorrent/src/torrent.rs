@@ -169,18 +169,15 @@ impl Torrent {
                         // completion
                         if let Some(is_piece_valid) = batch.is_piece_valid {
                             if is_piece_valid {
-                                log::info!(
-                                    "Finished piece download, valid? {}",
-                                    is_piece_valid
-                                );
                                 let missing_piece_count = self
                                     .piece_picker
                                     .read()
                                     .await
                                     .count_missing_pieces();
-                                log::debug!(
-                                    "Piece(s) left: {}",
-                                    missing_piece_count
+                                log::info!(
+                                    "Finished piece {} download, valid: {}, left: {}",
+                                    batch.blocks.first().unwrap().piece_index,
+                                    is_piece_valid, missing_piece_count
                                 );
 
                                 // if the torrent is fully downloaded, stop the

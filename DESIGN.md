@@ -218,6 +218,27 @@ currently only TCP is supported.
 5. The connected peers may now optionally exchange their piece availability.
 6. After this step, peers start exchanging normal messages.
 
+### Current session algorithm
+
+A simplified version of the peer session algorithm follows.
+
+1. Connect to the TCP socket of peer and send the BitTorrent handshake.
+2. Receive and verify peer's handshake.
+3. Start receiving messages.
+4. Receive peer's bitfield. If the peer didn't send a bitfield, or it doesn't
+   contain all pieces (i.e.  peer is not a seed), we abort the connection as
+   only downloading from seed's are supported.
+5. Tell peer we're interested.
+5. Wait for peer to unchoke us.
+6. From this point on we can start making block requests:
+   1. Fill the request pipeline with the optimal number of requests for blocks
+      from existing and/or new piece downloads.
+   2. Wait for requested blocks.
+   3. Mark requested blocks as received with their corresponding piece download.
+   4. If the piece is complete, mark it as finished with the piece picker.
+   5. After each complete piece, check that we have all pieces. If so, conclude
+      the download, otherwise make more requests and restart.
+
 ### Download pipeline
 
 After receiving an unchoke message from our seed, we can start making requests.
@@ -272,6 +293,14 @@ bandwidth-delay product B x D. This value is recalculated every time we receive
 a block, in order to always keep the link fully saturated. See
 [wikipedia](https://en.wikipedia.org/wiki/Bandwidth-delay_product) for more.
 
+So the best request queue size can be arrived at using the following formula:
+```
+Q = B * D / 16 KiB
+```
+Where B is the current download rate, D is the delay (latency) of the link, and
+16 KiB is the standard block size. Bot the download rate and the latency are
+continuously measured and used to adjust this value.
+
 To emphasize the value of this optimization, let's see a visual example of
 comparing two connections each downloading two blocks on a link with the same
 capacity, where one pair of peers' link is not kept saturated and another pair
@@ -314,36 +343,45 @@ R |      |        | /    |
   |/     |
 ```
 
-And even from such a simple example as this, it can be concluded as a feature and not
-premature optimization.
+And even from such a simple example as this, it can be concluded as a feature
+and not premature optimization.
 
 What is needed for this to work reliably is timing out requests, but as of this
 writing that is not yet implemented.
 
-For now, though, the download pipeline is set to a fixed size of 4, but
-automatically adjusting it as a function of bandwidth-delay is to be added as a
-separate step under the optimization milestone.
+#### Slow start
 
-### Session algorithm
+Initially the request queue size is going to start from a very low value, but it
+in case of fast seeders we want to max out the available bandwidth as quickly as
+possible.
 
-A simplified version of the peer session algorithm follows.
+TCP has already solved this: it uses the [slow start
+algorithm](https://blog.libtorrent.org/2011/11/requesting-pieces/) to discover
+the link capacity as quickly as possible, and then enter congestion avoidance
+mode. Introducing this on the BitTorrent level allows us to keep up with the
+underlying TCP slow start algorithm and waste as little bandwidth as possible.
 
-1. Connect to peer and send the BitTorrent handshake.
-2. Receive and verify peer's handshake.
-3. Start receiving messages.
-4. Receive peer's bitfield. If the peer didn't send a bitfield, or it doesn't
-   contain all pieces (i.e.  peer is not a seed), we abort the connection as
-   only downloading from seed's are supported.
-5. Tell peer we're interested.
-5. Wait for peer to unchoke us.
-6. From this point on we can start making block requests:
-   1. Fill the request pipeline with the optimal number of requests for blocks
-      from existing and/or new piece downloads.
-   2. Wait for requested blocks.
-   3. Mark requested blocks as received with their corresponding piece download.
-   4. If the piece is complete, mark it as finished with the piece picker.
-   5. After each complete piece, check that we have all pieces. If so, conclude
-      the download, otherwise make more requests and restart.
+The mechanism is similar: in the beginning the session is in slow start
+mode and increases the target request queue size by one with every block it
+receives (doubling the queue size with each complete round trip). While in TCP
+the slow start mode is left when the first timeout or packet loss occurs, at the
+application layer this is less obvious and one mechanism employed by
+[libtorrent](https://blog.libtorrent.org/2015/07/slow-start/) is to leave slow
+start when the download rate is not increasing (significantly) anymore.
+Libtorrent leaves slow start when the download rate inceases by less than 10
+kB/s.
+
+### Session tick
+
+Every second a peer session runs the update loop, which performs periodic
+updates.
+
+Each round the current download and upload rates are collected, and the session
+tick collects each rounds value, calculates a running average, and resets the
+per round counter.
+
+Using this counter, it is also checked whether the session needs to escape slow
+start.
 
 ### Messages
 
@@ -372,12 +410,8 @@ where:
   but are *not transmitted*,
 - **bytes**: is the length of the message field in bytes,
 - **name**: is the name we use to refer to the message field in the code (but
-  the value is not actually transmitted);
-- **value**: is the value of the field, which is actually transmitted.
-
-The rationale behind this notation is to densely store information so that
-when developing message related code, information can quickly
-be accessed at a glance.
+  the value is *not transmitted*);
+- **value**: is the value of the field, which *is* transmitted.
 
 #### **`handshake`**
 ```
