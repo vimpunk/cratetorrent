@@ -294,12 +294,16 @@ a block, in order to always keep the link fully saturated. See
 [wikipedia](https://en.wikipedia.org/wiki/Bandwidth-delay_product) for more.
 
 So the best request queue size can be arrived at using the following formula:
+
 ```
 Q = B * D / 16 KiB
 ```
+
 Where B is the current download rate, D is the delay (latency) of the link, and
-16 KiB is the standard block size. Bot the download rate and the latency are
-continuously measured and used to adjust this value.
+16 KiB is the standard block size. The download rate is continuously measured
+and used to adjust this value. The latency for now is hard-coded to 1 second,
+but this may be probed and dynamically adjusted too
+(https://github.com/mandreyel/cratetorrent/issues/44).
 
 To emphasize the value of this optimization, let's see a visual example of
 comparing two connections each downloading two blocks on a link with the same
@@ -369,7 +373,7 @@ application layer this is less obvious and one mechanism employed by
 [libtorrent](https://blog.libtorrent.org/2015/07/slow-start/) is to leave slow
 start when the download rate is not increasing (significantly) anymore.
 Libtorrent leaves slow start when the download rate inceases by less than 10
-kB/s.
+kB/s. Currently cratetorrent does the same.
 
 ### Session tick
 

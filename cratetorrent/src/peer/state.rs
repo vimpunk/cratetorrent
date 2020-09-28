@@ -4,14 +4,13 @@ use crate::{
     avg::SlidingDurationAvg, counter::Counter, Bitfield, PeerId, BLOCK_LEN,
 };
 
-/// The status of a peer session, which holds information necessary to modify
-/// the state of the session.
-pub(super) struct Status {
+/// The holds and provides facilities to modify the state of a peer session.
+pub(super) struct SessionState {
     /// Information about a peer that is set after a successful handshake.
     pub peer: Option<PeerInfo>,
 
-    /// The current state of the session.
-    pub state: State,
+    /// The current state of the connection.
+    pub connection: ConnectionState,
 
     /// Whether the session is in slow start.
     ///
@@ -75,7 +74,7 @@ pub(super) struct Status {
     pub avg_request_rtt: SlidingDurationAvg,
 }
 
-impl Status {
+impl SessionState {
     /// When we check whether to exist slow start mode we want to allow for some
     /// error margin. This is because there may be "micro-fluctuations" in the
     /// download rate but per second but over a longer time the download rate
@@ -86,7 +85,9 @@ impl Status {
     /// downloading.
     const START_REQUEST_QUEUE_LEN: usize = 4;
 
-    /// Prepares the for requesting downloads.
+    /// Prepares for requesting blocks.
+    ///
+    /// This should be called after being unchoked and becoming interested.
     pub fn prepare_for_download(&mut self) {
         debug_assert!(self.is_interested);
         debug_assert!(!self.is_choked);
@@ -135,9 +136,15 @@ impl Status {
     pub fn tick(&mut self) {
         self.maybe_exit_slow_start();
 
-        self.update_target_request_queue_len();
-
+        // NOTE: This has to be *after* `maybe_exit_slow_start` and *before*
+        // `update_target_request_queue_len`, as the first relies on the round
+        // not being concluded yet, while the latter relies on the round being
+        // concluded (having this round's download accounted for in the download
+        // rate).
+        // TODO: can we statically ensure this rather than rely on the comment?
         self.reset_counters();
+
+        self.update_target_request_queue_len();
     }
 
     /// Check if we need to exit slow start.
@@ -215,12 +222,12 @@ impl Status {
     }
 }
 
-impl Default for Status {
+impl Default for SessionState {
     /// By default, both sides of the connection start off as choked and not
     /// interested in the other.
     fn default() -> Self {
         Self {
-            state: State::default(),
+            connection: ConnectionState::default(),
             in_slow_start: false,
             is_choked: true,
             is_interested: false,
@@ -249,7 +256,7 @@ pub(super) struct PeerInfo {
 
 /// At any given time, a connection with a peer is in one of the below states.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) enum State {
+pub(crate) enum ConnectionState {
     /// The peer connection has not yet been connected or it had been connected
     /// before but has been stopped.
     Disconnected,
@@ -270,8 +277,128 @@ pub(crate) enum State {
 }
 
 /// The default (and initial) state of a peer session is `Disconnected`.
-impl Default for State {
+impl Default for ConnectionState {
     fn default() -> Self {
         Self::Disconnected
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn should_prepare_for_download() {
+        let mut s = SessionState::default();
+
+        s.is_interested = true;
+        s.is_choked = false;
+
+        s.prepare_for_download();
+
+        assert!(s.target_request_queue_len > Some(0));
+        assert!(s.in_slow_start);
+    }
+
+    #[test]
+    fn should_exit_slow_start() {
+        let mut s = SessionState::default();
+
+        s.is_interested = true;
+        s.is_choked = false;
+        s.in_slow_start = true;
+        s.target_request_queue_len = Some(1);
+
+        // rate increasing
+        s.downloaded_payload_counter += 10 * BLOCK_LEN as u64;
+        // should not exit slow start
+        s.maybe_exit_slow_start();
+        assert!(s.in_slow_start);
+
+        // reset counter for next round
+        // download rate using weighed average:
+        // 0 + (10 * 16384) / 5 = 32768
+        s.downloaded_payload_counter.reset();
+
+        // rate still increasing
+        s.downloaded_payload_counter += 10 * BLOCK_LEN as u64;
+        // should not exit slow start yet
+        s.maybe_exit_slow_start();
+        assert!(s.in_slow_start);
+
+        // reset counter for next round
+        // download rate using weighed average:
+        // 32768 + (10 * 16384) / 5 = 65536
+        // (FIXME: in practice this seems to be 58982)
+        s.downloaded_payload_counter.reset();
+
+        // this round's increase is much less than that of the previous round,
+        // should exit slow start
+        s.downloaded_payload_counter += 2 * BLOCK_LEN as u64 + 9000;
+        s.maybe_exit_slow_start();
+        assert!(!s.in_slow_start);
+    }
+
+    #[test]
+    fn should_not_update_target_request_queue_in_slow_start() {
+        let mut s = SessionState::default();
+
+        s.is_interested = true;
+        s.is_choked = false;
+        s.in_slow_start = true;
+        s.target_request_queue_len = Some(1);
+
+        // rate increasing
+        s.downloaded_payload_counter += 2 * BLOCK_LEN as u64;
+
+        // reset counter for next round
+        s.downloaded_payload_counter.reset();
+
+        // this should be a noop
+        s.update_target_request_queue_len();
+        assert_eq!(s.target_request_queue_len, Some(1));
+    }
+
+    #[test]
+    fn should_update_target_request_queue() {
+        let mut s = SessionState::default();
+
+        s.is_interested = true;
+        s.is_choked = false;
+        s.in_slow_start = false;
+        s.target_request_queue_len = Some(1);
+
+        // rate increasing (make it more than a multiple of the block
+        // length to be able to test against integer truncation)
+        s.downloaded_payload_counter += 10 * BLOCK_LEN as u64 + 5000;
+        // reset counter so that it may be used in the download rate below
+        s.downloaded_payload_counter.reset();
+
+        // should update queue size according to:
+        // download rate using weighed average:
+        // 0 + (10 * 16384 + 5000) / 5 = 33768
+        // queue size based on bandwidth-delay product:
+        // (33768 + (16384 - 1)) / 16384 = 3.06 ~ 3
+        s.update_target_request_queue_len();
+        assert_eq!(s.target_request_queue_len, Some(3));
+    }
+
+    #[test]
+    fn should_update_download_stats_in_slow_start() {
+        let mut s = SessionState::default();
+
+        s.is_interested = true;
+        s.is_choked = false;
+        s.in_slow_start = true;
+        s.target_request_queue_len = Some(1);
+
+        s.update_download_stats(BLOCK_LEN);
+
+        // request queue length should be increased by one in slow start
+        assert_eq!(s.target_request_queue_len, Some(2));
+        // incoming request time should be set
+        assert!(s.last_incoming_block_time.is_some());
+        // download stat should be increased
+        assert_eq!(s.downloaded_payload_counter.round(), BLOCK_LEN as u64);
     }
 }
