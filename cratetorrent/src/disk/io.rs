@@ -300,7 +300,7 @@ impl Torrent {
             let piece_len = self.info.piece_len;
             let files = Arc::clone(&self.files);
 
-            log::info!(
+            log::debug!(
                 "Piece {} is complete ({} bytes), flushing {} block(s) to disk",
                 info.piece_index,
                 piece_len,
@@ -314,7 +314,7 @@ impl Torrent {
 
                 // save piece to disk if it's valid
                 let blocks = if is_piece_valid {
-                    log::info!("Piece {} is valid", piece_index);
+                    log::debug!("Piece {} is valid", piece_index);
                     let piece_torrent_offset = piece_index as u64 * piece_len as u64;
                     piece.write(piece_torrent_offset, &*files)?;
 

@@ -73,14 +73,14 @@ impl PieceDownload {
         }
 
         if picked > 0 {
-            log::info!(
+            log::debug!(
                 "Picked {} block(s) for piece {}: {:?}",
                 picked,
                 self.index,
-                blocks
+                &blocks[blocks.len() - picked..]
             );
         } else {
-            log::info!("Cannot pick any blocks in piece {}", self.index);
+            log::debug!("Cannot pick any blocks in piece {}", self.index);
         }
     }
 
@@ -105,6 +105,11 @@ impl PieceDownload {
 
         // TODO(https://github.com/mandreyel/cratetorrent/issues/9): record
         // rount trip time for this block
+    }
+
+    /// Returns true if the piece has all blocks downloaded.
+    pub fn is_complete(&self) -> bool {
+        self.count_missing_blocks() == 0
     }
 
     /// Returns the number of free (pickable) blocks.

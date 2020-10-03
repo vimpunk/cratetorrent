@@ -1,10 +1,12 @@
-use std::path::{Path, PathBuf};
+use std::{
+    fmt,
+    path::{Path, PathBuf},
+};
 
 use crate::{error::*, storage_info::FsStructure, FileInfo, Sha1Hash};
 
 /// The parsed and validated torrent metainfo file, containing necessary
 /// arguments for starting a torrent.
-#[derive(Debug)]
 pub struct Metainfo {
     /// The name of the torrent, which is usually used to form the download
     /// path.
@@ -123,6 +125,18 @@ impl Metainfo {
     /// Returns the number of pieces in this torrent.
     pub fn piece_count(&self) -> usize {
         self.pieces.len() / 20
+    }
+}
+
+impl fmt::Debug for Metainfo {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Metainfo")
+            .field("name", &self.name)
+            .field("info_hash", &self.info_hash)
+            .field("pieces", &"<pieces...>")
+            .field("piece_len", &self.piece_len)
+            .field("structure", &self.structure)
+            .finish()
     }
 }
 

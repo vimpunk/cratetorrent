@@ -8,10 +8,37 @@ set -e
 
 source common.sh
 
+
+function print_help {
+    echo -e "
+USAGE: $1 [ --size <size[unit]> ]
+
+OPTIONS:
+    -s|--size       The size of the torrent file, in bytes.
+    -h|--help       Print this help message.
+    "
+}
+
+for arg in "$@"; do
+    case "${arg}" in
+        --size)
+            torrent_size=$2
+        ;;
+        --h|--help)
+            print_help
+            exit 0
+        ;;
+    esac
+    shift
+done
+
+
 # start the container (if it's not already running)
 ./start_transmission_seed.sh --name "${seed_container}"
 
-torrent_name=1mb-test.txt
+# default torrent size to 1 MiB
+torrent_size="${torrent_size:-$(( 1024 * 1024 ))}"
+torrent_name="muti-peer-test-${torrent_size}"
 # the seeded file
 src_path="${assets_dir}/${torrent_name}"
 # and its metainfo
@@ -30,7 +57,6 @@ download_path="${download_dir}/${torrent_name}"
 # start seeding the torrent, if it doesn't exist yet
 if [ ! -f "${src_path}" ]; then
     echo "Starting seeding of torrent ${torrent_name}"
-    torrent_size=$(( 1024 * 1024 )) # 1 MiB
     # first, we need to generate a random file
     ./create_random_file.sh --path "${src_path}" --size "${torrent_size}"
     # then start seeding it

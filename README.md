@@ -9,9 +9,10 @@ C++.
 ## Features
 
 Single download of a torrent with multiple peer connections, if given their
-addresses and the path to the torrent metainfo. No multiple torrents, no
-seeding, no optimizations, or any other feature you might expect from a
-full-fledged BitTorrent library.
+addresses and the path to the torrent metainfo. Downloads are relatively fast
+with various throughput optimizations. However, there are no multiple torrents,
+no seeding, or any other feature you might expect from a full-fledged BitTorrent
+library.
 
 Features are continuously added, please see the [project
 milestones](https://github.com/mandreyel/cratetorrent/issues/26). Eventually, I

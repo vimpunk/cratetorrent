@@ -37,6 +37,11 @@ impl Handshake {
             peer_id,
         }
     }
+
+    /// Returns the length of the handshake, in bytes.
+    pub const fn len(&self) -> u64 {
+        19 + 8 + 20 + 20
+    }
 }
 
 /// The protocol version 1 string included in the handshake.
@@ -184,13 +189,25 @@ impl Message {
             Self::Cancel(_) => Some(MessageId::Cancel),
         }
     }
+
+    /// Returns the length of the part of the message that constitutes the
+    /// message header. For all but the block message this is simply the size of
+    /// the message. For the block message this is the message header.
+    pub fn protocol_len(&self) -> u64 {
+        if let Some(id) = self.id() {
+            id.header_len()
+        } else {
+            assert_eq!(*self, Self::KeepAlive);
+            1
+        }
+    }
 }
 
 /// The ID of a message, which is included as a prefix in most messages.
 ///
 /// The handshake and keep alive messages don't have explicit IDs.
 #[repr(u8)]
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq)]
 pub(crate) enum MessageId {
     Choke = 0,
     Unchoke = 1,
@@ -201,6 +218,26 @@ pub(crate) enum MessageId {
     Request = 6,
     Block = 7,
     Cancel = 8,
+}
+
+impl MessageId {
+    /// Returns the header length of the specific message type.
+    ///
+    /// Since this is fix size for all messages, it can be determined simply
+    /// from the message id.
+    pub fn header_len(&self) -> u64 {
+        match self {
+            Self::Choke => 4 + 1,
+            Self::Unchoke => 4 + 1,
+            Self::Interested => 4 + 1,
+            Self::NotInterested => 4 + 1,
+            Self::Have => 4 + 1 + 4,
+            Self::Bitfield => 4 + 1,
+            Self::Request => 4 + 1 + 3 * 4,
+            Self::Block => 4 + 1 + 2 * 4,
+            Self::Cancel => 4 + 1 + 3 * 4,
+        }
+    }
 }
 
 impl TryFrom<u8> for MessageId {

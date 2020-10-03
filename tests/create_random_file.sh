@@ -43,8 +43,8 @@ if [ -z "${size}" ]; then
 fi
 
 # make sure there is nothing at path
-if [ -f "${path}" ] || [ -d "${path}" ]; then
-    echo "Error: something already exists at ${path}"
+if [ -e "${path}" ]; then
+    echo "Error: ${path} already exists"
     exit 2
 fi
 
