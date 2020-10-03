@@ -1,6 +1,8 @@
 use std::time::Instant;
 
-use crate::{counter::Counter, Bitfield, PeerId, BLOCK_LEN};
+use crate::{
+    avg::SlidingDurationAvg, counter::Counter, Bitfield, PeerId, BLOCK_LEN,
+};
 
 /// Holds and provides facilities to modify the state of a peer session.
 pub(super) struct SessionState {
@@ -63,6 +65,13 @@ pub(super) struct SessionState {
     /// Updated with the time of receipt of the most recently received requested
     /// block.
     pub last_incoming_block_time: Option<Instant>,
+    /// This is the average network round-trip-time between the last issued
+    /// a request and receiving the next block.
+    ///
+    /// Note that it doesn't have to be the same block since peers are not
+    /// required to serve our requests in order, so this is more of a general
+    /// approximation.
+    pub avg_request_rtt: SlidingDurationAvg,
 }
 
 impl SessionState {
@@ -94,6 +103,14 @@ impl SessionState {
     /// This should be called every time a block is received.
     pub fn update_download_stats(&mut self, block_len: u32) {
         let now = Instant::now();
+
+        // update request time
+        if let Some(last_outgoing_request_time) =
+            &mut self.last_outgoing_request_time
+        {
+            let request_rtt = now.duration_since(*last_outgoing_request_time);
+            self.avg_request_rtt.update(request_rtt);
+        }
 
         self.downloaded_payload_counter += block_len as u64;
         self.last_incoming_block_time = Some(now);
@@ -217,6 +234,7 @@ impl Default for SessionState {
             last_outgoing_request_time: None,
             last_incoming_block_time: None,
             peer: None,
+            avg_request_rtt: SlidingDurationAvg::default(),
         }
     }
 }

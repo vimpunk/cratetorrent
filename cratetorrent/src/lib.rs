@@ -4,6 +4,7 @@
 #[macro_use]
 extern crate serde_derive;
 
+mod avg;
 mod counter;
 mod disk;
 mod download;
