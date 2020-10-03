@@ -4,16 +4,11 @@
 #[macro_use]
 extern crate serde_derive;
 
+mod counter;
 mod disk;
 mod download;
 pub mod engine;
 pub mod error;
-// This rechnically is not part of the public API as it's too low-level for that
-// (it could still be useful for the API user but it's a non-goal of
-// cratetorrent). However, we need to expose it publicly so that criterion can
-// benchmark it.
-mod avg;
-mod counter;
 pub mod iovecs;
 pub mod metainfo;
 mod peer;
