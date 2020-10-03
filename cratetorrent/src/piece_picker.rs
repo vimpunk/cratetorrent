@@ -134,7 +134,9 @@ mod tests {
         let piece_count = 15;
         let mut piece_picker = PiecePicker::new(piece_count);
         let available_pieces = Bitfield::repeat(true, piece_count);
-        piece_picker.register_availability(&available_pieces);
+        piece_picker
+            .register_availability(&available_pieces)
+            .unwrap();
 
         // save picked pieces
         let mut picked = HashSet::with_capacity(piece_count);
@@ -163,7 +165,9 @@ mod tests {
         let piece_count = 15;
         let mut piece_picker = PiecePicker::new(piece_count);
         let available_pieces = Bitfield::repeat(true, piece_count);
-        piece_picker.register_availability(&available_pieces);
+        piece_picker
+            .register_availability(&available_pieces)
+            .unwrap();
         assert!(piece_picker.own_pieces.not_any());
 
         // mark pieces as received
