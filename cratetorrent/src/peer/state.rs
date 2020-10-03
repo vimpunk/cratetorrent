@@ -150,12 +150,6 @@ impl SessionState {
 
     /// Adjusts the target request queue size based on the current download
     /// statistics.
-    ///
-    /// # Important
-    ///
-    /// This must not be called when the peer is in slow start mode, as in that
-    /// case the request queue size is increased by one every time a block is
-    /// received. This function is for after the slow start phase.
     fn update_target_request_queue_len(&mut self) {
         if let Some(target_request_queue_len) =
             &mut self.target_request_queue_len

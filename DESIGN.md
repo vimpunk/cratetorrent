@@ -229,8 +229,8 @@ A simplified version of the peer session algorithm follows.
    contain all pieces (i.e.  peer is not a seed), we abort the connection as
    only downloading from seed's are supported.
 5. Tell peer we're interested.
-5. Wait for peer to unchoke us.
-6. From this point on we can start making block requests:
+6. Wait for peer to unchoke us.
+7. From this point on we can start making block requests:
    1. Fill the request pipeline with the optimal number of requests for blocks
       from existing and/or new piece downloads.
    2. Wait for requested blocks.
