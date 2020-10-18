@@ -137,3 +137,74 @@ impl Default for SlidingDurationAvg {
         Self(SlidingAvg::default())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_sliding_average() {
+        let inverted_gain = 4;
+        let mut a = SlidingAvg::new(inverted_gain);
+
+        // the first sample should have a weight of 100%
+        let sample = 10;
+        a.update(sample);
+        assert_eq!(a.sample_count, 1);
+        assert_eq!(a.mean(), sample);
+
+        // the second sample should have less weight
+        let sample = 15;
+        a.update(sample);
+        assert_eq!(a.sample_count, 2);
+        assert_eq!(a.mean(), 13);
+
+        // the third sample even less
+        let sample = 20;
+        a.update(sample);
+        assert_eq!(a.sample_count, 3);
+        assert_eq!(a.mean(), 15);
+
+        // The fourth sample reaches the inverted gain. To test that it has an
+        // effect on the sample, always choose a sample when from which the
+        // current mean is subtracted and divided by the sample count (which now
+        // stops increasing) the result is an integer. For simplicity's sake
+        // such a sample is chosen as results in the increase of the mean by 1.
+
+        let sample = 19;
+        a.update(sample);
+        assert_eq!(a.sample_count, 4);
+        assert_eq!(a.mean(), 16);
+
+        let sample = 20;
+        a.update(sample);
+        assert_eq!(a.sample_count, 4);
+        assert_eq!(a.mean(), 17);
+
+        let sample = 21;
+        a.update(sample);
+        assert_eq!(a.sample_count, 4);
+        assert_eq!(a.mean(), 18);
+
+        // also make sure that a large sample only increases the mean by a value
+        // proportional to its weight: that is, by (mean - sample) / 4
+        let sample = 118;
+        // increase should be: (118 - 18) / 4 = 25
+        a.update(sample);
+        assert_eq!(a.mean(), 43);
+    }
+
+    #[test]
+    fn test_sliding_duration_average() {
+        // since the implementation of the moving average is the same as for
+        // `SlidSlidingAvg`, we only need to test that the i64 <-> duration
+        // conversions are correct
+        let mut a = SlidingDurationAvg::default();
+
+        // initially the mean is the same as the first sample
+        let sample = Duration::from_secs(10);
+        a.update(sample);
+        assert_eq!(a.0.sample_count, 1);
+        assert_eq!(a.mean(), sample);
+    }
+}
