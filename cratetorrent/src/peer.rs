@@ -255,12 +255,14 @@ impl PeerSession {
 
         log::info!(
             "[Peer {}] download rate: {} b/s (peak: {} b/s, total: {} b) \
-            queue: {}",
+            queue: {}, rtt: {} ms (~{} s)",
             self.addr,
             self.state.downloaded_payload_counter.avg(),
             self.state.downloaded_payload_counter.peak(),
             self.state.downloaded_payload_counter.total(),
             self.state.target_request_queue_len.unwrap_or(0),
+            self.state.avg_request_rtt.mean().as_millis(),
+            self.state.avg_request_rtt.mean().as_secs(),
         );
     }
 

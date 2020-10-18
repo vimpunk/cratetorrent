@@ -24,19 +24,21 @@ use std::{convert::TryInto, time::Duration};
 pub struct SlidingAvg {
     /// The current running average, effectively the mean.
     ///
-    /// This is a fixed-point value, that is, the sample is multiplied by 64
-    /// before adding it. When the mean is returned, 32 is added and the sum is
-    /// divided back by 64, to eliminate integer truncation that would result in
-    /// a bias.
-    // TODO: can we just use float for the calculations? although this is likely
-    // faster
+    /// This is a fixed-point value. The sample is multiplied by 64 before
+    /// adding it. When the mean is returned, 32 is added and the sum is divided
+    /// back by 64, to eliminate integer truncation that would result in a bias.
+    /// Fixed-point calculation is used as the alternative is using floats which
+    /// is slower as well as more cumbersome to perform conversions on (the main
+    /// use case is with integers).
     mean: i64,
     /// The average deviation.
     ///
-    /// This is a fixed-point value, that is, the sample is multiplied by 64
-    /// before adding it. When the mean is returned, 32 is added and the sum is
-    /// divided back by 64, to eliminate integer truncation that would result in
-    /// a bias.
+    /// This is a fixed-point value. The sample is multiplied by 64 before
+    /// adding it. When the mean is returned, 32 is added and the sum is divided
+    /// back by 64, to eliminate integer truncation that would result in a bias.
+    /// Fixed-point calculation is used as the alternative is using floats which
+    /// is slower as well as more cumbersome to perform conversions on (the main
+    /// use case is with integers).
     deviation: i64,
     /// The number of samples received, but no more than `inverted_gain`.
     sample_count: usize,
