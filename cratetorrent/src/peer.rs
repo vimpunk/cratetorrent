@@ -272,12 +272,7 @@ impl PeerSession {
                     elapsed_since_last_request.as_millis(),
                     self.state.timed_out_request_count + 1,
                 );
-                // peer has timed out, only allow a single outstanding request
-                // from now until peer hasn't timed out
-                self.state.target_request_queue_len = Some(1);
-                self.state.timed_out_request_count += 1;
-                self.state.request_timed_out = true;
-                self.state.in_slow_start = false;
+                self.state.record_request_timeout();
                 // Cancel all requests and re-issue a single one (since we can
                 // only request a single block now). Start by freeing up the
                 // block in its piece download.
@@ -294,7 +289,7 @@ impl PeerSession {
                         .cancel_request(block);
                 }
                 self.outgoing_requests.clear();
-                // try to make another request
+                // try to make a request
                 self.make_requests(sink).await?;
             }
         }

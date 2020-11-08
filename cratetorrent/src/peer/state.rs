@@ -90,13 +90,23 @@ impl SessionState {
     /// The smallest timeout value we can give a peer. This is so that we don't
     const MIN_TIMEOUT_S: u64 = 2;
 
-    /// Returns the current request timeout, based on the running average of
-    /// past request round trip times.
+    /// Returns the current request timeout value, based on the running average
+    /// of past request round trip times.
     pub fn request_timeout(&self) -> Duration {
         // we allow up to four times the average deviation from the mean
         let t =
             self.avg_request_rtt.mean() + 4 * self.avg_request_rtt.deviation();
         t.max(Duration::from_secs(Self::MIN_TIMEOUT_S))
+    }
+
+    /// Updates state to reflect that peer was timed out.
+    pub fn record_request_timeout(&mut self) {
+        // peer has timed out, only allow a single outstanding request
+        // from now until peer hasn't timed out
+        self.target_request_queue_len = Some(1);
+        self.timed_out_request_count += 1;
+        self.request_timed_out = true;
+        self.in_slow_start = false;
     }
 
     /// Prepares for requesting blocks.
@@ -169,9 +179,13 @@ impl SessionState {
         // concluded (having this round's download accounted for in the download
         // rate).
         // TODO: can we statically ensure this rather than rely on the comment?
-        self.reset_counters();
+        self.reset_per_tick_counters();
 
-        self.update_target_request_queue_len();
+        // if we're still in the timeout, we don't want to increase
+        // the target request queue size
+        if !self.request_timed_out {
+            self.update_target_request_queue_len();
+        }
     }
 
     /// Check if we need to exit slow start.
@@ -195,12 +209,6 @@ impl SessionState {
     /// Adjusts the target request queue size based on the current download
     /// statistics.
     fn update_target_request_queue_len(&mut self) {
-        if self.request_timed_out {
-            // if we're still in the timeout, we don't want to increase
-            // the target request queue size
-            return;
-        }
-
         if let Some(target_request_queue_len) =
             &mut self.target_request_queue_len
         {
@@ -236,7 +244,7 @@ impl SessionState {
     }
 
     /// Marks the end of the round for the various throughput rate counters.
-    fn reset_counters(&mut self) {
+    fn reset_per_tick_counters(&mut self) {
         for counter in [
             &mut self.downloaded_payload_counter,
             &mut self.uploaded_protocol_counter,
