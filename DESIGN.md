@@ -350,9 +350,6 @@ R |      |        | /    |
 And even from such a simple example as this, it can be concluded as a feature
 and not premature optimization.
 
-What is needed for this to work reliably is timing out requests, but as of this
-writing that is not yet implemented.
-
 #### Slow start
 
 Initially the request queue size is going to start from a very low value, but it
@@ -375,6 +372,30 @@ start when the download rate is not increasing (significantly) anymore.
 Libtorrent leaves slow start when the download rate inceases by less than 10
 kB/s. Currently cratetorrent does the same.
 
+#### Timing out requests
+
+Each peer session needs to be able to time out requests, for two reasons:
+- A peer may never send the request. Without timing out a request, we would not
+  be able to attempt the download from another peer. This would cause the
+  whole download to get stuck. This is the most crucial issue.
+- It is also a form of optimization: if one peer doesn't send it within some
+  allowed window, we can attempt to request it from another peer, which may
+  result in the piece completing faster.
+
+Each peer session has its own timeout mechanism, as each peer will have unique
+download characteristics and so the timeout value needs to be dynamically
+adjusted for each peer. A weighed running average is used to measure round trip
+times, with new samples having moderate amount of weight (currently 1/20). This
+guards against jitters. This average is used to derive the timeout value.
+
+We don't want to time out peers instantly. For fast seeders the long tail of
+request round trip times will be a few milliseconds, so any occasional hiccup
+will be relatively large, which would time out the peer instantly if we didn't
+use a smoothed running average. This is not desirable, as the overall round trip
+time will still be low. For this reason, timeouts are minimum 2 seconds. This
+number comes from tide, and further experiments are needed to prove its
+viability.
+
 ### Session tick
 
 Every second a peer session runs the update loop, which performs periodic
@@ -386,6 +407,9 @@ per round counter.
 
 Using this counter, it is also checked whether the session needs to escape slow
 start.
+
+Since the minimum timeout granularity is measured in seconds, the timeout
+procedure is also part of the session tick.
 
 ### Messages
 

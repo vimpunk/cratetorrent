@@ -1,4 +1,4 @@
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::{
     avg::SlidingDurationAvg, counter::Counter, Bitfield, PeerId, BLOCK_LEN,
@@ -72,6 +72,8 @@ pub(super) struct SessionState {
     /// required to serve our requests in order, so this is more of a general
     /// approximation.
     pub avg_request_rtt: SlidingDurationAvg,
+    pub request_timed_out: bool,
+    pub timed_out_request_count: usize,
 }
 
 impl SessionState {
@@ -84,6 +86,18 @@ impl SessionState {
     /// The target request queue size is set to this value once we are able to start
     /// downloading.
     const START_REQUEST_QUEUE_LEN: usize = 4;
+
+    /// The smallest timeout value we can give a peer. This is so that we don't
+    const MIN_TIMEOUT_S: u64 = 2;
+
+    /// Returns the current request timeout, based on the running average of
+    /// past request round trip times.
+    pub fn request_timeout(&self) -> Duration {
+        // we allow up to four times the average deviation from the mean
+        let t =
+            self.avg_request_rtt.mean() + 4 * self.avg_request_rtt.deviation();
+        t.max(Duration::from_secs(Self::MIN_TIMEOUT_S))
+    }
 
     /// Prepares for requesting blocks.
     ///
@@ -103,6 +117,19 @@ impl SessionState {
     /// This should be called every time a block is received.
     pub fn update_download_stats(&mut self, block_len: u32) {
         let now = Instant::now();
+
+        // If we timed out before, check if this request arrived within the
+        // timeout window, or outside of it. If it arrived within the
+        // window, we can mark peer as having recovered from the timeout.
+        if self.request_timed_out {
+            if let Some(last_outgoing_request_time) =
+                self.last_outgoing_request_time
+            {
+                if last_outgoing_request_time - now <= self.request_timeout() {
+                    self.request_timed_out = false;
+                }
+            }
+        }
 
         // update request time
         if let Some(last_outgoing_request_time) =
@@ -168,6 +195,12 @@ impl SessionState {
     /// Adjusts the target request queue size based on the current download
     /// statistics.
     fn update_target_request_queue_len(&mut self) {
+        if self.request_timed_out {
+            // if we're still in the timeout, we don't want to increase
+            // the target request queue size
+            return;
+        }
+
         if let Some(target_request_queue_len) =
             &mut self.target_request_queue_len
         {
@@ -235,6 +268,8 @@ impl Default for SessionState {
             last_incoming_block_time: None,
             peer: None,
             avg_request_rtt: SlidingDurationAvg::default(),
+            request_timed_out: false,
+            timed_out_request_count: 0,
         }
     }
 }

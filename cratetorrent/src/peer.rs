@@ -4,8 +4,12 @@ use {
         stream::{Fuse, SplitSink},
         SinkExt, StreamExt,
     },
-    std::time::{Duration, Instant},
-    std::{net::SocketAddr, sync::Arc},
+    std::{
+        collections::HashMap,
+        net::SocketAddr,
+        sync::Arc,
+        time::{Duration, Instant},
+    },
     tokio::{
         net::TcpStream,
         sync::{
@@ -21,6 +25,7 @@ use {
     crate::{
         disk::DiskHandle, download::PieceDownload, error::*,
         piece_picker::PiecePicker, torrent::SharedStatus, Bitfield, BlockInfo,
+        PieceIndex,
     },
     codec::*,
     state::*,
@@ -45,11 +50,11 @@ pub(crate) struct PeerSession {
     state: SessionState,
     /// These are the active piece downloads in which this session is
     /// participating.
-    downloads: Vec<PieceDownload>,
+    downloads: HashMap<PieceIndex, PieceDownload>,
     /// Our pending requests that we sent to peer. It represents the blocks that
     /// we are expecting. Thus, if we receive a block that is not in this list,
-    /// it is dropped. If we receive a block whose request entry is in here, the
-    /// entry is removed.
+    /// we need to drop it. If we receive a block whose request entry is in
+    /// here, the entry is removed.
     ///
     /// Since the Fast extension is not supported (yet), this is emptied when
     /// we're choked, as in that case we don't expect outstanding requests to be
@@ -84,7 +89,7 @@ impl PeerSession {
                 cmd_port: cmd_port.fuse(),
                 addr,
                 state: SessionState::default(),
-                downloads: Vec::new(),
+                downloads: HashMap::new(),
                 outgoing_requests: Vec::new(),
             },
             cmd_chan,
@@ -190,7 +195,7 @@ impl PeerSession {
         loop {
             select! {
                 instant = loop_timer.select_next_some() => {
-                    self.tick(instant.into_std());
+                    self.tick(&mut sink, instant.into_std()).await?;
                 }
                 msg = stream.select_next_some() => {
                     let msg = msg?;
@@ -245,10 +250,57 @@ impl PeerSession {
         Ok(())
     }
 
-    fn tick(&mut self, _instant: Instant) {
-        // TODO(https://github.com/mandreyel/cratetorrent/issues/43): check peer timeout
+    async fn tick(
+        &mut self,
+        sink: &mut SplitSink<Framed<TcpStream, PeerCodec>, Message>,
+        _instant: Instant,
+    ) -> Result<()> {
+        // TODO(https://github.com/mandreyel/cratetorrent/issues/43): check peer
+        // inactivity timeout
 
-        // TODO(https://github.com/mandreyel/cratetorrent/issues/42): send keep-alive
+        // resent requests if we have pending requests and more time has elapsed
+        // since the last request than the current timeout value
+        if let Some(last_outgoing_request_time) =
+            self.state.last_outgoing_request_time
+        {
+            let elapsed_since_last_request =
+                last_outgoing_request_time.elapsed();
+            if elapsed_since_last_request > self.state.request_timeout() {
+                log::warn!(
+                    "[Peer {}] timeout after {} ms (timeouts: {})",
+                    self.addr,
+                    elapsed_since_last_request.as_millis(),
+                    self.state.timed_out_request_count + 1,
+                );
+                // peer has timed out, only allow a single outstanding request
+                // from now until peer hasn't timed out
+                self.state.target_request_queue_len = Some(1);
+                self.state.timed_out_request_count += 1;
+                self.state.request_timed_out = true;
+                self.state.in_slow_start = false;
+                // Cancel all requests and re-issue a single one (since we can
+                // only request a single block now). Start by freeing up the
+                // block in its piece download.
+                for block in self.outgoing_requests.iter() {
+                    // this fires as a result of a broken invariant: we
+                    // shouldn't have an entry in `outgoing_requests` without a
+                    // corresponding entry in `downloads`
+                    //
+                    // TODO(https://github.com/mandreyel/cratetorrent/issues/11):
+                    // can we handle this without unwrapping?
+                    self.downloads
+                        .get_mut(&block.piece_index)
+                        .expect("No corresponding PieceDownload for request")
+                        .cancel_request(block);
+                }
+                self.outgoing_requests.clear();
+                // try to make another request
+                self.make_requests(sink).await?;
+            }
+        }
+
+        // TODO(https://github.com/mandreyel/cratetorrent/issues/42): send
+        // keep-alive
 
         // update status
         self.state.tick();
@@ -264,6 +316,8 @@ impl PeerSession {
             self.state.avg_request_rtt.mean().as_millis(),
             self.state.avg_request_rtt.mean().as_secs(),
         );
+
+        Ok(())
     }
 
     /// Handles a message expected in the `AvailabilityExchange` state
@@ -431,7 +485,7 @@ impl PeerSession {
 
         // If we have active downloads, prefer to continue those. This will
         // result in less in-progress pieces.
-        for download in self.downloads.iter_mut() {
+        for download in self.downloads.values_mut() {
             log::debug!(
                 "Peer {} trying to continue download {}",
                 self.addr,
@@ -490,7 +544,7 @@ impl PeerSession {
 
                 download.pick_blocks(to_request_count, &mut blocks);
                 // save download
-                self.downloads.push(download);
+                self.downloads.insert(index, download);
             } else {
                 log::debug!(
                     "Could not pick more pieces from peer {}",
@@ -507,15 +561,17 @@ impl PeerSession {
                 self.addr,
                 self.outgoing_requests.len()
             );
+            let request_time = Instant::now();
             // save current volley of requests
             self.outgoing_requests.extend_from_slice(&blocks);
             // make the actual requests
             for block in blocks.iter() {
-                // TODO: batch these in a single syscall
+                // TODO: batch these in a single syscall, or is this already
+                // being done by the tokio codec type?
                 sink.send(Message::Request(*block)).await?;
             }
 
-            self.state.last_outgoing_request_time = Some(Instant::now());
+            self.state.last_outgoing_request_time = Some(request_time);
             self.state.uploaded_protocol_counter +=
                 blocks.len() as u64 * MessageId::Request.header_len();
         }
@@ -560,37 +616,27 @@ impl PeerSession {
         // remove block from our pending requests queue
         self.outgoing_requests.remove(request_pos);
 
+        let piece_index = block_info.piece_index;
         // mark the block as downloaded with its respective piece
         // download instance
-        let download_pos = self
-            .downloads
-            .iter()
-            .position(|d| d.piece_index() == block_info.piece_index);
+        let download = self.downloads.get_mut(&piece_index);
         // this fires as a result of a broken invariant: we
         // shouldn't have an entry in `outgoing_requests` without a
         // corresponding entry in `downloads`
         //
         // TODO(https://github.com/mandreyel/cratetorrent/issues/11): can we
         // handle this without unwrapping?
-        debug_assert!(download_pos.is_some());
-        let download_pos = download_pos.unwrap();
-        let download = &mut self.downloads[download_pos];
-        download.received_block(block_info);
+        let download =
+            download.expect("No corresponding PieceDownload for request");
+        download.received_block(&block_info);
 
         // finish download of piece if this was the last missing block in it
         if download.is_complete() {
-            log::info!(
-                "Finished piece {} via peer {}",
-                block_info.piece_index,
-                self.addr
-            );
+            log::info!("Finished piece {} via peer {}", piece_index, self.addr);
             // register received piece
-            self.piece_picker
-                .write()
-                .await
-                .received_piece(block_info.piece_index);
+            self.piece_picker.write().await.received_piece(piece_index);
             // remove piece download from `downloads`
-            self.downloads.remove(download_pos);
+            self.downloads.remove(&piece_index);
         }
 
         // update download stats
