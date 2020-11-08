@@ -1,6 +1,8 @@
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-use crate::{counter::Counter, Bitfield, PeerId, BLOCK_LEN};
+use crate::{
+    avg::SlidingDurationAvg, counter::Counter, Bitfield, PeerId, BLOCK_LEN,
+};
 
 /// Holds and provides facilities to modify the state of a peer session.
 pub(super) struct SessionState {
@@ -63,6 +65,15 @@ pub(super) struct SessionState {
     /// Updated with the time of receipt of the most recently received requested
     /// block.
     pub last_incoming_block_time: Option<Instant>,
+    /// This is the average network round-trip-time between the last issued
+    /// a request and receiving the next block.
+    ///
+    /// Note that it doesn't have to be the same block since peers are not
+    /// required to serve our requests in order, so this is more of a general
+    /// approximation.
+    pub avg_request_rtt: SlidingDurationAvg,
+    pub request_timed_out: bool,
+    pub timed_out_request_count: usize,
 }
 
 impl SessionState {
@@ -75,6 +86,28 @@ impl SessionState {
     /// The target request queue size is set to this value once we are able to start
     /// downloading.
     const START_REQUEST_QUEUE_LEN: usize = 4;
+
+    /// The smallest timeout value we can give a peer. This is so that we don't
+    const MIN_TIMEOUT_S: u64 = 2;
+
+    /// Returns the current request timeout value, based on the running average
+    /// of past request round trip times.
+    pub fn request_timeout(&self) -> Duration {
+        // we allow up to four times the average deviation from the mean
+        let t =
+            self.avg_request_rtt.mean() + 4 * self.avg_request_rtt.deviation();
+        t.max(Duration::from_secs(Self::MIN_TIMEOUT_S))
+    }
+
+    /// Updates state to reflect that peer was timed out.
+    pub fn record_request_timeout(&mut self) {
+        // peer has timed out, only allow a single outstanding request
+        // from now until peer hasn't timed out
+        self.target_request_queue_len = Some(1);
+        self.timed_out_request_count += 1;
+        self.request_timed_out = true;
+        self.in_slow_start = false;
+    }
 
     /// Prepares for requesting blocks.
     ///
@@ -94,6 +127,27 @@ impl SessionState {
     /// This should be called every time a block is received.
     pub fn update_download_stats(&mut self, block_len: u32) {
         let now = Instant::now();
+
+        // If we timed out before, check if this request arrived within the
+        // timeout window, or outside of it. If it arrived within the
+        // window, we can mark peer as having recovered from the timeout.
+        if self.request_timed_out {
+            if let Some(last_outgoing_request_time) =
+                self.last_outgoing_request_time
+            {
+                if last_outgoing_request_time - now <= self.request_timeout() {
+                    self.request_timed_out = false;
+                }
+            }
+        }
+
+        // update request time
+        if let Some(last_outgoing_request_time) =
+            &mut self.last_outgoing_request_time
+        {
+            let request_rtt = now.duration_since(*last_outgoing_request_time);
+            self.avg_request_rtt.update(request_rtt);
+        }
 
         self.downloaded_payload_counter += block_len as u64;
         self.last_incoming_block_time = Some(now);
@@ -125,9 +179,13 @@ impl SessionState {
         // concluded (having this round's download accounted for in the download
         // rate).
         // TODO: can we statically ensure this rather than rely on the comment?
-        self.reset_counters();
+        self.reset_per_tick_counters();
 
-        self.update_target_request_queue_len();
+        // if we're still in the timeout, we don't want to increase
+        // the target request queue size
+        if !self.request_timed_out {
+            self.update_target_request_queue_len();
+        }
     }
 
     /// Check if we need to exit slow start.
@@ -186,7 +244,7 @@ impl SessionState {
     }
 
     /// Marks the end of the round for the various throughput rate counters.
-    fn reset_counters(&mut self) {
+    fn reset_per_tick_counters(&mut self) {
         for counter in [
             &mut self.downloaded_payload_counter,
             &mut self.uploaded_protocol_counter,
@@ -217,6 +275,9 @@ impl Default for SessionState {
             last_outgoing_request_time: None,
             last_incoming_block_time: None,
             peer: None,
+            avg_request_rtt: SlidingDurationAvg::default(),
+            request_timed_out: false,
+            timed_out_request_count: 0,
         }
     }
 }

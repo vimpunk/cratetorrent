@@ -431,10 +431,7 @@ impl<'a> IoVecs<'a> {
                 assert!(slice.len() >= n);
                 let ptr = slice.as_ptr();
                 let slice = unsafe {
-                    std::slice::from_raw_parts(
-                        ptr.offset(n as isize),
-                        slice.len() - n,
-                    )
+                    std::slice::from_raw_parts(ptr.add(n), slice.len() - n)
                 };
                 self.bufs[0] = IoVec::from_slice(slice);
             }

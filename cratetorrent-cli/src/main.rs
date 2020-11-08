@@ -42,7 +42,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let seeds = matches
         .value_of("seeds")
         .ok_or_else(|| "--seeds must be set")?
-        .split(",")
+        .split(',')
         .filter_map(|s| s.parse().ok())
         .collect();
     let metainfo_path = matches

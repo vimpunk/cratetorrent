@@ -13,8 +13,8 @@ impl Default for Block {
     }
 }
 
-/// A piece download tracks the completion of an ongoing piece download and is
-/// used to request the next block in piece.
+/// Tracks the completion of an ongoing piece download and is used to request
+/// missing blocks in piece.
 pub(crate) struct PieceDownload {
     /// The piece's index.
     index: PieceIndex,
@@ -85,7 +85,7 @@ impl PieceDownload {
     }
 
     /// Marks the given block as received so that it is not picked again.
-    pub fn received_block(&mut self, block: BlockInfo) {
+    pub fn received_block(&mut self, block: &BlockInfo) {
         log::trace!("Received piece {} block {:?}", self.index, block);
 
         // TODO(https://github.com/mandreyel/cratetorrent/issues/16): this
@@ -105,6 +105,24 @@ impl PieceDownload {
 
         // TODO(https://github.com/mandreyel/cratetorrent/issues/9): record
         // rount trip time for this block
+    }
+
+    /// Marks a previously requested block free to request again.
+    pub fn cancel_request(&mut self, block: &BlockInfo) {
+        log::trace!(
+            "Canceling request for piece {} block {:?}",
+            self.index,
+            block
+        );
+
+        // TODO(https://github.com/mandreyel/cratetorrent/issues/16): this
+        // information is sanitized in PeerSession but maybe we want to return
+        // a Result anyway
+        debug_assert_eq!(block.piece_index, self.index);
+        debug_assert!(block.offset < self.len);
+        debug_assert!(block.len <= self.len);
+
+        self.blocks[block.index_in_piece()] = Block::Free;
     }
 
     /// Returns true if the piece has all blocks downloaded.
@@ -198,7 +216,7 @@ mod tests {
         assert_eq!(blocks.len(), block_count);
 
         // mark all blocks as requested
-        for block in blocks.into_iter() {
+        for block in blocks.iter() {
             download.received_block(block);
         }
 
@@ -225,7 +243,7 @@ mod tests {
         // mark 3 of them as received
         let received_block_count = 3;
         for block in blocks.iter().take(received_block_count) {
-            download.received_block(*block);
+            download.received_block(block);
         }
 
         let block_count = block_count(piece_len);

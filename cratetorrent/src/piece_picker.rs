@@ -1,4 +1,4 @@
-use crate::{error::*, Bitfield};
+use crate::{error::*, Bitfield, PieceIndex};
 
 pub(crate) struct PiecePicker {
     /// Represents the pieces that we have downloaded.
@@ -34,7 +34,7 @@ impl PiecePicker {
 
     /// Returns the first piece that we don't yet have and isn't already being
     /// downloaded, or None, if no piece can be picked at this time.
-    pub fn pick_piece(&mut self) -> Option<usize> {
+    pub fn pick_piece(&mut self) -> Option<PieceIndex> {
         log::trace!("Picking next piece");
 
         for (index, have_piece) in self.own_pieces.iter().enumerate() {
@@ -86,7 +86,7 @@ impl PiecePicker {
 
     /// Tells the piece picker that we have downloaded the piece at the given
     /// index.
-    pub fn received_piece(&mut self, index: usize) {
+    pub fn received_piece(&mut self, index: PieceIndex) {
         log::trace!("Registering received piece {}", index);
 
         // we assert here as this method is only called by internal methods on
@@ -134,7 +134,9 @@ mod tests {
         let piece_count = 15;
         let mut piece_picker = PiecePicker::new(piece_count);
         let available_pieces = Bitfield::repeat(true, piece_count);
-        piece_picker.register_availability(&available_pieces);
+        piece_picker
+            .register_availability(&available_pieces)
+            .unwrap();
 
         // save picked pieces
         let mut picked = HashSet::with_capacity(piece_count);
@@ -163,7 +165,9 @@ mod tests {
         let piece_count = 15;
         let mut piece_picker = PiecePicker::new(piece_count);
         let available_pieces = Bitfield::repeat(true, piece_count);
-        piece_picker.register_availability(&available_pieces);
+        piece_picker
+            .register_availability(&available_pieces)
+            .unwrap();
         assert!(piece_picker.own_pieces.not_any());
 
         // mark pieces as received
