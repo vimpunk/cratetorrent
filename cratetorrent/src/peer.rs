@@ -262,7 +262,7 @@ impl PeerSession {
             let request_timeout = self.state.request_timeout();
             log::debug!(
                 "[Peer {}] Checking request timeout \
-                (req. {} ms ago, timeout: {} ms)",
+                (last {} ms ago, timeout: {} ms)",
                 self.addr,
                 elapsed_since_last_request.as_millis(),
                 request_timeout.as_millis()

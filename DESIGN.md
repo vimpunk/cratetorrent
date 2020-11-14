@@ -590,9 +590,12 @@ arrives.
 A piece download tracks the piece completion of an ongoing piece download.
 
 It plays an important role in optimizing download performance:
-- it plays a role in timing out peer requests
-- and (currently unimplemented) end game mode to speed up the last part of the
+- sharing block requests in piece among peers,
+- timing out peer requests,
+- and end game mode to speed up the last part of the
   download.
+
+Currently the last two are not implemented.
 
 Piece downloads are stored in the torrent and shared with all peers in the
 torrent. When a peer starts a new download, it places the download instance in
