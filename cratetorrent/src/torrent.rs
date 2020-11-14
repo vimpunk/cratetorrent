@@ -4,6 +4,7 @@ use {
         stream::{Fuse, StreamExt},
     },
     std::{
+        collections::HashMap,
         net::SocketAddr,
         sync::Arc,
         time::{Duration, Instant},
@@ -13,11 +14,12 @@ use {
 
 use crate::{
     disk::{DiskHandle, TorrentAlert, TorrentAlertReceiver},
+    download::PieceDownload,
     error::*,
     peer::{self, PeerSession},
     piece_picker::PiecePicker,
     storage_info::StorageInfo,
-    PeerId, Sha1Hash, TorrentId,
+    PeerId, PieceIndex, Sha1Hash, TorrentId,
 };
 
 pub(crate) struct Torrent {
@@ -67,6 +69,7 @@ impl Torrent {
         let status = Status {
             shared: Arc::new(SharedStatus {
                 id,
+                downloads: RwLock::new(HashMap::new()),
                 info_hash,
                 client_id,
                 storage: storage_info,
@@ -244,10 +247,21 @@ struct Status {
 /// This type contains fields that need to be read or updated by peer sessions.
 /// Fields expected to be mutated are thus secured for inter-task access with
 /// various synchronization primitives.
-#[derive(Debug)]
 pub(crate) struct SharedStatus {
     /// The torrent ID, unique in this engine.
     pub id: TorrentId,
+    /// These are the active piece downloads in which the peer sessions in this
+    /// torrent are participating.
+    ///
+    /// They are stored and synchronized in this object to download a piece from
+    /// multiple peers, which helps us to have fewer incomplete pieces.
+    ///
+    /// Peer sessions may be run on different threads, any of which may read and
+    /// write to this map and to the pieces in the map. Thus we need a read
+    /// write lock on both.
+    // TODO: Benchmark whether using the nested locking approach isn't too slow.
+    // For mvp it should do.
+    pub downloads: RwLock<HashMap<PieceIndex, RwLock<PieceDownload>>>,
     /// The info hash of the torrent, derived from its metainfo. This is used to
     /// identify the torrent with other peers and trackers.
     pub info_hash: Sha1Hash,

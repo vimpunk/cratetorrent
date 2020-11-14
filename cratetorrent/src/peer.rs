@@ -5,7 +5,6 @@ use {
         SinkExt, StreamExt,
     },
     std::{
-        collections::HashMap,
         net::SocketAddr,
         sync::Arc,
         time::{Duration, Instant},
@@ -25,7 +24,6 @@ use {
     crate::{
         disk::DiskHandle, download::PieceDownload, error::*,
         piece_picker::PiecePicker, torrent::SharedStatus, Bitfield, BlockInfo,
-        PieceIndex,
     },
     codec::*,
     state::*,
@@ -48,9 +46,6 @@ pub(crate) struct PeerSession {
     addr: SocketAddr,
     /// Session related information.
     state: SessionState,
-    /// These are the active piece downloads in which this session is
-    /// participating.
-    downloads: HashMap<PieceIndex, PieceDownload>,
     /// Our pending requests that we sent to peer. It represents the blocks that
     /// we are expecting. Thus, if we receive a block that is not in this list,
     /// we need to drop it. If we receive a block whose request entry is in
@@ -89,7 +84,6 @@ impl PeerSession {
                 cmd_port: cmd_port.fuse(),
                 addr,
                 state: SessionState::default(),
-                downloads: HashMap::new(),
                 outgoing_requests: Vec::new(),
             },
             cmd_chan,
@@ -263,16 +257,24 @@ impl PeerSession {
         if let Some(last_outgoing_request_time) =
             self.state.last_outgoing_request_time
         {
-            let elapsed_since_last_request =
-                last_outgoing_request_time.elapsed();
-            if elapsed_since_last_request > self.state.request_timeout() {
+            let elapsed_since_last_request = Instant::now()
+                .saturating_duration_since(last_outgoing_request_time);
+            let request_timeout = self.state.request_timeout();
+            log::debug!(
+                "[Peer {}] Checking request timeout \
+                (last {} ms ago, timeout: {} ms)",
+                self.addr,
+                elapsed_since_last_request.as_millis(),
+                request_timeout.as_millis()
+            );
+            if elapsed_since_last_request > request_timeout {
                 log::warn!(
                     "[Peer {}] timeout after {} ms (timeouts: {})",
                     self.addr,
                     elapsed_since_last_request.as_millis(),
                     self.state.timed_out_request_count + 1,
                 );
-                self.state.record_request_timeout();
+                self.state.register_request_timeout();
                 // Cancel all requests and re-issue a single one (since we can
                 // only request a single block now). Start by freeing up the
                 // block in its piece download.
@@ -283,9 +285,14 @@ impl PeerSession {
                     //
                     // TODO(https://github.com/mandreyel/cratetorrent/issues/11):
                     // can we handle this without unwrapping?
-                    self.downloads
+                    self.torrent
+                        .downloads
+                        .write()
+                        .await
                         .get_mut(&block.piece_index)
                         .expect("No corresponding PieceDownload for request")
+                        .write()
+                        .await
                         .cancel_request(block);
                 }
                 self.outgoing_requests.clear();
@@ -347,10 +354,12 @@ impl PeerSession {
             return Err(Error::PeerNotSeed);
         }
 
-        // register peer's pieces with piece picker
-        let mut piece_picker = self.piece_picker.write().await;
-        self.state.is_interested =
-            piece_picker.register_availability(&bitfield)?;
+        // register peer's pieces with piece picker and determine interest in it
+        self.state.is_interested = self
+            .piece_picker
+            .write()
+            .await
+            .register_availability(&bitfield)?;
         debug_assert!(self.state.is_interested);
         if let Some(peer_info) = &mut self.state.peer {
             peer_info.pieces = Some(bitfield);
@@ -477,36 +486,33 @@ impl PeerSession {
 
         // TODO: optimize this by preallocating the vector in self
         let mut blocks = Vec::new();
+        let target_request_queue_len =
+            self.state.target_request_queue_len.unwrap_or_default();
 
         // If we have active downloads, prefer to continue those. This will
         // result in less in-progress pieces.
-        for download in self.downloads.values_mut() {
-            log::debug!(
-                "Peer {} trying to continue download {}",
-                self.addr,
-                download.piece_index()
-            );
-
+        for download in self.torrent.downloads.write().await.values_mut() {
+            // check and calculate the number of requests we can make now
             let outgoing_request_count =
                 blocks.len() + self.outgoing_requests.len();
             // our outgoing request queue shouldn't exceed the allowed request
             // queue size
-            debug_assert!(
-                self.state.target_request_queue_len.unwrap_or_default()
-                    >= outgoing_request_count
-            );
-            // the number of requests we can make now
-            let to_request_count =
-                self.state.target_request_queue_len.unwrap_or_default()
-                    - outgoing_request_count;
-            if to_request_count == 0 {
+            if outgoing_request_count >= target_request_queue_len {
                 break;
             }
+            let to_request_count =
+                target_request_queue_len - outgoing_request_count;
 
-            // TODO: should we not check first that we aren't already
-            // downloading all of the piece's blocks?
+            // TODO: should we check first that we aren't already downloading
+            // all of the piece's blocks? requires read then write
 
-            download.pick_blocks(to_request_count, &mut blocks);
+            let mut download_write_guard = download.write().await;
+            log::trace!(
+                "Peer {} trying to continue download {}",
+                self.addr,
+                download_write_guard.piece_index()
+            );
+            download_write_guard.pick_blocks(to_request_count, &mut blocks);
         }
 
         // while we can make more requests we start new download(s)
@@ -515,21 +521,15 @@ impl PeerSession {
                 blocks.len() + self.outgoing_requests.len();
             // our outgoing request queue shouldn't exceed the allowed request
             // queue size
-            debug_assert!(
-                self.state.target_request_queue_len.unwrap_or_default()
-                    >= outgoing_request_count
-            );
-            let to_request_count =
-                self.state.target_request_queue_len.unwrap_or_default()
-                    - outgoing_request_count;
-            if to_request_count == 0 {
+            if outgoing_request_count >= target_request_queue_len {
                 break;
             }
+            let to_request_count =
+                target_request_queue_len - outgoing_request_count;
 
             log::debug!("Session {} starting new piece download", self.addr);
 
-            let mut piece_picker = self.piece_picker.write().await;
-            if let Some(index) = piece_picker.pick_piece() {
+            if let Some(index) = self.piece_picker.write().await.pick_piece() {
                 log::info!("Session {} picked piece {}", self.addr, index);
 
                 let mut download = PieceDownload::new(
@@ -539,11 +539,18 @@ impl PeerSession {
 
                 download.pick_blocks(to_request_count, &mut blocks);
                 // save download
-                self.downloads.insert(index, download);
+                self.torrent
+                    .downloads
+                    .write()
+                    .await
+                    .insert(index, RwLock::new(download));
             } else {
                 log::debug!(
-                    "Could not pick more pieces from peer {}",
-                    self.addr
+                    "Could not pick more pieces from peer {} (pending: \
+                    pieces: {}, blocks: {})",
+                    self.addr,
+                    self.torrent.downloads.read().await.len(),
+                    self.outgoing_requests.len(),
                 );
                 break;
             }
@@ -556,7 +563,7 @@ impl PeerSession {
                 self.addr,
                 self.outgoing_requests.len()
             );
-            let request_time = Instant::now();
+            self.state.last_outgoing_request_time = Some(Instant::now());
             // save current volley of requests
             self.outgoing_requests.extend_from_slice(&blocks);
             // make the actual requests
@@ -564,11 +571,9 @@ impl PeerSession {
                 // TODO: batch these in a single syscall, or is this already
                 // being done by the tokio codec type?
                 sink.send(Message::Request(*block)).await?;
+                self.state.uploaded_protocol_counter +=
+                    MessageId::Request.header_len();
             }
-
-            self.state.last_outgoing_request_time = Some(request_time);
-            self.state.uploaded_protocol_counter +=
-                blocks.len() as u64 * MessageId::Request.header_len();
         }
 
         Ok(())
@@ -611,28 +616,9 @@ impl PeerSession {
         // remove block from our pending requests queue
         self.outgoing_requests.remove(request_pos);
 
-        let piece_index = block_info.piece_index;
         // mark the block as downloaded with its respective piece
         // download instance
-        let download = self.downloads.get_mut(&piece_index);
-        // this fires as a result of a broken invariant: we
-        // shouldn't have an entry in `outgoing_requests` without a
-        // corresponding entry in `downloads`
-        //
-        // TODO(https://github.com/mandreyel/cratetorrent/issues/11): can we
-        // handle this without unwrapping?
-        let download =
-            download.expect("No corresponding PieceDownload for request");
-        download.received_block(&block_info);
-
-        // finish download of piece if this was the last missing block in it
-        if download.is_complete() {
-            log::info!("Finished piece {} via peer {}", piece_index, self.addr);
-            // register received piece
-            self.piece_picker.write().await.received_piece(piece_index);
-            // remove piece download from `downloads`
-            self.downloads.remove(&piece_index);
-        }
+        self.register_downloaded_block(&block_info).await;
 
         // update download stats
         self.state.update_download_stats(block_info.len);
@@ -642,6 +628,40 @@ impl PeerSession {
         self.disk.write_block(self.torrent.id, block_info, data)?;
 
         Ok(())
+    }
+
+    /// Marks the newly downloaded block in the piece picker and its piece
+    /// download instance.
+    ///
+    /// If the block completes the piece, the piece download is removed from the
+    /// shared download map and the piece is marked as complete in the piece
+    /// picker.
+    async fn register_downloaded_block(&self, block_info: &BlockInfo) {
+        let mut downloads_write_guard = self.torrent.downloads.write().await;
+
+        let piece_index = block_info.piece_index;
+        let download = downloads_write_guard.get_mut(&piece_index);
+        // this fires as a result of a broken invariant: we
+        // shouldn't have an entry in `outgoing_requests` without a
+        // corresponding entry in `downloads`
+        //
+        // TODO(https://github.com/mandreyel/cratetorrent/issues/11): can we
+        // handle this without unwrapping?
+        let download =
+            download.expect("No corresponding PieceDownload for request");
+        download.write().await.received_block(&block_info);
+
+        // finish download of piece if this was the last missing block in it
+        if download.read().await.is_complete() {
+            log::info!("Finished piece {} via peer {}", piece_index, self.addr);
+            // remove piece download from `downloads`
+            downloads_write_guard.remove(&piece_index);
+            // drop the write guard to avoid holding two write locks that could
+            // later cause deadlocks
+            drop(downloads_write_guard);
+            // register received piece
+            self.piece_picker.write().await.received_piece(piece_index);
+        }
     }
 }
 

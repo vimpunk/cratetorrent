@@ -42,7 +42,7 @@ impl PieceDownload {
     /// Picks the requested number of blocks or fewer, if fewer are remaining.
     pub fn pick_blocks(&mut self, count: usize, blocks: &mut Vec<BlockInfo>) {
         log::trace!(
-            "Picking {} block(s) in piece {} (length: {}, blocks: {})",
+            "Trying to pick {} block(s) in piece {} (length: {}, blocks: {})",
             count,
             self.index,
             self.len,
@@ -73,14 +73,14 @@ impl PieceDownload {
         }
 
         if picked > 0 {
-            log::debug!(
+            log::trace!(
                 "Picked {} block(s) for piece {}: {:?}",
                 picked,
                 self.index,
                 &blocks[blocks.len() - picked..]
             );
         } else {
-            log::debug!("Cannot pick any blocks in piece {}", self.index);
+            log::trace!("Cannot pick any blocks in piece {}", self.index);
         }
     }
 
