@@ -257,16 +257,24 @@ impl PeerSession {
         if let Some(last_outgoing_request_time) =
             self.state.last_outgoing_request_time
         {
-            let elapsed_since_last_request =
-                last_outgoing_request_time.elapsed();
-            if elapsed_since_last_request > self.state.request_timeout() {
+            let elapsed_since_last_request = Instant::now()
+                .saturating_duration_since(last_outgoing_request_time);
+            let request_timeout = self.state.request_timeout();
+            log::debug!(
+                "[Peer {}] Checking request timeout \
+                (req. {} ms ago, timeout: {} ms)",
+                self.addr,
+                elapsed_since_last_request.as_millis(),
+                request_timeout.as_millis()
+            );
+            if elapsed_since_last_request > request_timeout {
                 log::warn!(
                     "[Peer {}] timeout after {} ms (timeouts: {})",
                     self.addr,
                     elapsed_since_last_request.as_millis(),
                     self.state.timed_out_request_count + 1,
                 );
-                self.state.record_request_timeout();
+                self.state.register_request_timeout();
                 // Cancel all requests and re-issue a single one (since we can
                 // only request a single block now). Start by freeing up the
                 // block in its piece download.
@@ -478,31 +486,28 @@ impl PeerSession {
 
         // TODO: optimize this by preallocating the vector in self
         let mut blocks = Vec::new();
+        let target_request_queue_len =
+            self.state.target_request_queue_len.unwrap_or_default();
 
         // If we have active downloads, prefer to continue those. This will
         // result in less in-progress pieces.
         for download in self.torrent.downloads.write().await.values_mut() {
+            // check and calculate the number of requests we can make now
             let outgoing_request_count =
                 blocks.len() + self.outgoing_requests.len();
             // our outgoing request queue shouldn't exceed the allowed request
             // queue size
-            debug_assert!(
-                self.state.target_request_queue_len.unwrap_or_default()
-                    >= outgoing_request_count
-            );
-            // the number of requests we can make now
-            let to_request_count =
-                self.state.target_request_queue_len.unwrap_or_default()
-                    - outgoing_request_count;
-            if to_request_count == 0 {
+            if outgoing_request_count >= target_request_queue_len {
                 break;
             }
+            let to_request_count =
+                target_request_queue_len - outgoing_request_count;
 
             // TODO: should we check first that we aren't already downloading
             // all of the piece's blocks? requires read then write
 
             let mut download_write_guard = download.write().await;
-            log::debug!(
+            log::trace!(
                 "Peer {} trying to continue download {}",
                 self.addr,
                 download_write_guard.piece_index()
@@ -516,16 +521,11 @@ impl PeerSession {
                 blocks.len() + self.outgoing_requests.len();
             // our outgoing request queue shouldn't exceed the allowed request
             // queue size
-            debug_assert!(
-                self.state.target_request_queue_len.unwrap_or_default()
-                    >= outgoing_request_count
-            );
-            let to_request_count =
-                self.state.target_request_queue_len.unwrap_or_default()
-                    - outgoing_request_count;
-            if to_request_count == 0 {
+            if outgoing_request_count >= target_request_queue_len {
                 break;
             }
+            let to_request_count =
+                target_request_queue_len - outgoing_request_count;
 
             log::debug!("Session {} starting new piece download", self.addr);
 
@@ -546,8 +546,11 @@ impl PeerSession {
                     .insert(index, RwLock::new(download));
             } else {
                 log::debug!(
-                    "Could not pick more pieces from peer {}",
-                    self.addr
+                    "Could not pick more pieces from peer {} (pending: \
+                    pieces: {}, blocks: {})",
+                    self.addr,
+                    self.torrent.downloads.read().await.len(),
+                    self.outgoing_requests.len(),
                 );
                 break;
             }
@@ -560,7 +563,7 @@ impl PeerSession {
                 self.addr,
                 self.outgoing_requests.len()
             );
-            let request_time = Instant::now();
+            self.state.last_outgoing_request_time = Some(Instant::now());
             // save current volley of requests
             self.outgoing_requests.extend_from_slice(&blocks);
             // make the actual requests
@@ -568,11 +571,9 @@ impl PeerSession {
                 // TODO: batch these in a single syscall, or is this already
                 // being done by the tokio codec type?
                 sink.send(Message::Request(*block)).await?;
+                self.state.uploaded_protocol_counter +=
+                    MessageId::Request.header_len();
             }
-
-            self.state.last_outgoing_request_time = Some(request_time);
-            self.state.uploaded_protocol_counter +=
-                blocks.len() as u64 * MessageId::Request.header_len();
         }
 
         Ok(())

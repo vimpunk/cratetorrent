@@ -65,13 +65,17 @@ impl Disk {
     pub(super) async fn start(&mut self) -> Result<()> {
         log::info!("Starting disk IO event loop");
         while let Some(cmd) = self.cmd_port.recv().await {
-            log::debug!("Disk received command");
             match cmd {
                 Command::NewTorrent {
                     id,
                     info,
                     piece_hashes,
                 } => {
+                    log::trace!(
+                        "Disk received NewTorrent command: id={}, info={:?}",
+                        id,
+                        info
+                    );
                     if self.torrents.contains_key(&id) {
                         log::warn!("Torrent {} already allocated", id);
                         self.alert_chan.send(Alert::TorrentAllocation(Err(

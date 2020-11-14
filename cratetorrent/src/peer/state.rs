@@ -100,7 +100,7 @@ impl SessionState {
     }
 
     /// Updates state to reflect that peer was timed out.
-    pub fn record_request_timeout(&mut self) {
+    pub fn register_request_timeout(&mut self) {
         // peer has timed out, only allow a single outstanding request
         // from now until peer hasn't timed out
         self.target_request_queue_len = Some(1);
@@ -128,24 +128,29 @@ impl SessionState {
     pub fn update_download_stats(&mut self, block_len: u32) {
         let now = Instant::now();
 
-        // If we timed out before, check if this request arrived within the
-        // timeout window, or outside of it. If it arrived within the
-        // window, we can mark peer as having recovered from the timeout.
-        if self.request_timed_out {
-            if let Some(last_outgoing_request_time) =
-                self.last_outgoing_request_time
-            {
-                if last_outgoing_request_time - now <= self.request_timeout() {
-                    self.request_timed_out = false;
-                }
-            }
-        }
-
         // update request time
         if let Some(last_outgoing_request_time) =
             &mut self.last_outgoing_request_time
         {
-            let request_rtt = now.duration_since(*last_outgoing_request_time);
+            // Due to what is presumed to be inconsistencies with the
+            // `Instant::now()` API, it happens in rare circumstances that using
+            // the regular `duration_since` here panics (#48). I suspect this
+            // happens when requests are made a very short interval before this
+            // function is called, which is likely in very fast downloads.
+            // Either way, we guard against this by defaulting to 0.
+            let elapsed_since_last_request =
+                now.saturating_duration_since(*last_outgoing_request_time);
+
+            // If we timed out before, check if this request arrived within the
+            // timeout window, or outside of it. If it arrived within the
+            // window, we can mark peer as having recovered from the timeout.
+            if self.request_timed_out
+                && elapsed_since_last_request <= self.request_timeout()
+            {
+                self.request_timed_out = false;
+            }
+
+            let request_rtt = elapsed_since_last_request;
             self.avg_request_rtt.update(request_rtt);
         }
 
