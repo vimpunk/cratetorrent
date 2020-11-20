@@ -1,16 +1,14 @@
-use {
-    futures::{
-        select,
-        stream::{Fuse, StreamExt},
-    },
-    std::{
-        collections::HashMap,
-        net::SocketAddr,
-        sync::Arc,
-        time::{Duration, Instant},
-    },
-    tokio::{sync::RwLock, task, time},
+use futures::{
+    select,
+    stream::{Fuse, StreamExt},
 };
+use std::{
+    collections::HashMap,
+    net::SocketAddr,
+    sync::Arc,
+    time::{Duration, Instant},
+};
+use tokio::{sync::RwLock, task, time};
 
 use crate::{
     disk::{DiskHandle, TorrentAlert, TorrentAlertReceiver},
@@ -27,10 +25,6 @@ pub(crate) struct Torrent {
     seeds: Vec<Peer>,
     /// General status and information about the torrent.
     status: Status,
-    /// This is passed to peer and tracks the availability of our pieces as well
-    /// as pieces in the torrent swarm (more relevant when more peers are
-    /// added), and using this knowledge which piece to pick next.
-    piece_picker: Arc<RwLock<PiecePicker>>,
     /// The handle to the disk IO task, used to issue commands on it. A copy of
     /// this handle is passed down to each peer session.
     disk: DiskHandle,
@@ -66,9 +60,11 @@ impl Torrent {
             .collect();
 
         let piece_count = storage_info.piece_count;
+        let piece_picker = PiecePicker::new(piece_count);
         let status = Status {
-            shared: Arc::new(SharedStatus {
+            context: Arc::new(Context {
                 id,
+                piece_picker: Arc::new(RwLock::new(piece_picker)),
                 downloads: RwLock::new(HashMap::new()),
                 info_hash,
                 client_id,
@@ -78,15 +74,11 @@ impl Torrent {
             run_duration: Duration::default(),
         };
 
-        let piece_picker = PiecePicker::new(piece_count);
-        let piece_picker = Arc::new(RwLock::new(piece_picker));
-
         let disk_alert_port = disk_alert_port.fuse();
 
         Ok(Self {
             seeds,
             status,
-            piece_picker,
             disk,
             disk_alert_port,
         })
@@ -103,8 +95,7 @@ impl Torrent {
         // start all seed peer sessions
         for peer in self.seeds.iter_mut() {
             let (mut session, chan) = PeerSession::outbound(
-                Arc::clone(&self.status.shared),
-                Arc::clone(&self.piece_picker),
+                Arc::clone(&self.status.context),
                 self.disk.clone(),
                 peer.addr,
             );
@@ -158,6 +149,8 @@ impl Torrent {
         }
     }
 
+    /// Handles the disk message and returns whether the message should cause
+    /// the torrent to stop.
     async fn handle_disk_alert(
         &self,
         disk_alert: TorrentAlert,
@@ -173,6 +166,8 @@ impl Torrent {
                         if let Some(is_piece_valid) = batch.is_piece_valid {
                             if is_piece_valid {
                                 let missing_piece_count = self
+                                    .status
+                                    .context
                                     .piece_picker
                                     .read()
                                     .await
@@ -229,7 +224,7 @@ struct Peer {
 /// Status information of a torrent.
 struct Status {
     /// Information that is shared with peer sessions.
-    shared: Arc<SharedStatus>,
+    context: Arc<Context>,
     /// The time the torrent was first started.
     start_time: Option<Instant>,
     /// The total time the torrent has been running.
@@ -247,9 +242,12 @@ struct Status {
 /// This type contains fields that need to be read or updated by peer sessions.
 /// Fields expected to be mutated are thus secured for inter-task access with
 /// various synchronization primitives.
-pub(crate) struct SharedStatus {
+pub(crate) struct Context {
     /// The torrent ID, unique in this engine.
     pub id: TorrentId,
+    /// The piece picker picks the next most optimal piece to download and is
+    /// shared by all peers in a torrent.
+    pub piece_picker: Arc<RwLock<PiecePicker>>,
     /// These are the active piece downloads in which the peer sessions in this
     /// torrent are participating.
     ///

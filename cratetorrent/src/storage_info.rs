@@ -139,14 +139,14 @@ impl StorageInfo {
     }
 
     /// Returns the length of the piece at the given index.
-    // TODO: consider panicking instead, as it's more or less an application
-    // error to provide an out of bounds index
     pub fn piece_len(&self, index: PieceIndex) -> Result<u32> {
         if index == self.piece_count - 1 {
             Ok(self.last_piece_len)
         } else if index < self.piece_count - 1 {
             Ok(self.piece_len)
         } else {
+            // TODO: consider panicking instead, as it's more or less an application
+            // error to provide an out of bounds index
             log::error!("Piece {} is invalid for torrent: {:?}", index, self);
             Err(Error::InvalidPieceIndex)
         }

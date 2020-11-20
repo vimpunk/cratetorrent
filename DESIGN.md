@@ -456,15 +456,15 @@ by all entities using it. In this case, we would have the following issues:
   peer session tasks referring to the same `Disk`, whereas with the task based
   solution `Disk` is the only one accessing its own internal state.
 - Worse separation of concerns, leading to code that is more difficult to reason
-  about and thus potentially more bugs. Whereas having `Disk` on a separate task
-  allows for a sequential model of execution, which is clearer and less
+  about and thus potentially have more bugs. Whereas having `Disk` on a separate
+  task allows for a sequential model of execution, which is clearer and less
   error-prone.
 
 Spawning the disk task returns a command channel (aka disk handle) and a global
 alert port (aka receiver): the former is used for sending commands to disk and
 the latter is used to receive back the results of certain commands. However,
 because `mpsc` channels can only have a single receiver and because each torrent
-needs its own alert port, we a second layer of alert channels for torrents.
+needs its own alert port, we use a second layer of alert channels for torrents.
 
 Thus, when `Disk` receives a command to create a torrent, it creates the torrent
 specific alert channel's send and receive halves, and the latter is returned in

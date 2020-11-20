@@ -4,6 +4,12 @@
 #[macro_use]
 extern crate serde_derive;
 
+use std::fmt;
+
+use bitvec::prelude::{BitVec, Msb0};
+
+pub use storage_info::FileInfo;
+
 mod avg;
 mod counter;
 mod disk;
@@ -16,10 +22,6 @@ mod peer;
 mod piece_picker;
 mod storage_info;
 mod torrent;
-
-use bitvec::prelude::{BitVec, Msb0};
-
-pub use storage_info::FileInfo;
 
 /// The type of a piece's index.
 ///
@@ -65,7 +67,8 @@ pub(crate) struct BlockInfo {
     pub piece_index: PieceIndex,
     /// The zero-based byte offset into the piece.
     pub offset: u32,
-    /// The block's length in bytes. Always 16 KiB (0x4000 bytes), for now.
+    /// The block's length in bytes. Always 16 KiB (0x4000 bytes) or less, for
+    /// now.
     pub len: u32,
 }
 
@@ -78,6 +81,16 @@ impl BlockInfo {
         debug_assert!(self.len <= BLOCK_LEN);
         debug_assert!(self.len > 0);
         (self.offset / BLOCK_LEN) as PieceIndex
+    }
+}
+
+impl fmt::Display for BlockInfo {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "block[piece={} offs={} len={}]",
+            self.piece_index, self.offset, self.len
+        )
     }
 }
 

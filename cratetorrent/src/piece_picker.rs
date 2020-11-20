@@ -84,6 +84,20 @@ impl PiecePicker {
         Ok(interested)
     }
 
+    pub fn register_piece_availability(
+        &mut self,
+        index: PieceIndex,
+    ) -> Result<bool> {
+        log::trace!("Registering newly available piece {}", index);
+        match self.own_pieces.get(index) {
+            Some(is_interested) => {
+                self.pieces[index].frequency += 1;
+                Ok(*is_interested)
+            }
+            None => Err(Error::InvalidPieceIndex),
+        }
+    }
+
     /// Tells the piece picker that we have downloaded the piece at the given
     /// index.
     pub fn received_piece(&mut self, index: PieceIndex) {

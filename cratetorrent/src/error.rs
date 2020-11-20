@@ -5,7 +5,7 @@ pub use {
     tokio::{io::Error as IoError, sync::mpsc::error::SendError},
 };
 
-pub type Result<T> = std::result::Result<T, Error>;
+pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 #[derive(Debug)]
 pub enum Error {
@@ -38,10 +38,6 @@ pub enum Error {
     /// protocol, it should only be accepted after the handshake and when
     /// received at any other time, connection is severed.
     BitfieldNotAfterHandshake,
-    /// Only downloads are supported, so the peer we connect to must be a seed.
-    /// This error variant is expected to be removed soon, so it should not be
-    /// relied upon.
-    PeerNotSeed,
     /// Holds IO related errors.
     Io(IoError),
 }

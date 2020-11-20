@@ -34,9 +34,10 @@ pub(super) struct SessionState {
     pub downloaded_protocol_counter: Counter,
     /// Counts the bytes received during protocol chatter.
     pub uploaded_protocol_counter: Counter,
-    // TODO: add counter for uploaded payload bytes once seeding is supported
-    /// Counts the downloaded bytes.
+    /// Counts the downloaded block bytes.
     pub downloaded_payload_counter: Counter,
+    /// Counts the uploaded block bytes.
+    pub uploaded_payload_counter: Counter,
 
     /// The target request queue size is the number of block requests we keep
     /// outstanding to fully saturate the link.
@@ -65,6 +66,8 @@ pub(super) struct SessionState {
     /// Updated with the time of receipt of the most recently received requested
     /// block.
     pub last_incoming_block_time: Option<Instant>,
+    /// Updated with the time of receipt of the most recently uploaded block.
+    pub last_outgoing_block_time: Option<Instant>,
     /// This is the average network round-trip-time between the last issued
     /// a request and receiving the next block.
     ///
@@ -172,6 +175,11 @@ impl SessionState {
         }
     }
 
+    pub fn update_upload_stats(&mut self, block_len: u32) {
+        self.last_outgoing_block_time = Some(Instant::now());
+        self.uploaded_payload_counter += block_len as u64;
+    }
+
     /// Updates various statistics and session state.
     ///
     /// This should be called every second.
@@ -268,18 +276,25 @@ impl Default for SessionState {
     fn default() -> Self {
         Self {
             connection: ConnectionState::default(),
+
             in_slow_start: false,
             is_choked: true,
             is_interested: false,
             is_peer_choked: true,
             is_peer_interested: false,
             downloaded_protocol_counter: Counter::default(),
+
             uploaded_protocol_counter: Counter::default(),
             downloaded_payload_counter: Counter::default(),
+            uploaded_payload_counter: Counter::default(),
+
             target_request_queue_len: None,
             last_outgoing_request_time: None,
             last_incoming_block_time: None,
+            last_outgoing_block_time: None,
+
             peer: None,
+
             avg_request_rtt: SlidingDurationAvg::default(),
             request_timed_out: false,
             timed_out_request_count: 0,

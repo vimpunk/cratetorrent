@@ -1,11 +1,13 @@
-use {
-    bytes::{Buf, BufMut, BytesMut},
-    std::convert::{TryFrom, TryInto},
-    std::io,
-    tokio_util::codec::{Decoder, Encoder},
+use std::{
+    convert::{TryFrom, TryInto},
+    io,
+    ops::Deref,
 };
 
-use crate::{Bitfield, BlockInfo};
+use bytes::{Buf, BufMut, BytesMut};
+use tokio_util::codec::{Decoder, Encoder};
+
+use crate::{disk::CachedBlock, Bitfield, BlockInfo};
 
 /// The message sent at the beginning of a peer session by both sides of the
 /// connection.
@@ -168,7 +170,7 @@ pub(crate) enum Message {
     Block {
         piece_index: usize,
         offset: u32,
-        data: Vec<u8>,
+        data: Block,
     },
     Cancel(BlockInfo),
 }
@@ -200,6 +202,48 @@ impl Message {
             assert_eq!(*self, Self::KeepAlive);
             1
         }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Block {
+    Owned(Vec<u8>),
+    Cached(CachedBlock),
+}
+
+impl Block {
+    /// Returns the raw block if it's owned.
+    ///
+    /// # Panics
+    ///
+    /// This method panics if the block is not owned and is in the cache.
+    pub fn into_owned(self) -> Vec<u8> {
+        match self {
+            Self::Owned(b) => b,
+            _ => panic!("cannot move block out of cache"),
+        }
+    }
+}
+
+impl Deref for Block {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        match self {
+            Self::Owned(b) => b.as_ref(),
+            Self::Cached(b) => b.as_ref(),
+        }
+    }
+}
+
+impl From<Vec<u8>> for Block {
+    fn from(b: Vec<u8>) -> Self {
+        Self::Owned(b)
+    }
+}
+
+impl From<CachedBlock> for Block {
+    fn from(b: CachedBlock) -> Self {
+        Self::Cached(b)
     }
 }
 
@@ -508,7 +552,7 @@ impl Decoder for PeerCodec {
                 Message::Block {
                     piece_index,
                     offset,
-                    data,
+                    data: data.into(),
                 }
             }
             MessageId::Cancel => {
@@ -534,12 +578,13 @@ impl Decoder for PeerCodec {
 mod tests {
     use bytes::Bytes;
 
-    use {super::*, crate::BLOCK_LEN};
+    use super::*;
+    use crate::BLOCK_LEN;
 
-    // Tests a stream of arbitrary messages to ensure that not only do they
-    // encode and then decode correctly (like the individual test cases
-    // ascertain), but that the buffer cursor is properly advanced by the codec
-    // implementation in both cases.
+    /// Tests a stream of arbitrary messages to ensure that not only do they
+    /// encode and then decode correctly (like the individual test cases
+    /// ascertain), but that the buffer cursor is properly advanced by the codec
+    /// implementation in both cases.
     #[test]
     fn test_message_stream() {
         let (handshake, encoded_handshake) = make_handshake();
@@ -642,7 +687,7 @@ mod tests {
         }
     }
 
-    // Tests the encoding and subsequent decoding of a valid handshake.
+    /// Tests the encoding and subsequent decoding of a valid handshake.
     #[test]
     fn test_handshake_codec() {
         let (handshake, expected_encoded) = make_handshake();
@@ -662,8 +707,8 @@ mod tests {
         assert_eq!(decoded, Some(handshake));
     }
 
-    // Tests that the decoding of various invalid handshake messages results in
-    // an error.
+    /// Tests that the decoding of various invalid handshake messages results in
+    /// an error.
     #[test]
     fn test_invalid_handshake_decoding() {
         // try to decode a handshake with an invalid protocol string
@@ -736,80 +781,80 @@ mod tests {
         (handshake, encoded.into())
     }
 
-    // Tests the encoding and subsequent decoding of a valid 'choke' message.
+    /// Tests the encoding and subsequent decoding of a valid 'choke' message.
     #[test]
     fn test_keep_alive_codec() {
         let (msg, expected_encoded) = make_keep_alive();
         assert_message_codec(msg, expected_encoded);
     }
 
-    // Tests the encoding and subsequent decoding of a valid 'choke' message.
+    /// Tests the encoding and subsequent decoding of a valid 'choke' message.
     #[test]
     fn test_choke_codec() {
         let (msg, expected_encoded) = make_choke();
         assert_message_codec(msg, expected_encoded);
     }
 
-    // Tests the encoding and subsequent decoding of a valid 'unchoke' message.
+    /// Tests the encoding and subsequent decoding of a valid 'unchoke' message.
     #[test]
     fn test_unchoke_codec() {
         let (msg, expected_encoded) = make_unchoke();
         assert_message_codec(msg, expected_encoded);
     }
 
-    // Tests the encoding and subsequent decoding of a valid 'interested'
-    // message.
+    /// Tests the encoding and subsequent decoding of a valid 'interested'
+    /// message.
     #[test]
     fn test_interested_codec() {
         let (msg, expected_encoded) = make_interested();
         assert_message_codec(msg, expected_encoded);
     }
 
-    // Tests the encoding and subsequent decoding of a valid 'not interested'
-    // message.
+    /// Tests the encoding and subsequent decoding of a valid 'not interested'
+    /// message.
     #[test]
     fn test_not_interested_codec() {
         let (msg, expected_encoded) = make_not_interested();
         assert_message_codec(msg, expected_encoded);
     }
 
-    // Tests the encoding and subsequent decoding of a valid 'bitfield' message.
+    /// Tests the encoding and subsequent decoding of a valid 'bitfield' message.
     #[test]
     fn test_bitfield_codec() {
         let (msg, expected_encoded) = make_bitfield();
         assert_message_codec(msg, expected_encoded);
     }
 
-    // Tests the encoding and subsequent decoding of a valid 'have' message.
+    /// Tests the encoding and subsequent decoding of a valid 'have' message.
     #[test]
     fn test_have_codec() {
         let (msg, expected_encoded) = make_have();
         assert_message_codec(msg, expected_encoded);
     }
 
-    // Tests the encoding and subsequent decoding of a valid 'request' message.
+    /// Tests the encoding and subsequent decoding of a valid 'request' message.
     #[test]
     fn test_request_codec() {
         let (msg, expected_encoded) = make_request();
         assert_message_codec(msg, expected_encoded);
     }
 
-    // Tests the encoding and subsequent decoding of a valid 'block' message.
+    /// Tests the encoding and subsequent decoding of a valid 'block' message.
     #[test]
     fn test_block_codec() {
         let (msg, expected_encoded) = make_block();
         assert_message_codec(msg, expected_encoded);
     }
 
-    // Tests the encoding and subsequent decoding of a valid 'cancel' message.
+    /// Tests the encoding and subsequent decoding of a valid 'cancel' message.
     #[test]
     fn test_cancel_codec() {
         let (msg, expected_encoded) = make_cancel();
         assert_message_codec(msg, expected_encoded);
     }
 
-    // Helper function that asserts that a message is encoded and subsequently
-    // decoded correctly.
+    /// Helper function that asserts that a message is encoded and subsequently
+    /// decoded correctly.
     fn assert_message_codec(msg: Message, expected_encoded: Bytes) {
         // encode message
         let mut encoded = BytesMut::with_capacity(expected_encoded.len());
@@ -838,7 +883,7 @@ mod tests {
         )
     }
 
-    // Returns `Unchoke` and its expected encoded variant.
+    /// Returns `Unchoke` and its expected encoded variant.
     fn make_unchoke() -> (Message, Bytes) {
         (
             Message::Unchoke,
@@ -846,7 +891,7 @@ mod tests {
         )
     }
 
-    // Returns `Interested` and its expected encoded variant.
+    /// Returns `Interested` and its expected encoded variant.
     fn make_interested() -> (Message, Bytes) {
         (
             Message::Interested,
@@ -854,7 +899,7 @@ mod tests {
         )
     }
 
-    // Returns `NotInterested` and its expected encoded variant.
+    /// Returns `NotInterested` and its expected encoded variant.
     fn make_not_interested() -> (Message, Bytes) {
         (
             Message::NotInterested,
@@ -862,8 +907,8 @@ mod tests {
         )
     }
 
-    // Helper used to create 'choke', 'unchoke', 'interested', and 'not
-    // interested' encoded messages that all have the same format.
+    /// Helper used to create 'choke', 'unchoke', 'interested', and 'not
+    /// interested' encoded messages that all have the same format.
     fn make_empty_msg_encoded_payload(id: MessageId) -> Bytes {
         // 1 byte message id
         let msg_len = 1;
@@ -875,7 +920,7 @@ mod tests {
         buf.into()
     }
 
-    // Returns `Bitfield` and its expected encoded variant.
+    /// Returns `Bitfield` and its expected encoded variant.
     fn make_bitfield() -> (Message, Bytes) {
         let bitfield =
             Bitfield::from_slice(&[0b11001001, 0b10000011, 0b11111011]);
@@ -897,7 +942,7 @@ mod tests {
         (msg, encoded.into())
     }
 
-    // Returns `Have` and its expected encoded variant.
+    /// Returns `Have` and its expected encoded variant.
     fn make_have() -> (Message, Bytes) {
         let piece_index = 42;
         let msg = Message::Have { piece_index };
@@ -916,7 +961,7 @@ mod tests {
         (msg, encoded.into())
     }
 
-    // Returns `Request` and its expected encoded variant.
+    /// Returns `Request` and its expected encoded variant.
     fn make_request() -> (Message, Bytes) {
         let piece_index = 42;
         let offset = 0x4000;
@@ -935,7 +980,7 @@ mod tests {
         (msg, encoded)
     }
 
-    // Returns `Block` and its expected encoded variant.
+    /// Returns `Block` and its expected encoded variant.
     fn make_block() -> (Message, Bytes) {
         let piece_index = 42;
         let offset = 0x4000;
@@ -959,12 +1004,12 @@ mod tests {
         let msg = Message::Block {
             piece_index,
             offset,
-            data,
+            data: data.into(),
         };
         (msg, encoded.into())
     }
 
-    // Returns `Cancel` and its expected encoded variant.
+    /// Returns `Cancel` and its expected encoded variant.
     fn make_cancel() -> (Message, Bytes) {
         let piece_index = 42;
         let offset = 0x4000;
@@ -983,8 +1028,8 @@ mod tests {
         (msg, encoded)
     }
 
-    // Helper used to create 'request' and 'cancel' encoded messages that have
-    // the same format.
+    /// Helper used to create 'request' and 'cancel' encoded messages that have
+    /// the same format.
     fn make_block_info_encoded_msg_payload(
         id: MessageId,
         piece_index: usize,
