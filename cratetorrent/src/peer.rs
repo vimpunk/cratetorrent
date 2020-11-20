@@ -32,7 +32,7 @@ use state::*;
 mod codec;
 mod state;
 #[macro_use]
-mod log;
+mod peer_log;
 
 /// The channel on which torrent can send a command to the peer session task.
 pub(crate) type Sender = UnboundedSender<Command>;

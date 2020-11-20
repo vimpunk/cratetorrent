@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+
 use tokio::sync::{mpsc, RwLock};
 
 use super::{
@@ -6,7 +7,9 @@ use super::{
     CommandSender, TorrentAllocation,
 };
 use crate::{error::Error, peer, BlockInfo, TorrentId};
-use {file::TorrentFile, piece::Piece, torrent::Torrent};
+use file::TorrentFile;
+use piece::Piece;
+use torrent::Torrent;
 
 pub(crate) mod file;
 pub(crate) mod piece;
@@ -167,6 +170,7 @@ impl Disk {
 #[cfg(test)]
 mod tests {
     use sha1::{Digest, Sha1};
+
     use std::{
         collections::BTreeMap,
         fs,

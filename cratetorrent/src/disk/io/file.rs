@@ -1,15 +1,15 @@
-use {
-    nix::sys::uio::{preadv, pwritev},
-    std::{
-        fs::{File, OpenOptions},
-        os::unix::io::AsRawFd,
-        path::Path,
-    },
+use std::{
+    fs::{File, OpenOptions},
+    os::unix::io::AsRawFd,
+    path::Path,
 };
+
+use nix::sys::uio::{preadv, pwritev};
 
 use crate::{
     disk::error::*,
-    iovecs::{self, IoVec, IoVecs},
+    iovecs,
+    iovecs::{IoVec, IoVecs},
     storage_info::FileSlice,
     FileInfo,
 };

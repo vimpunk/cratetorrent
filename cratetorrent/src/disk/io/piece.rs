@@ -1,9 +1,10 @@
-use sha1::{Digest, Sha1};
 use std::{
     collections::BTreeMap,
     ops::Range,
     sync::{self, Arc},
 };
+
+use sha1::{Digest, Sha1};
 
 use crate::{
     block_count, block_len,
