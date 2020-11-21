@@ -126,7 +126,7 @@ impl Torrent {
                         if !subdir.exists() {
                             log::info!("Creating torrent subdir {:?}", subdir);
                             fs::create_dir_all(&subdir).map_err(|e| {
-                                log::warn!(
+                                log::error!(
                                     "Failed to create subdir {:?}",
                                     subdir
                                 );
@@ -169,7 +169,7 @@ impl Torrent {
         info: BlockInfo,
         data: Vec<u8>,
     ) -> Result<()> {
-        log::trace!("Saving block {:?} to disk", info);
+        log::trace!("Saving {} to disk", info);
 
         let piece_index = info.piece_index;
         if !self.write_buf.contains_key(&piece_index) {
@@ -228,7 +228,7 @@ impl Torrent {
 
                     blocks
                 } else {
-                    log::warn!("Piece {} is NOT valid", info.piece_index);
+                    log::warn!("Piece {} is not valid", info.piece_index);
                     Vec::new()
                 };
 
@@ -262,7 +262,7 @@ impl Torrent {
                     )))?;
                 }
                 Err(e) => {
-                    log::warn!("Disk write error: {}", e);
+                    log::error!("Disk write error: {}", e);
                     self.stats.write_failure_count += 1;
 
                     // alert torrent of block write failure
@@ -287,7 +287,7 @@ impl Torrent {
         // get the position of the piece in the concatenated hash string
         let hash_pos = piece_index * 20;
         if hash_pos + 20 > self.piece_hashes.len() {
-            log::warn!("Piece index {} is invalid", piece_index);
+            log::error!("Piece index {} is invalid", piece_index);
             return Err(WriteError::InvalidPieceIndex);
         }
 
@@ -347,7 +347,7 @@ impl Torrent {
         block_info: BlockInfo,
         chan: peer::Sender,
     ) -> Result<()> {
-        log::trace!("Reading block {:?} from disk", block_info);
+        log::trace!("Reading {} from disk", block_info);
 
         let piece_index = block_info.piece_index;
         let block_index = block_info.index_in_piece();
@@ -378,12 +378,17 @@ impl Torrent {
             chan.send(peer::Command::Block(Block::new(block_info, block)))?;
         } else {
             // otherwise read in the piece from disk
+            log::debug!(
+                "Piece {} not in the read cache, reading from disk",
+                piece_index
+            );
 
             // check if info is valid
             let file_range =
                 match self.info.files_intersecting_piece(piece_index) {
                     Ok(file_range) => file_range,
                     Err(_) => {
+                        log::error!("Piece {} not in file", piece_index);
                         self.alert_chan.send(TorrentAlert::ReadError {
                             block_info,
                             error: ReadError::InvalidPieceIndex,
@@ -398,7 +403,9 @@ impl Torrent {
             let files = Arc::clone(&self.files);
             let read_cache = Arc::clone(&self.read_cache);
 
-            // TODO: check if file pointed to by info has been downloaded yet
+            // Checking if the file pointed to by info has been downloaded yet
+            // is done implicitly as part of the read operation below: if we
+            // can't read any bytes, the file likely does not exist.
 
             // TODO: Read errors should be vanishingly rare yet we incur the
             // cost of cloning the channel (which is equivalent to an arc clone)
@@ -411,6 +418,7 @@ impl Torrent {
                 let torrent_piece_offset =
                     piece_index as u64 * piece_len as u64;
 
+                log::debug!("Reading piece {}", piece_index);
                 match piece::read(
                     torrent_piece_offset,
                     file_range,
@@ -418,6 +426,8 @@ impl Torrent {
                     piece_len,
                 ) {
                     Ok(blocks) => {
+                        log::debug!("Read piece {}", piece_index);
+
                         // pick requested block
                         let block = Arc::clone(&blocks[block_index]);
 
@@ -437,16 +447,18 @@ impl Torrent {
                         .ok();
                     }
                     Err(e) => {
+                        log::error!(
+                            "Error reading piece {} from disk: {}",
+                            piece_index,
+                            e
+                        );
                         alert_chan
                             .send(TorrentAlert::ReadError {
                                 block_info,
                                 error: e,
                             })
                             .map_err(|e| {
-                                log::error!(
-                                    "Error sending read result to peer: {}",
-                                    e
-                                );
+                                log::error!("Error sending read error: {}", e);
                                 e
                             })
                             .ok();

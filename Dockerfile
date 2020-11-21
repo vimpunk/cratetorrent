@@ -4,4 +4,4 @@ WORKDIR /cratetorrent
 
 COPY /target/release/cratetorrent-cli .
 
-CMD ./cratetorrent-cli --seeds "${SEEDS}" --metainfo "${METAINFO_PATH}" --download-dir "${DOWNLOAD_DIR}"
+CMD ./cratetorrent-cli --listen "${LISTEN_PORT}" --seeds "${SEEDS}" --metainfo "${METAINFO_PATH}" --download-dir "${DOWNLOAD_DIR}"

@@ -38,7 +38,7 @@ done
 
 # default torrent size to 1 MiB
 torrent_size="${torrent_size:-$(( 1024 * 1024 ))}"
-torrent_name="muti-peer-test-${torrent_size}"
+torrent_name="single-peer-test-${torrent_size}"
 # the seeded file
 src_path="${assets_dir}/${torrent_name}"
 # and its metainfo

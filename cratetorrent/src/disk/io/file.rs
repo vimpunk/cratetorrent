@@ -149,6 +149,14 @@ impl TorrentFile {
                 ReadError::Io(std::io::Error::last_os_error())
             })?;
 
+            // if there was nothing to read from file it means we tried to
+            // read a piece from a portion of a file not yet downloaded or
+            // otherwise missing
+            if read_count == 0 {
+                return Err(ReadError::DataMissing);
+            }
+
+
             // tally up the total read count
             total_read_count += read_count;
 

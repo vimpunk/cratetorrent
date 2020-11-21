@@ -80,6 +80,8 @@ pub(crate) struct StorageInfo {
     /// piece length.
     pub last_piece_len: u32,
     /// The sum of the length of all files in the torrent.
+    // TODO: consider renaming to `torrent_len` to better reflect that the
+    // torrent may already be downloaded
     pub download_len: u64,
     /// The download destination directory of the torrent.
     ///

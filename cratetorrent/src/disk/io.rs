@@ -83,7 +83,7 @@ impl Disk {
                             ))?;
                         }
                         Err(e) => {
-                            log::warn!(
+                            log::error!(
                                 "Torrent {} allocation failure: {}",
                                 id,
                                 e
@@ -129,7 +129,7 @@ impl Disk {
         block_info: BlockInfo,
         data: Vec<u8>,
     ) -> Result<()> {
-        log::trace!("Saving torrent {} block {:?} to disk", id, block_info);
+        log::trace!("Saving torrent {} {} to disk", id, block_info);
 
         // check torrent id
         //
@@ -137,7 +137,7 @@ impl Disk {
         // torrent id: could it be that disk requests for a torrent arrive after
         // a torrent has been removed?
         let torrent = self.torrents.get(&id).ok_or_else(|| {
-            log::warn!("Torrent {} not found", id);
+            log::error!("Torrent {} not found", id);
             Error::InvalidTorrentId
         })?;
         torrent.write().await.write_block(block_info, data).await
@@ -156,7 +156,7 @@ impl Disk {
         block_info: BlockInfo,
         chan: peer::Sender,
     ) -> Result<()> {
-        log::trace!("Saving torrent {} block {:?} to disk", id, block_info);
+        log::trace!("Reading torrent {} {} from disk", id, block_info);
 
         // check torrent id
         //
@@ -164,7 +164,7 @@ impl Disk {
         // torrent id: could it be that disk requests for a torrent arrive after
         // a torrent has been removed?
         let torrent = self.torrents.get(&id).ok_or_else(|| {
-            log::warn!("Torrent {} not found", id);
+            log::error!("Torrent {} not found", id);
             Error::InvalidTorrentId
         })?;
         torrent.read().await.read_block(block_info, chan).await
@@ -456,7 +456,7 @@ mod tests {
             .write(torrent_piece_offset, files)
             .expect("cannot write piece to file");
 
-        // read piece into list of read buffers
+        // read piece as list of blocks
         let blocks =
             piece::read(torrent_piece_offset, file_range, files, piece.len)
                 .expect("cannot read piece from files");

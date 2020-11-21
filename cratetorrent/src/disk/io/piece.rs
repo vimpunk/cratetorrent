@@ -193,12 +193,6 @@ pub(super) fn read<'a>(
         // an empty file slice shouldn't occur as it would mean that piece
         // was thought to span fewer files than it actually does
         debug_assert!(file_slice.len > 0);
-        // the write buffer should still contain bytes to write
-        debug_assert!(!bufs.is_empty());
-        debug_assert!(!bufs[0].as_slice().is_empty());
-        let file_slice = file
-            .info
-            .get_slice(torrent_read_offset, remaining_piece_len);
 
         // read data
         bufs = file.read(file_slice, bufs)?;

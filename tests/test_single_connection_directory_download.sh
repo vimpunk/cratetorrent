@@ -19,7 +19,7 @@ source common.sh
 # start the container (if it's not already running)
 ./start_transmission_seed.sh --name "${seed_container}"
 
-torrent_name=dir-test
+torrent_name=single-peer-dir-test
 # the seeded file
 src_path="${assets_dir}/${torrent_name}"
 # and its metainfo

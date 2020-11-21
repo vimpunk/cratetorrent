@@ -9,7 +9,11 @@ use futures::{
     select,
     stream::{Fuse, StreamExt},
 };
-use tokio::{sync::RwLock, task, time};
+use tokio::{
+    net::{TcpListener, TcpStream},
+    sync::RwLock,
+    task, time,
+};
 
 use crate::{
     disk::{DiskHandle, TorrentAlert, TorrentAlertReceiver},
@@ -18,14 +22,14 @@ use crate::{
     peer::{self, PeerSession},
     piece_picker::PiecePicker,
     storage_info::StorageInfo,
-    PeerId, PieceIndex, Sha1Hash, TorrentId,
+    Bitfield, PeerId, PieceIndex, Sha1Hash, TorrentId,
 };
 
 pub(crate) struct Torrent {
-    /// The seeds from which we're downloading the torrent.
-    seeds: Vec<Peer>,
+    /// The peers in this torrent.
+    peers: Vec<Peer>,
     /// General status and information about the torrent.
-    status: Status,
+    state: State,
     /// The handle to the disk IO task, used to issue commands on it. A copy of
     /// this handle is passed down to each peer session.
     disk: DiskHandle,
@@ -38,32 +42,24 @@ pub(crate) struct Torrent {
 }
 
 impl Torrent {
-    /// Creates a new `Torrent` instance, initializing its core components but
-    /// not starting it.
+    /// Creates a new `Torrent` instance for downloading or seeding a torrent.
+    ///
+    /// # Important
+    ///
+    /// This constructor only initializes the torrent components but does not
+    /// actually start it. See [`Self::start`].
     pub fn new(
         id: TorrentId,
         disk: DiskHandle,
         disk_alert_port: TorrentAlertReceiver,
         info_hash: Sha1Hash,
         storage_info: StorageInfo,
+        have_pieces: Bitfield,
         client_id: PeerId,
-        seeds: &[SocketAddr],
-    ) -> Result<Self> {
-        log::trace!("Creating torrent {} with seeds: {:?}", id, seeds);
-
-        let seeds = seeds
-            .iter()
-            .map(|&addr| Peer {
-                addr,
-                chan: None,
-                handle: None,
-            })
-            .collect();
-
-        let piece_count = storage_info.piece_count;
-        let piece_picker = PiecePicker::new(piece_count);
-        let status = Status {
-            context: Arc::new(Context {
+    ) -> Self {
+        let piece_picker = PiecePicker::new(have_pieces);
+        let status = State {
+            context: Arc::new(TorrentContext {
                 id,
                 piece_picker: Arc::new(RwLock::new(piece_picker)),
                 downloads: RwLock::new(HashMap::new()),
@@ -74,69 +70,80 @@ impl Torrent {
             start_time: None,
             run_duration: Duration::default(),
         };
-
         let disk_alert_port = disk_alert_port.fuse();
 
-        Ok(Self {
-            seeds,
-            status,
+        Self {
+            peers: Vec::new(),
+            state: status,
             disk,
             disk_alert_port,
-        })
+        }
     }
 
-    /// Starts the torrent and returns normally if the download is complete, or
-    /// aborts if an error is encountered.
-    pub async fn start(&mut self) -> Result<()> {
+    /// Starts the torrent and runs until an error is encountered.
+    pub async fn start(
+        &mut self,
+        listen_addr: SocketAddr,
+        seeds: &[SocketAddr],
+    ) -> Result<()> {
         log::info!("Starting torrent");
 
         // record the torrent starttime
-        self.status.start_time = Some(Instant::now());
+        self.state.start_time = Some(Instant::now());
 
-        // start all seed peer sessions
-        for peer in self.seeds.iter_mut() {
-            let (mut session, chan) = PeerSession::outbound(
-                Arc::clone(&self.status.context),
+        // start all seed peer sessions, if any
+        for addr in seeds.iter().cloned() {
+            let (session, chan) = PeerSession::new(
+                Arc::clone(&self.state.context),
                 self.disk.clone(),
-                peer.addr,
+                addr,
             );
-            let handle = task::spawn(async move { session.start().await });
-            peer.chan = Some(chan);
-            peer.handle = Some(handle);
+            self.peers.push(Peer::start_outbound(session, chan))
         }
 
         let mut loop_timer = time::interval(Duration::from_secs(1)).fuse();
         let mut prev_instant = None;
+
+        let mut listener = TcpListener::bind(&listen_addr).await?;
+        let mut incoming = listener.incoming().fuse();
 
         // the torrent loop is triggered every second by the loop timer and by
         // disk IO events
         loop {
             select! {
                 instant = loop_timer.select_next_some() => {
-                    // calculate how long torrent has been running
-                    //
-                    // only deal with std time types
-                    let instant = instant.into_std();
-                    let elapsed = if let Some(prev_instant) = prev_instant {
-                        instant.saturating_duration_since(prev_instant)
-                    } else if let Some(start_time) = self.status.start_time {
-                        instant.saturating_duration_since(start_time)
-                    } else {
-                        Duration::default()
+                    self.tick(&mut prev_instant, instant.into_std()).await?;
+                }
+                conn_result = incoming.select_next_some() => {
+                    let socket = match conn_result {
+                        Ok(socket) => socket,
+                        Err(e) => {
+                            log::info!("Error accepting peer connection: {}", e);
+                            continue;
+                        }
                     };
-                    self.status.run_duration += elapsed;
-                    prev_instant = Some(instant);
+                    let addr = match socket.peer_addr() {
+                        Ok(addr) => addr,
+                        Err(e) => {
+                            log::info!("Error getting socket address of peer: {}", e);
+                            continue;
+                        }
+                    };
+                    log::info!("New connection {:?}", addr);
 
-                    log::debug!(
-                        "Torrent running for {}s",
-                        self.status.run_duration.as_secs()
+                    // start inbound session
+                    let (session, chan) = PeerSession::new(
+                        Arc::clone(&self.state.context),
+                        self.disk.clone(),
+                        addr,
                     );
+                    self.peers.push(Peer::start_inbound(socket, session, chan));
                 }
                 disk_alert = self.disk_alert_port.select_next_some() => {
                     let should_stop = self.handle_disk_alert(disk_alert).await?;
                     if should_stop {
                         // send shutdown command to all connected peers
-                        for peer in self.seeds.iter() {
+                        for peer in self.peers.iter() {
                             if let Some(chan) = &peer.chan {
                                 // we don't particularly care if we weren't successful
                                 // in sending the command (for now)
@@ -148,6 +155,28 @@ impl Torrent {
                 }
             }
         }
+    }
+
+    async fn tick(
+        &mut self,
+        prev_tick_time: &mut Option<Instant>,
+        now: Instant,
+    ) -> Result<()> {
+        // calculate how long torrent has been running
+
+        let elapsed_since_last_tick = prev_tick_time
+            .or(self.state.start_time)
+            .map(|t| now.saturating_duration_since(t))
+            .unwrap_or_default();
+        self.state.run_duration += elapsed_since_last_tick;
+        *prev_tick_time = Some(now);
+
+        log::debug!(
+            "Torrent running for {}s",
+            self.state.run_duration.as_secs()
+        );
+
+        Ok(())
     }
 
     /// Handles the disk message and returns whether the message should cause
@@ -167,7 +196,7 @@ impl Torrent {
                         if let Some(is_piece_valid) = batch.is_piece_valid {
                             if is_piece_valid {
                                 let missing_piece_count = self
-                                    .status
+                                    .state
                                     .context
                                     .piece_picker
                                     .read()
@@ -220,10 +249,6 @@ impl Torrent {
 
 /// A peer in the torrent.
 struct Peer {
-    /// The address of a single peer this torrent donwloads the file from. This
-    /// peer has to be a seed as currently we only support downloading and no
-    /// seeding.
-    addr: SocketAddr,
     /// The channel on which to communicate with the peer session.
     ///
     /// This is set when the session is started.
@@ -234,10 +259,33 @@ struct Peer {
     handle: Option<task::JoinHandle<Result<()>>>,
 }
 
+impl Peer {
+    fn start_outbound(mut session: PeerSession, chan: peer::Sender) -> Self {
+        let handle = task::spawn(async move { session.start_outbound().await });
+        Self {
+            chan: Some(chan),
+            handle: Some(handle),
+        }
+    }
+
+    fn start_inbound(
+        socket: TcpStream,
+        mut session: PeerSession,
+        chan: peer::Sender,
+    ) -> Self {
+        let handle =
+            task::spawn(async move { session.start_inbound(socket).await });
+        Self {
+            chan: Some(chan),
+            handle: Some(handle),
+        }
+    }
+}
+
 /// Status information of a torrent.
-struct Status {
+struct State {
     /// Information that is shared with peer sessions.
-    context: Arc<Context>,
+    context: Arc<TorrentContext>,
     /// The time the torrent was first started.
     start_time: Option<Instant>,
     /// The total time the torrent has been running.
@@ -250,12 +298,12 @@ struct Status {
     run_duration: Duration,
 }
 
-/// Information shared with peer sessions.
+/// Information and methods shared with peer sessions in the torrent.
 ///
 /// This type contains fields that need to be read or updated by peer sessions.
 /// Fields expected to be mutated are thus secured for inter-task access with
 /// various synchronization primitives.
-pub(crate) struct Context {
+pub(crate) struct TorrentContext {
     /// The torrent ID, unique in this engine.
     pub id: TorrentId,
     /// The piece picker picks the next most optimal piece to download and is

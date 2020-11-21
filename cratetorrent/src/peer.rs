@@ -21,8 +21,8 @@ use tokio::{
 use tokio_util::codec::{Framed, FramedParts};
 
 use crate::{
-    disk::DiskHandle, download::PieceDownload, error::*, torrent::Context,
-    Bitfield, Block, BlockInfo,
+    disk::DiskHandle, download::PieceDownload, error::*,
+    torrent::TorrentContext, Bitfield, Block, BlockInfo,
 };
 use codec::*;
 use state::*;
@@ -46,7 +46,7 @@ pub(crate) enum Command {
 
 pub(crate) struct PeerSession {
     /// Shared information of the torrent.
-    torrent: Arc<Context>,
+    torrent: Arc<TorrentContext>,
     /// The entity used to save downloaded file blocks to disk.
     disk: DiskHandle,
     /// The command channel on which peer session is being sent messages.
@@ -85,12 +85,14 @@ pub(crate) struct PeerSession {
 }
 
 impl PeerSession {
-    /// Creates a new outbound session with the peer at the given address.
+    /// Creates a new session with the peer at the given address.
     ///
-    /// The peer needs to be a seed in order for us to download a file through
-    /// this peer session, otherwise the session is aborted with an error.
-    pub fn outbound(
-        torrent: Arc<Context>,
+    /// # Important
+    ///
+    /// This constructor only initializes the session components but does not
+    /// actually start it. See [`Self::start`].
+    pub fn new(
+        torrent: Arc<TorrentContext>,
         disk: DiskHandle,
         addr: SocketAddr,
     ) -> (Self, Sender) {
@@ -110,10 +112,13 @@ impl PeerSession {
         )
     }
 
-    /// Starts the peer session and returns if the connection is closed or an
-    /// error occurs.
-    pub async fn start(&mut self) -> Result<()> {
-        peer_info!(self, "Starting session");
+    /// Starts an outbound peer session.
+    ///
+    /// This method tries to connect to the peer at the address given in the
+    /// constructor, send a handshake, and start the session.
+    /// It returns if the connection is closed or an error occurs.
+    pub async fn start_outbound(&mut self) -> Result<()> {
+        peer_info!(self, "Starting outbound session");
 
         peer_info!(self, "Connecting to peer");
         self.state.connection = ConnectionState::Connecting;
@@ -152,7 +157,7 @@ impl PeerSession {
 
             // set basic peer information
             self.state.peer = Some(PeerInfo {
-                id: handshake.peer_id,
+                id: peer_handshake.peer_id,
                 pieces: None,
             });
 
@@ -168,10 +173,75 @@ impl PeerSession {
             new_parts.write_buf = old_parts.write_buf;
             let socket = Framed::from_parts(new_parts);
 
-            // enter the piece availability exchange state until peer sends a
-            // bitfield (we don't send one as we currently only implement
-            // downloading so we cannot have piece availability until multiple
-            // peer connections or resuming a torrent is implemented)
+            // enter the piece availability exchange state
+            self.state.connection = ConnectionState::AvailabilityExchange;
+            peer_info!(self, "Session state: {:?}", self.state.connection);
+
+            // run the session
+            self.run(socket).await?;
+        }
+        // TODO(https://github.com/mandreyel/cratetorrent/issues/20): handle
+        // not recieving anything with an error rather than an Ok(())
+
+        Ok(())
+    }
+
+    /// Starts an inbound peer session from an existing TCP connection.
+    ///
+    /// The method waits for the peer to send its handshake, responds
+    /// with a handshake, and starts the session.
+    /// It returns if the connection is closed or an error occurs.
+    pub async fn start_inbound(&mut self, socket: TcpStream) -> Result<()> {
+        peer_info!(self, "Starting inbound session");
+
+        let mut socket = Framed::new(socket, HandshakeCodec);
+
+        // receive peer's handshake
+        peer_info!(self, "Waiting for peer handshake");
+        if let Some(peer_handshake) = socket.next().await {
+            let peer_handshake = peer_handshake?;
+            peer_info!(self, "Received peer handshake");
+            peer_trace!(self, "Peer handshake: {:?}", peer_handshake);
+            // codec should only return handshake if the protocol string in it
+            // is valid
+            debug_assert_eq!(peer_handshake.prot, PROTOCOL_STRING.as_bytes());
+
+            self.state.downloaded_protocol_counter += peer_handshake.len();
+
+            // verify that the advertised torrent info hash is the same as ours
+            if peer_handshake.info_hash != self.torrent.info_hash {
+                peer_info!(self, "Peer handshake invalid info hash");
+                // abort session, info hash is invalid
+                return Err(Error::InvalidPeerInfoHash);
+            }
+
+            // set basic peer information
+            self.state.peer = Some(PeerInfo {
+                id: peer_handshake.peer_id,
+                pieces: None,
+            });
+
+            // we reply with the handshake
+            self.state.connection = ConnectionState::Handshaking;
+            let handshake =
+                Handshake::new(self.torrent.info_hash, self.torrent.client_id);
+            peer_info!(self, "Sending handshake");
+            self.state.uploaded_protocol_counter += handshake.len();
+            socket.send(handshake).await?;
+
+            // now that we have the handshake, we need to switch to the peer
+            // message codec and save the socket in self (note that we need to
+            // keep the buffer from the original codec as it may contain bytes
+            // of any potential message the peer may have sent after the
+            // handshake)
+            let old_parts = socket.into_parts();
+            let mut new_parts = FramedParts::new(old_parts.io, PeerCodec);
+            // reuse buffers of previous codec
+            new_parts.read_buf = old_parts.read_buf;
+            new_parts.write_buf = old_parts.write_buf;
+            let socket = Framed::from_parts(new_parts);
+
+            // enter the piece availability exchange state
             self.state.connection = ConnectionState::AvailabilityExchange;
             peer_info!(self, "Session state: {:?}", self.state.connection);
 
@@ -197,6 +267,18 @@ impl PeerSession {
         let (mut sink, stream) = socket.split();
         let mut stream = stream.fuse();
 
+        // This is the beginning of the session, which is the only time
+        // a peer is allowed to advertise their pieces. If we have pieces
+        // available, send a bitfield message.
+        {
+            let piece_picker_guard = self.torrent.piece_picker.read().await;
+            let own_pieces = piece_picker_guard.own_pieces();
+            if own_pieces.any() {
+                peer_info!(self, "Sending piece availability");
+                sink.send(Message::Bitfield(own_pieces.clone())).await?;
+            }
+        }
+
         // used for collecting session stats every second
         let mut loop_timer = time::interval(Duration::from_secs(1)).fuse();
 
@@ -204,8 +286,8 @@ impl PeerSession {
         // other parts of the engine
         loop {
             select! {
-                instant = loop_timer.select_next_some() => {
-                    self.tick(&mut sink, instant.into_std()).await?;
+                _instant = loop_timer.select_next_some() => {
+                    self.tick(&mut sink).await?;
                 }
                 msg = stream.select_next_some() => {
                     let msg = msg?;
@@ -218,6 +300,10 @@ impl PeerSession {
                     if self.state.connection == ConnectionState::AvailabilityExchange {
                         if let Message::Bitfield(bitfield) = msg {
                             self.handle_bitfield_msg(&mut sink, bitfield).await?;
+                        } else {
+                            // it's not mandatory to send a bitfield message
+                            // right after the handshake
+                            self.handle_msg(&mut sink, msg).await?;
                         }
 
                         // enter connected state
@@ -250,7 +336,6 @@ impl PeerSession {
     async fn tick(
         &mut self,
         sink: &mut SplitSink<Framed<TcpStream, PeerCodec>, Message>,
-        _instant: Instant,
     ) -> Result<()> {
         // TODO(https://github.com/mandreyel/cratetorrent/issues/43): check peer
         // inactivity timeout
@@ -416,6 +501,10 @@ impl PeerSession {
                 if !self.state.is_peer_interested {
                     peer_info!(self, "Peer became interested");
                     self.state.is_peer_interested = true;
+                    // TODO(https://github.com/mandreyel/cratetorrent/issues/60):
+                    // impleent the proper unchoke algorithm in `Torrent`
+                    peer_info!(self, "Unchoking peer");
+                    sink.send(Message::Unchoke).await?;
                 }
             }
             Message::NotInterested => {

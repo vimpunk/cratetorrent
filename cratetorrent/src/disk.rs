@@ -441,9 +441,8 @@ mod tests {
                 .unwrap();
 
             // wait for result
-            if let Some(peer::Command::Block { info, data }) = port.recv().await
-            {
-                assert_eq!(info, block_info);
+            if let Some(peer::Command::Block(block)) = port.recv().await {
+                assert_eq!(block.info(), block_info);
             } else {
                 assert!(false, "block could not be read from disk");
             }

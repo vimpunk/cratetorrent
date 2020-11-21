@@ -88,7 +88,7 @@ impl fmt::Display for BlockInfo {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "block[piece={} offs={} len={}]",
+            "block (piece: {} offs: {} len: {})",
             self.piece_index, self.offset, self.len
         )
     }
@@ -154,6 +154,7 @@ impl Block {
 /// A block may be just a normal byte buffer, or it may be a reference into
 /// a cache.
 #[derive(Debug, PartialEq)]
+#[cfg_attr(test, derive(Clone))]
 pub(crate) enum BlockData {
     Owned(Vec<u8>),
     Cached(CachedBlock),

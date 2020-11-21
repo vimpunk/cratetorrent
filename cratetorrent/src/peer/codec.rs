@@ -155,6 +155,7 @@ impl Decoder for HandshakeCodec {
 
 /// The actual messages exchanged by peers.
 #[derive(Debug, PartialEq)]
+#[cfg_attr(test, derive(Clone))]
 pub(crate) enum Message {
     KeepAlive,
     Bitfield(Bitfield),
