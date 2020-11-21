@@ -21,11 +21,8 @@ use tokio::{
 use tokio_util::codec::{Framed, FramedParts};
 
 use crate::{
-    disk::{self, CachedBlock, DiskHandle},
-    download::PieceDownload,
-    error::*,
-    torrent::Context,
-    Bitfield, BlockInfo,
+    disk::DiskHandle, download::PieceDownload, error::*, torrent::Context,
+    Bitfield, Block, BlockInfo,
 };
 use codec::*;
 use state::*;
@@ -42,12 +39,7 @@ type Receiver = UnboundedReceiver<Command>;
 /// The commands peer session can receive.
 pub(crate) enum Command {
     /// The result of reading a block from disk.
-    Block {
-        /// Which block was attempted to be read.
-        info: BlockInfo,
-        /// If there was a read error, it is communicated via this field.
-        data: Result<CachedBlock, disk::ReadError>,
-    },
+    Block(Block),
     /// Eventually shut down the peer session.
     Shutdown,
 }
@@ -240,23 +232,8 @@ impl PeerSession {
                 }
                 cmd = self.cmd_port.select_next_some() => {
                     match cmd {
-                        Command::Block { info, data }=> {
-                            match data {
-                                Ok(data) => {
-                                    peer_info!(self,
-                                        "Read from disk {}",
-                                        info
-                                    );
-                                    self.send_block(&mut sink, info, data).await?;
-                                }
-                                Err(e) => {
-                                    peer_info!(self,
-                                        "Error reading {}: {}",
-                                        info, e
-                                    );
-                                    todo!("handle disk read error");
-                                }
-                            }
+                        Command::Block(block)=> {
+                            self.send_block(&mut sink, block).await?;
                         }
                         Command::Shutdown => {
                             peer_info!(self, "Shutting down session");
@@ -508,7 +485,7 @@ impl PeerSession {
         // FIXME: sometimes we don't seem to be making any requests at all
 
         // TODO: optimize this by preallocating the vector in self
-        let mut blocks = Vec::new();
+        let mut requests = Vec::new();
         let target_request_queue_len =
             self.state.target_request_queue_len.unwrap_or_default();
 
@@ -517,7 +494,7 @@ impl PeerSession {
         for download in self.torrent.downloads.write().await.values_mut() {
             // check and calculate the number of requests we can make now
             let outgoing_request_count =
-                blocks.len() + self.outgoing_requests.len();
+                requests.len() + self.outgoing_requests.len();
             // our outgoing request queue shouldn't exceed the allowed request
             // queue size
             if outgoing_request_count >= target_request_queue_len {
@@ -535,13 +512,13 @@ impl PeerSession {
                 "Trying to continue download {}",
                 download_write_guard.piece_index()
             );
-            download_write_guard.pick_blocks(to_request_count, &mut blocks);
+            download_write_guard.pick_blocks(to_request_count, &mut requests);
         }
 
         // while we can make more requests we start new download(s)
         loop {
             let outgoing_request_count =
-                blocks.len() + self.outgoing_requests.len();
+                requests.len() + self.outgoing_requests.len();
             // our outgoing request queue shouldn't exceed the allowed request
             // queue size
             if outgoing_request_count >= target_request_queue_len {
@@ -562,7 +539,7 @@ impl PeerSession {
                     self.torrent.storage.piece_len(index)?,
                 );
 
-                download.pick_blocks(to_request_count, &mut blocks);
+                download.pick_blocks(to_request_count, &mut requests);
                 // save download
                 self.torrent
                     .downloads
@@ -581,20 +558,20 @@ impl PeerSession {
             }
         }
 
-        if !blocks.is_empty() {
+        if !requests.is_empty() {
             peer_info!(
                 self,
                 "Requesting {} block(s) ({} pending)",
-                blocks.len(),
+                requests.len(),
                 self.outgoing_requests.len()
             );
             self.state.last_outgoing_request_time = Some(Instant::now());
             // make the actual requests
-            for block in blocks.into_iter() {
-                self.outgoing_requests.insert(block);
+            for req in requests.into_iter() {
+                self.outgoing_requests.insert(req);
                 // TODO: batch these in a single syscall, or is this already
                 // being done by the tokio codec type?
-                sink.send(Message::Request(block)).await?;
+                sink.send(Message::Request(req)).await?;
                 self.state.uploaded_protocol_counter +=
                     MessageId::Request.header_len();
             }
@@ -715,22 +692,26 @@ impl PeerSession {
     async fn send_block(
         &mut self,
         sink: &mut SplitSink<Framed<TcpStream, PeerCodec>, Message>,
-        info: BlockInfo,
-        data: CachedBlock,
+        block: Block,
     ) -> Result<()> {
+        let info = block.info();
+        peer_info!(self, "Read from disk {}", info);
+
         // check if the request hasn't been canceled yet
         if !self.incoming_requests.contains(&info) {
             peer_warn!(self, "Peer canceled request, dropping {}", info);
             return Ok(());
         }
 
-        // if it hasn't send the data to peer
+        // if it hasn't, send the data to peer
+        peer_info!(self, "Sending {}", info);
         sink.send(Message::Block {
-            piece_index: info.piece_index,
-            offset: info.offset,
-            data: data.into(),
+            piece_index: block.piece_index,
+            offset: block.offset,
+            data: block.data,
         })
         .await?;
+        peer_info!(self, "Sent {}", info);
 
         // update download stats
         self.state.update_upload_stats(info.len);

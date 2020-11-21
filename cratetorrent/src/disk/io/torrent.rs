@@ -10,12 +10,12 @@ use tokio::{sync::mpsc, task};
 use super::{piece, Piece, TorrentFile};
 use crate::{
     disk::{
-        error::*, BatchWrite, CachedBlock, TorrentAlert, TorrentAlertReceiver,
+        error::*, BatchWrite, TorrentAlert, TorrentAlertReceiver,
         TorrentAlertSender,
     },
     peer,
     storage_info::{FsStructure, StorageInfo},
-    BlockInfo, PieceIndex,
+    Block, BlockInfo, CachedBlock, PieceIndex,
 };
 
 /// Torrent information related to disk IO.
@@ -173,7 +173,7 @@ impl Torrent {
 
         let piece_index = info.piece_index;
         if !self.write_buf.contains_key(&piece_index) {
-            if let Err(e) = self.start_new_piece(info) {
+            if let Err(e) = self.start_new_piece(info.piece_index) {
                 self.alert_chan.send(TorrentAlert::BatchWrite(Err(e)))?;
                 // return with ok as the disk task itself shouldn't be aborted
                 // due to invalid input
@@ -278,13 +278,16 @@ impl Torrent {
     ///
     /// This involves getting the expected hash of the piece, its length, and
     /// calculating the files that it intersects.
-    fn start_new_piece(&mut self, info: BlockInfo) -> Result<(), WriteError> {
-        log::trace!("Creating piece {} write buffer", info.piece_index);
+    fn start_new_piece(
+        &mut self,
+        piece_index: PieceIndex,
+    ) -> Result<(), WriteError> {
+        log::trace!("Creating piece {} write buffer", piece_index);
 
         // get the position of the piece in the concatenated hash string
-        let hash_pos = info.piece_index * 20;
+        let hash_pos = piece_index * 20;
         if hash_pos + 20 > self.piece_hashes.len() {
-            log::warn!("Piece index {} is invalid", info.piece_index);
+            log::warn!("Piece index {} is invalid", piece_index);
             return Err(WriteError::InvalidPieceIndex);
         }
 
@@ -293,7 +296,7 @@ impl Torrent {
         expected_hash.copy_from_slice(hash_slice);
         log::debug!(
             "Piece {} expected hash {}",
-            info.piece_index,
+            piece_index,
             hex::encode(&expected_hash)
         );
 
@@ -301,19 +304,15 @@ impl Torrent {
         // Torrent::write_block
         let len = self
             .info
-            .piece_len(info.piece_index)
+            .piece_len(piece_index)
             .map_err(|_| WriteError::InvalidPieceIndex)?;
-        log::debug!("Piece {} is {} bytes long", info.piece_index, len);
+        log::debug!("Piece {} is {} bytes long", piece_index, len);
 
         let file_range = self
             .info
-            .files_intersecting_piece(info.piece_index)
+            .files_intersecting_piece(piece_index)
             .map_err(|_| WriteError::InvalidPieceIndex)?;
-        log::debug!(
-            "Piece {} intersects files: {:?}",
-            info.piece_index,
-            file_range
-        );
+        log::debug!("Piece {} intersects files: {:?}", piece_index, file_range);
 
         let piece = Piece {
             expected_hash,
@@ -321,7 +320,7 @@ impl Torrent {
             blocks: BTreeMap::new(),
             file_range,
         };
-        self.write_buf.insert(info.piece_index, piece);
+        self.write_buf.insert(piece_index, piece);
 
         Ok(())
     }
@@ -345,13 +344,13 @@ impl Torrent {
     /// and it will be applied across piece boundaries.
     pub async fn read_block(
         &self,
-        info: BlockInfo,
+        block_info: BlockInfo,
         chan: peer::Sender,
     ) -> Result<()> {
-        log::trace!("Reading block {:?} from disk", info);
+        log::trace!("Reading block {:?} from disk", block_info);
 
-        let piece_index = info.piece_index;
-        let block_index = info.index_in_piece();
+        let piece_index = block_info.piece_index;
+        let block_index = block_info.index_in_piece();
 
         // check if piece is in the read cache
         if let Some(blocks) = self.read_cache.get(&piece_index) {
@@ -362,12 +361,12 @@ impl Torrent {
                 log::debug!(
                     "Piece {} block offset {} is invalid",
                     piece_index,
-                    info.offset
+                    block_info.offset
                 );
                 // invalid block offset
-                chan.send(peer::Command::Block {
-                    info,
-                    data: Err(ReadError::InvalidBlockOffset),
+                self.alert_chan.send(TorrentAlert::ReadError {
+                    block_info,
+                    error: ReadError::InvalidBlockOffset,
                 })?;
                 // return with ok as the disk task itself shouldn't be aborted
                 // due to invalid input
@@ -376,10 +375,7 @@ impl Torrent {
 
             // return block via sender
             let block = Arc::clone(&blocks[block_index]);
-            chan.send(peer::Command::Block {
-                info,
-                data: Ok(block),
-            })?;
+            chan.send(peer::Command::Block(Block::new(block_info, block)))?;
         } else {
             // otherwise read in the piece from disk
 
@@ -388,9 +384,9 @@ impl Torrent {
                 match self.info.files_intersecting_piece(piece_index) {
                     Ok(file_range) => file_range,
                     Err(_) => {
-                        chan.send(peer::Command::Block {
-                            info,
-                            data: Err(ReadError::InvalidPieceIndex),
+                        self.alert_chan.send(TorrentAlert::ReadError {
+                            block_info,
+                            error: ReadError::InvalidPieceIndex,
                         })?;
                         // return with ok as the disk task itself shouldn't be aborted
                         // due to invalid input
@@ -404,12 +400,17 @@ impl Torrent {
 
             // TODO: check if file pointed to by info has been downloaded yet
 
+            // TODO: Read errors should be vanishingly rare yet we incur the
+            // cost of cloning the channel (which is equivalent to an arc clone)
+            // for every read--i.e. we clone on the hot path. Is there a way to
+            // only clone when needed?
+            let alert_chan = self.alert_chan.clone();
+
             // don't block the reactor with blocking disk IO
             task::spawn_blocking(move || {
                 let torrent_piece_offset =
                     piece_index as u64 * piece_len as u64;
 
-                // TODO: positional vectored read IO
                 match piece::read(
                     torrent_piece_offset,
                     file_range,
@@ -426,10 +427,9 @@ impl Torrent {
                         // we're reading in thesame place.
                         read_cache.insert(piece_index, blocks);
 
-                        chan.send(peer::Command::Block {
-                            info,
-                            data: Ok(block),
-                        })
+                        chan.send(peer::Command::Block(Block::new(
+                            block_info, block,
+                        )))
                         .map_err(|e| {
                             log::error!("Error sending block to peer: {}", e);
                             e
@@ -437,7 +437,11 @@ impl Torrent {
                         .ok();
                     }
                     Err(e) => {
-                        chan.send(peer::Command::Block { info, data: Err(e) })
+                        alert_chan
+                            .send(TorrentAlert::ReadError {
+                                block_info,
+                                error: e,
+                            })
                             .map_err(|e| {
                                 log::error!(
                                     "Error sending read result to peer: {}",

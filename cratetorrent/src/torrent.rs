@@ -1,12 +1,13 @@
-use futures::{
-    select,
-    stream::{Fuse, StreamExt},
-};
 use std::{
     collections::HashMap,
     net::SocketAddr,
     sync::Arc,
     time::{Duration, Instant},
+};
+
+use futures::{
+    select,
+    stream::{Fuse, StreamExt},
 };
 use tokio::{sync::RwLock, task, time};
 
@@ -195,9 +196,21 @@ impl Torrent {
                     Err(e) => {
                         // TODO: include details in the error as to which blocks
                         // failed to write
-                        log::warn!("Failed to write batch to disk: {}", e);
+                        log::error!("Failed to write batch to disk: {}", e);
                     }
                 }
+            }
+            TorrentAlert::ReadError { block_info, error } => {
+                log::error!(
+                    "Failed to read from disk {}: {}",
+                    block_info,
+                    error
+                );
+                // TODO: For now we just log for simplicity's sake, but in the
+                // future we'll need error recovery mechanisms here.
+                // For instance, it may be that the torrent file got moved while
+                // the torrent was still seeding. In this case we'd need to stop
+                // torrent and send an alert to the API consumer.
             }
         }
 

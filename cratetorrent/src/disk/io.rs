@@ -53,13 +53,13 @@ impl Disk {
             match cmd {
                 Command::NewTorrent {
                     id,
-                    info,
+                    storage_info,
                     piece_hashes,
                 } => {
                     log::trace!(
                         "Disk received NewTorrent command: id={}, info={:?}",
                         id,
-                        info
+                        storage_info
                     );
                     if self.torrents.contains_key(&id) {
                         log::warn!("Torrent {} already allocated", id);
@@ -72,7 +72,7 @@ impl Disk {
                     // NOTE: Do _NOT_ return on failure, we don't want to kill
                     // the disk task due to potential disk IO errors: we just
                     // want to log it and notify engine of it.
-                    let torrent_res = Torrent::new(info, piece_hashes);
+                    let torrent_res = Torrent::new(storage_info, piece_hashes);
                     match torrent_res {
                         Ok((torrent, alert_port)) => {
                             log::info!("Torrent {} successfully allocated", id);
@@ -94,15 +94,19 @@ impl Disk {
                         }
                     }
                 }
-                Command::WriteBlock { id, info, data } => {
-                    self.write_block(id, info, data).await?;
+                Command::WriteBlock {
+                    id,
+                    block_info,
+                    data,
+                } => {
+                    self.write_block(id, block_info, data).await?;
                 }
                 Command::ReadBlock {
                     id,
-                    info,
+                    block_info,
                     result_chan,
                 } => {
-                    self.read_block(id, info, result_chan).await?;
+                    self.read_block(id, block_info, result_chan).await?;
                 }
                 Command::Shutdown => {
                     log::info!("Shutting down disk event loop");
@@ -122,10 +126,10 @@ impl Disk {
     async fn write_block(
         &self,
         id: TorrentId,
-        info: BlockInfo,
+        block_info: BlockInfo,
         data: Vec<u8>,
     ) -> Result<()> {
-        log::trace!("Saving torrent {} block {:?} to disk", id, info);
+        log::trace!("Saving torrent {} block {:?} to disk", id, block_info);
 
         // check torrent id
         //
@@ -136,7 +140,7 @@ impl Disk {
             log::warn!("Torrent {} not found", id);
             Error::InvalidTorrentId
         })?;
-        torrent.write().await.write_block(info, data).await
+        torrent.write().await.write_block(block_info, data).await
     }
 
     /// Attempts to read a block from disk and return the result via the given
@@ -149,10 +153,10 @@ impl Disk {
     async fn read_block(
         &self,
         id: TorrentId,
-        info: BlockInfo,
+        block_info: BlockInfo,
         chan: peer::Sender,
     ) -> Result<()> {
-        log::trace!("Saving torrent {} block {:?} to disk", id, info);
+        log::trace!("Saving torrent {} block {:?} to disk", id, block_info);
 
         // check torrent id
         //
@@ -163,7 +167,7 @@ impl Disk {
             log::warn!("Torrent {} not found", id);
             Error::InvalidTorrentId
         })?;
-        torrent.read().await.read_block(info, chan).await
+        torrent.read().await.read_block(block_info, chan).await
     }
 }
 

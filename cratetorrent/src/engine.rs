@@ -1,7 +1,6 @@
-use {
-    std::{net::SocketAddr, path::PathBuf},
-    tokio::runtime::Runtime,
-};
+use std::{net::SocketAddr, path::PathBuf};
+
+use tokio::runtime::Runtime;
 
 use crate::{
     disk::{self, Alert},

@@ -4,7 +4,7 @@
 #[macro_use]
 extern crate serde_derive;
 
-use std::fmt;
+use std::{fmt, ops::Deref, sync::Arc};
 
 use bitvec::prelude::{BitVec, Msb0};
 
@@ -116,6 +116,89 @@ pub(crate) fn block_count(piece_len: u32) -> usize {
     // last piece may be shorter so we need to account for this by rounding
     // up before dividing to get the number of blocks in piece
     (piece_len as usize + (BLOCK_LEN as usize - 1)) / BLOCK_LEN as usize
+}
+
+/// A piece block.
+///
+/// Contains the block's metadata and data.
+pub(crate) struct Block {
+    /// The index of the piece of which this is a block.
+    pub piece_index: PieceIndex,
+    /// The zero-based byte offset into the piece.
+    pub offset: u32,
+    /// The actual raw data of the block.
+    pub data: BlockData,
+}
+
+impl Block {
+    pub fn new(info: BlockInfo, data: impl Into<BlockData>) -> Self {
+        Self {
+            piece_index: info.piece_index,
+            offset: info.offset,
+            data: data.into(),
+        }
+    }
+
+    /// Returns a [`BlockInfo`] of this block.
+    pub fn info(&self) -> BlockInfo {
+        BlockInfo {
+            piece_index: self.piece_index,
+            offset: self.offset,
+            len: self.data.len() as u32,
+        }
+    }
+}
+
+/// Abstracts over the block data type.
+///
+/// A block may be just a normal byte buffer, or it may be a reference into
+/// a cache.
+#[derive(Debug, PartialEq)]
+pub(crate) enum BlockData {
+    Owned(Vec<u8>),
+    Cached(CachedBlock),
+}
+
+/// Blocks are cached in memory and are shared between the disk task and peer
+/// session tasks. Therefore we use atomic reference counting to make sure that
+/// even if a block is evicted from cache, the peer still using it still has
+/// a valid reference to it.
+pub(crate) type CachedBlock = Arc<Vec<u8>>;
+
+impl BlockData {
+    /// Returns the raw block if it's owned.
+    ///
+    /// # Panics
+    ///
+    /// This method panics if the block is not owned and is in the cache.
+    pub fn into_owned(self) -> Vec<u8> {
+        match self {
+            Self::Owned(b) => b,
+            _ => panic!("cannot move block out of cache"),
+        }
+    }
+}
+
+impl Deref for BlockData {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        match self {
+            Self::Owned(b) => b.as_ref(),
+            Self::Cached(b) => b.as_ref(),
+        }
+    }
+}
+
+impl From<Vec<u8>> for BlockData {
+    fn from(b: Vec<u8>) -> Self {
+        Self::Owned(b)
+    }
+}
+
+impl From<CachedBlock> for BlockData {
+    fn from(b: CachedBlock) -> Self {
+        Self::Cached(b)
+    }
 }
 
 #[cfg(test)]

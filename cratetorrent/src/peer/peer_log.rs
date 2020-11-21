@@ -8,24 +8,24 @@
 
 macro_rules! peer_warn {
     ($self:ident, $($arg:tt)*) => ({
-        ::log::warn!("[{}] {}", $self.addr, format!($($arg)*));
+        ::log::warn!("[{}][{}] {}", $self.torrent.id, $self.addr, format!($($arg)*));
     })
 }
 
 macro_rules! peer_info {
     ($self:ident, $($arg:tt)*) => ({
-        ::log::info!("[{}] {}", $self.addr, format!($($arg)*));
+        ::log::info!("[{}][{}] {}", $self.torrent.id, $self.addr, format!($($arg)*));
     })
 }
 
 macro_rules! peer_debug {
     ($self:ident, $($arg:tt)*) => ({
-        ::log::debug!("[{}] {}", $self.addr, format!($($arg)*));
+        ::log::debug!("[{}][{}] {}", $self.torrent.id, $self.addr, format!($($arg)*));
     })
 }
 
 macro_rules! peer_trace {
     ($self:ident, $($arg:tt)*) => ({
-        ::log::trace!("[{}] {}", $self.addr, format!($($arg)*));
+        ::log::trace!("[{}][{}] {}", $self.torrent.id, $self.addr, format!($($arg)*));
     })
 }

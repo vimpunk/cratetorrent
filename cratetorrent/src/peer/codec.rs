@@ -1,13 +1,12 @@
 use std::{
     convert::{TryFrom, TryInto},
     io,
-    ops::Deref,
 };
 
 use bytes::{Buf, BufMut, BytesMut};
 use tokio_util::codec::{Decoder, Encoder};
 
-use crate::{disk::CachedBlock, Bitfield, BlockInfo};
+use crate::{Bitfield, BlockData, BlockInfo};
 
 /// The message sent at the beginning of a peer session by both sides of the
 /// connection.
@@ -155,7 +154,7 @@ impl Decoder for HandshakeCodec {
 }
 
 /// The actual messages exchanged by peers.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Debug, PartialEq)]
 pub(crate) enum Message {
     KeepAlive,
     Bitfield(Bitfield),
@@ -170,7 +169,7 @@ pub(crate) enum Message {
     Block {
         piece_index: usize,
         offset: u32,
-        data: Block,
+        data: BlockData,
     },
     Cancel(BlockInfo),
 }
@@ -202,48 +201,6 @@ impl Message {
             assert_eq!(*self, Self::KeepAlive);
             1
         }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub enum Block {
-    Owned(Vec<u8>),
-    Cached(CachedBlock),
-}
-
-impl Block {
-    /// Returns the raw block if it's owned.
-    ///
-    /// # Panics
-    ///
-    /// This method panics if the block is not owned and is in the cache.
-    pub fn into_owned(self) -> Vec<u8> {
-        match self {
-            Self::Owned(b) => b,
-            _ => panic!("cannot move block out of cache"),
-        }
-    }
-}
-
-impl Deref for Block {
-    type Target = [u8];
-    fn deref(&self) -> &[u8] {
-        match self {
-            Self::Owned(b) => b.as_ref(),
-            Self::Cached(b) => b.as_ref(),
-        }
-    }
-}
-
-impl From<Vec<u8>> for Block {
-    fn from(b: Vec<u8>) -> Self {
-        Self::Owned(b)
-    }
-}
-
-impl From<CachedBlock> for Block {
-    fn from(b: CachedBlock) -> Self {
-        Self::Cached(b)
     }
 }
 

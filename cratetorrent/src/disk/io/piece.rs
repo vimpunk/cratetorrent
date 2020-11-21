@@ -8,9 +8,9 @@ use sha1::{Digest, Sha1};
 
 use crate::{
     block_count, block_len,
-    disk::{error::*, io::file::TorrentFile, CachedBlock},
+    disk::{error::*, io::file::TorrentFile},
     iovecs::IoVec,
-    FileIndex, Sha1Hash,
+    CachedBlock, FileIndex, Sha1Hash,
 };
 
 /// An in-progress piece download that keeps in memory the so far downloaded

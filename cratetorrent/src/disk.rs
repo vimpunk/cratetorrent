@@ -1,4 +1,3 @@
-use std::sync::Arc;
 use tokio::{
     sync::mpsc::{UnboundedReceiver, UnboundedSender},
     task,
@@ -46,14 +45,14 @@ impl DiskHandle {
     pub fn allocate_new_torrent(
         &self,
         id: TorrentId,
-        info: StorageInfo,
+        storage_info: StorageInfo,
         piece_hashes: Vec<u8>,
     ) -> Result<()> {
         log::trace!("Allocating new torrent {}", id);
         self.0
             .send(Command::NewTorrent {
                 id,
-                info,
+                storage_info,
                 piece_hashes,
             })
             .map_err(Error::from)
@@ -66,12 +65,16 @@ impl DiskHandle {
     pub fn write_block(
         &self,
         id: TorrentId,
-        info: BlockInfo,
+        block_info: BlockInfo,
         data: Vec<u8>,
     ) -> Result<()> {
-        log::trace!("Saving block {:?} to disk", info);
+        log::trace!("Saving block {:?} to disk", block_info);
         self.0
-            .send(Command::WriteBlock { id, info, data })
+            .send(Command::WriteBlock {
+                id,
+                block_info,
+                data,
+            })
             .map_err(Error::from)
     }
 
@@ -82,14 +85,14 @@ impl DiskHandle {
     pub fn read_block(
         &self,
         id: TorrentId,
-        info: BlockInfo,
+        block_info: BlockInfo,
         result_chan: peer::Sender,
     ) -> Result<()> {
-        log::trace!("Reading block {:?} from disk", info);
+        log::trace!("Reading block {:?} from disk", block_info);
         self.0
             .send(Command::ReadBlock {
                 id,
-                info,
+                block_info,
                 result_chan,
             })
             .map_err(Error::from)
@@ -112,20 +115,20 @@ enum Command {
     /// Allocate a new torrent in `Disk`.
     NewTorrent {
         id: TorrentId,
-        info: StorageInfo,
+        storage_info: StorageInfo,
         piece_hashes: Vec<u8>,
     },
     /// Request to eventually write a block to disk.
     WriteBlock {
         id: TorrentId,
-        info: BlockInfo,
+        block_info: BlockInfo,
         data: Vec<u8>,
     },
     /// Request to eventually read a block from disk and return it via the
     /// sender.
     ReadBlock {
         id: TorrentId,
-        info: BlockInfo,
+        block_info: BlockInfo,
         result_chan: peer::Sender,
     },
     /// Eventually shut down the disk task.
@@ -169,6 +172,11 @@ pub(crate) enum TorrentAlert {
     /// Sent when some blocks were written to disk or an error ocurred while
     /// writing.
     BatchWrite(Result<BatchWrite, WriteError>),
+    /// There was an error reading a block.
+    ReadError {
+        block_info: BlockInfo,
+        error: ReadError,
+    },
 }
 
 /// Type returned on each successful batch of blocks written to disk.
@@ -187,12 +195,6 @@ pub(crate) struct BatchWrite {
     /// contains whether the downloaded piece's hash matches its expected hash.
     pub is_piece_valid: Option<bool>,
 }
-
-/// Blocks are cached in memory and are shared between the disk task and peer
-/// session tasks. Therefore we use reference counting to make sure that even if
-/// a block is evicted from cache, the peer still using it still has a valid
-/// reference to it.
-pub(crate) type CachedBlock = Arc<Vec<u8>>;
 
 #[cfg(test)]
 mod tests {
@@ -442,7 +444,6 @@ mod tests {
             if let Some(peer::Command::Block { info, data }) = port.recv().await
             {
                 assert_eq!(info, block_info);
-                assert!(data.is_ok());
             } else {
                 assert!(false, "block could not be read from disk");
             }
