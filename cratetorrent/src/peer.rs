@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     net::SocketAddr,
     sync::Arc,
     time::{Duration, Instant},
@@ -83,12 +84,12 @@ pub(crate) struct PeerSession {
     // this information in just PieceDownload so that we don't have to enforce
     // this invariant (keeping in mind that later PieceDownloads will be shared
     // among PeerSessions)?
-    outgoing_requests: Vec<BlockInfo>,
+    outgoing_requests: HashSet<BlockInfo>,
     /// The requests we got from peer.
     ///
     /// The request's entry is removed from here when the block is transmitted
     /// or when the peer cancels it.
-    incoming_requests: Vec<BlockInfo>,
+    incoming_requests: HashSet<BlockInfo>,
 }
 
 impl PeerSession {
@@ -110,8 +111,8 @@ impl PeerSession {
                 cmd_port: cmd_port.fuse(),
                 addr,
                 state: SessionState::default(),
-                outgoing_requests: Vec::new(),
-                incoming_requests: Vec::new(),
+                outgoing_requests: HashSet::new(),
+                incoming_requests: HashSet::new(),
             },
             cmd_chan,
         )
@@ -486,6 +487,7 @@ impl PeerSession {
                     "Received 'cancel' message for {}",
                     block_info
                 );
+                self.incoming_requests.remove(&block_info);
             }
         }
 
@@ -587,13 +589,12 @@ impl PeerSession {
                 self.outgoing_requests.len()
             );
             self.state.last_outgoing_request_time = Some(Instant::now());
-            // save current volley of requests
-            self.outgoing_requests.extend_from_slice(&blocks);
             // make the actual requests
-            for block in blocks.iter() {
+            for block in blocks.into_iter() {
+                self.outgoing_requests.insert(block);
                 // TODO: batch these in a single syscall, or is this already
                 // being done by the tokio codec type?
-                sink.send(Message::Request(*block)).await?;
+                sink.send(Message::Request(block)).await?;
                 self.state.uploaded_protocol_counter +=
                     MessageId::Request.header_len();
             }
@@ -612,32 +613,21 @@ impl PeerSession {
     ) -> Result<()> {
         peer_info!(self, "Received block: {:?}", block_info);
 
-        // find block in the list of pending requests
-        let request_pos = match self
-            .outgoing_requests
-            .iter()
-            .position(|b| *b == block_info)
-        {
-            Some(pos) => pos,
-            None => {
-                peer_warn!(
-                    self,
-                    "Received not requested block: {:?}",
-                    block_info
-                );
-                // silently ignore this block if we didn't expected
-                // it
-                //
-                // TODO(https://github.com/mandreyel/cratetorrent/issues/10): In
-                // the future we could add logic that only accepts blocks within
-                // a window after the last request. If not done, peer could DoS
-                // us by sending unwanted blocks repeatedly.
-                return Ok(());
-            }
-        };
-
         // remove block from our pending requests queue
-        self.outgoing_requests.remove(request_pos);
+        let was_present = self.outgoing_requests.remove(&block_info);
+
+        // find block in the list of pending requests
+        if !was_present {
+            peer_warn!(self, "Received not requested block: {:?}", block_info);
+            // silently ignore this block if we didn't expected
+            // it
+            //
+            // TODO(https://github.com/mandreyel/cratetorrent/issues/10): In
+            // the future we could add logic that only accepts blocks within
+            // a window after the last request. If not done, peer could DoS
+            // us by sending unwanted blocks repeatedly.
+            return Ok(());
+        }
 
         // mark the block as downloaded with its respective piece
         // download instance
@@ -700,7 +690,7 @@ impl PeerSession {
         peer_info!(self, "Received request: {:?}", block_info);
 
         // check if peer is not already requesting this block
-        if self.incoming_request_exists(&block_info) {
+        if self.incoming_requests.contains(&block_info) {
             // TODO: if peer keeps spamming us, close connection
             peer_warn!(self, "Peer sent duplicate block request");
             return Ok(());
@@ -709,7 +699,7 @@ impl PeerSession {
         // TODO: validate block info
 
         peer_info!(self, "Issuing disk IO read for block: {:?}", block_info);
-        self.incoming_requests.push(block_info);
+        self.incoming_requests.insert(block_info);
 
         // validate and save the block to disk by sending a write command to the
         // disk task
@@ -729,7 +719,7 @@ impl PeerSession {
         data: CachedBlock,
     ) -> Result<()> {
         // check if the request hasn't been canceled yet
-        if !self.incoming_request_exists(&info) {
+        if !self.incoming_requests.contains(&info) {
             peer_warn!(self, "Peer canceled request, dropping {}", info);
             return Ok(());
         }
@@ -746,11 +736,5 @@ impl PeerSession {
         self.state.update_upload_stats(info.len);
 
         Ok(())
-    }
-
-    /// Returns whether the peer's request for this block has already been
-    /// processed by us or not.
-    fn incoming_request_exists(&self, info: &BlockInfo) -> bool {
-        self.incoming_requests.iter().any(|b| *b == *info)
     }
 }
