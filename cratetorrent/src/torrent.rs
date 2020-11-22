@@ -25,6 +25,12 @@ use crate::{
     Bitfield, PeerId, PieceIndex, Sha1Hash, TorrentId,
 };
 
+/// Represents a torrent upload or download.
+///
+/// This is the main entity responsible for the high-level management of
+/// a torrent download or upload. It starts and stops connections with peers
+/// ([`PeerSession`](crate::peer::PeerSession) instances) and stores metadata
+/// about the torrent.
 pub(crate) struct Torrent {
     /// The peers in this torrent.
     peers: Vec<Peer>,

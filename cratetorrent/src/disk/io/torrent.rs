@@ -97,6 +97,8 @@ struct ThreadContext {
     files: Vec<sync::RwLock<TorrentFile>>,
 
     /// Various disk IO related statistics.
+    ///
+    /// Stas are atomically updated by the IO worker threads themselves.
     stats: Stats,
 }
 

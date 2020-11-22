@@ -44,6 +44,25 @@ pub(crate) enum Command {
     Shutdown,
 }
 
+/// A stopped or active connection with another BitTorrent peer.
+///
+/// This entity implements the BitTorrent wire protocol: it is responsible for
+/// exchanging the BitTorrent messages that drive a download.
+/// It only concerns itself with the network aspect of things: disk IO, for
+/// example, is delegated to the [disk task](crate::disk::DiskHandle).
+///
+/// A peer session may be started in two modes:
+/// - outbound: for connecting to another BitTorrent peer;
+/// - inbound: for starting a session from an existing incoming TCP connection.
+///
+/// The only difference in the above two is how the handshake is handled at the
+/// beginning of the connection. From then on the session mechanisms are
+/// identical.
+///
+/// # Important
+///
+/// For now only the BitTorrent v1 specification is implemented, without any
+/// extensions.
 pub(crate) struct PeerSession {
     /// Shared information of the torrent.
     torrent: Arc<TorrentContext>,
