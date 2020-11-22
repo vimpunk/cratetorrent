@@ -50,8 +50,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // parse cli args
 
     // mandatory
-    let listen_addr = matches
-        .value_of("listen")
+    let listen_addr = matches.value_of("listen");
+    println!("{:?}", listen_addr);
+    let listen_addr = listen_addr
         .ok_or_else(|| "--listen must be specified")?
         .parse()?;
     let metainfo_path = matches

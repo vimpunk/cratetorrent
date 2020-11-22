@@ -1,7 +1,11 @@
 use std::{
     collections::{BTreeMap, HashMap},
     fs,
-    sync::{self, Arc},
+    sync::{
+        self,
+        atomic::{AtomicU64, AtomicUsize, Ordering},
+        Arc,
+    },
 };
 
 use chashmap::CHashMap;
@@ -69,7 +73,15 @@ pub(super) struct Torrent {
     /// The concatenation of all expected piece hashes.
     piece_hashes: Vec<u8>,
     /// Disk IO statistics.
-    stats: Stats,
+    stats: Arc<Stats>,
+}
+
+#[derive(Default)]
+struct Stats {
+    /// The number of bytes successfully written to disk.
+    write_count: AtomicU64,
+    /// The number of times we failed to write to disk.
+    write_failure_count: AtomicUsize,
 }
 
 impl Torrent {
@@ -158,7 +170,7 @@ impl Torrent {
                 read_cache: Arc::new(CHashMap::new()),
                 files: Arc::new(files),
                 piece_hashes,
-                stats: Stats::default(),
+                stats: Arc::default(),
             },
             alert_port,
         ))
@@ -205,55 +217,66 @@ impl Torrent {
 
             // don't block the reactor with the potentially expensive hashing
             // and sync file writing
-            let write_result = task::spawn_blocking(move || {
+            let stats = Arc::clone(&self.stats);
+            let alert_chan = self.alert_chan.clone();
+            task::spawn_blocking(move || {
                 let is_piece_valid = piece.matches_hash();
 
                 // save piece to disk if it's valid
                 if is_piece_valid {
-                    log::debug!("Piece {} is valid", piece_index);
-                    let torrent_piece_offset = piece_index as u64 * piece_len as u64;
-                    piece.write(torrent_piece_offset, &*files)?;
-                } else {
-                    log::warn!("Piece {} is not valid", info.piece_index);
-                };
+                    log::debug!(
+                        "Piece {} is valid, writing to disk",
+                        piece_index
+                    );
 
-                Ok(is_piece_valid)
-            })
-            .await
-            // our code doesn't panic in the task so until better strategies
-            // are devised, unwrap here
-            .expect("disk IO write task panicked");
-
-            // We don't error out on disk write failure as we don't want to
-            // kill the disk task due to potential disk IO errors (which may
-            // happen from time to time). We alert torrent of this failure and
-            // return normally.
-            //
-            // TODO(https://github.com/mandreyel/cratetorrent/issues/23): also
-            // place back piece write buffer in torrent and retry later
-            match write_result {
-                Ok(is_valid) => {
-                    // record write statistics if the piece is valid
-                    if is_valid {
-                        self.stats.write_count += piece_len as u64;
+                    let torrent_piece_offset =
+                        piece_index as u64 * piece_len as u64;
+                    if let Err(e) = piece.write(torrent_piece_offset, &*files) {
+                        log::error!(
+                            "Error writing piece {} to disk: {}",
+                            piece_index,
+                            e
+                        );
+                        // TODO(https://github.com/mandreyel/cratetorrent/issues/23):
+                        // also place back piece write buffer in torrent and
+                        // retry later
+                        stats
+                            .write_failure_count
+                            .fetch_add(1, Ordering::Relaxed);
+                        // alert torrent of block write failure
+                        alert_chan
+                            .send(TorrentAlert::PieceWrite(Err(e)))
+                            .map_err(|e| {
+                                log::error!(
+                                    "Error sending piece result: {}",
+                                    e
+                                );
+                                e
+                            })
+                            .ok();
+                        return;
                     }
 
-                    // alert torrent of block writes and piece completion
-                    self.alert_chan.send(TorrentAlert::PieceWrite(Ok(
-                        PieceComplete {
-                            index: piece_index,
-                            is_valid,
-                        },
-                    )))?;
+                    log::debug!("Wrote piece {} to disk", piece_index);
+                    stats
+                        .write_count
+                        .fetch_add(piece_len as u64, Ordering::Relaxed);
+                } else {
+                    log::warn!("Piece {} is not valid", info.piece_index);
                 }
-                Err(e) => {
-                    log::error!("Disk write error: {}", e);
-                    self.stats.write_failure_count += 1;
 
-                    // alert torrent of block write failure
-                    self.alert_chan.send(TorrentAlert::PieceWrite(Err(e)))?;
-                }
-            }
+                // alert torrent of piece completion and hash result
+                alert_chan
+                    .send(TorrentAlert::PieceWrite(Ok(PieceComplete {
+                        index: piece_index,
+                        is_valid: is_piece_valid,
+                    })))
+                    .map_err(|e| {
+                        log::error!("Error sending piece result: {}", e);
+                        e
+                    })
+                    .ok();
+            });
         }
 
         Ok(())
@@ -340,21 +363,18 @@ impl Torrent {
         // check if piece is in the read cache
         if let Some(blocks) = self.read_cache.get(&piece_index) {
             log::debug!("Piece {} is in the read cache", piece_index);
-            // get the block's index in piece based on the provided offset (it may
-            // be invalid)
+            // the block's index in piece may be invalid
             if block_index >= blocks.len() {
                 log::debug!(
                     "Piece {} block offset {} is invalid",
                     piece_index,
                     block_info.offset
                 );
-                // invalid block offset
                 self.alert_chan.send(TorrentAlert::ReadError {
                     block_info,
                     error: ReadError::InvalidBlockOffset,
                 })?;
-                // return with ok as the disk task itself shouldn't be aborted
-                // due to invalid input
+                // the disk task itself mustn't be aborted due to invalid input
                 return Ok(());
             }
 
@@ -368,7 +388,6 @@ impl Torrent {
                 piece_index
             );
 
-            // check if info is valid
             let file_range =
                 match self.info.files_intersecting_piece(piece_index) {
                     Ok(file_range) => file_range,
@@ -402,8 +421,6 @@ impl Torrent {
             task::spawn_blocking(move || {
                 let torrent_piece_offset =
                     piece_index as u64 * piece_len as u64;
-
-                log::debug!("Reading piece {}", piece_index);
                 match piece::read(
                     torrent_piece_offset,
                     file_range,
@@ -412,16 +429,15 @@ impl Torrent {
                 ) {
                     Ok(blocks) => {
                         log::debug!("Read piece {}", piece_index);
-
                         // pick requested block
                         let block = Arc::clone(&blocks[block_index]);
-
                         // Place piece in read cache. Another concurrent read
                         // could already have read the piece just before this
                         // thread, but replacing it shouldn't be an issue since
-                        // we're reading in thesame place.
+                        // we're reading the same data.
                         read_cache.insert(piece_index, blocks);
 
+                        // send block to peer
                         chan.send(peer::Command::Block(Block::new(
                             block_info, block,
                         )))
@@ -454,12 +470,4 @@ impl Torrent {
 
         Ok(())
     }
-}
-
-#[derive(Default)]
-struct Stats {
-    /// The number of bytes successfully written to disk.
-    write_count: u64,
-    /// The number of times we failed to write to disk.
-    write_failure_count: usize,
 }

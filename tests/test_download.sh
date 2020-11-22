@@ -12,6 +12,7 @@ USAGE: $1 --torrent-name NAME \\
           --src-path PATH \\
           --download-dir PATH \\
           --metainfo-dir PATH \\
+          --listen-addr ADDR \\
           --seeds SEED1,SEED2,...
 
 OPTIONS:
@@ -32,6 +33,9 @@ for arg in "$@"; do
         ;;
         --metainfo-path)
             metainfo_path=$2
+        ;;
+        --listen-addr)
+            listen_addr=$2
         ;;
         --seeds)
             IFS=',' read -r -a seeds <<< "$2"
@@ -61,6 +65,11 @@ if [ -z "${download_dir}" ]; then
 fi
 if [ -z "${metainfo_path}" ]; then
     echo "Error: --metainfo-path must be set"
+    print_help
+    exit 1
+fi
+if [ -z "${listen_addr}" ]; then
+    echo "Error: --listen-addr must be set"
     print_help
     exit 1
 fi
@@ -130,6 +139,7 @@ metainfo_cont_path="/cratetorrent/${torrent_name}.torrent"
 time docker run \
     -ti \
     --rm \
+    --env LISTEN="${listen_addr}" \
     --env SEEDS="${seeds_addrs}" \
     --env METAINFO_PATH="${metainfo_cont_path}" \
     --env DOWNLOAD_DIR="${download_dir}" \

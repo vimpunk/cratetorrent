@@ -50,6 +50,7 @@ metainfo_cont_path="/cratetorrent/${torrent_name}.torrent"
 download_dir=/tmp/cratetorrent
 # the final download destination on the host
 download_path="${download_dir}/${torrent_name}"
+listen_addr=0.0.0.0:51234
 
 ################################################################################
 # 1. Env setup
@@ -79,6 +80,7 @@ fi
     --src-path "${src_path}" \
     --download-dir "${download_dir}" \
     --metainfo-path "${metainfo_path}" \
+    --listen-addr "${listen_addr}" \
     --seeds "${seed_container},${seed2_container}"
 
 ################################################################################
