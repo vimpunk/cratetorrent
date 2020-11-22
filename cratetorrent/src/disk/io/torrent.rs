@@ -29,14 +29,38 @@ use crate::{
 pub(super) struct Torrent {
     /// All information concerning this torrent's storage.
     info: StorageInfo,
-    /// The channel used to alert a torrent that a block has been written to
-    /// disk and/or a piece was completed.
-    alert_chan: TorrentAlertSender,
+
     /// The in-progress piece downloads and disk writes. This is the torrent's
     /// disk write buffer. Each piece is mapped to its index for faster lookups.
     // TODO(https://github.com/mandreyel/cratetorrent/issues/22): Currently
     // there is no upper bound on this.
     write_buf: HashMap<PieceIndex, Piece>,
+
+    /// Contains the fields that may be accessed by other threads.
+    ///
+    /// This is an optimization to avoid having to call
+    /// `Arc::clone(&self.field)` for each of the contained fields when sending
+    /// them to an IO worker threads. See more in [`ThreadContext`].
+    thread_ctx: Arc<ThreadContext>,
+
+    /// The concatenation of all expected piece hashes.
+    piece_hashes: Vec<u8>,
+}
+
+/// Contains fields that are commonly accessed by torrent's IO threads.
+///
+/// We're using blocking IO to read things from disk and so such operations need to be
+/// spawned on a separate thread to not block the tokio reactor driving the
+/// disk task.
+/// But these threads need some fields from torrent and so those fields
+/// would need to be in an arc each. With this optimization, only this
+/// struct needs to be in an arc and thus only a single atomic increment has to
+/// be made when sending the contained fields across threads.
+struct ThreadContext {
+    /// The channel used to alert a torrent that a block has been written to
+    /// disk and/or a piece was completed.
+    alert_chan: TorrentAlertSender,
+
     /// The read cache that caches entire pieces.
     ///
     /// The piece is stored as a list of 16 KiB blocks since that is what peers
@@ -52,7 +76,8 @@ pub(super) struct Torrent {
     /// this avoids concurrent reads in later stages.
     // TODO(https://github.com/mandreyel/cratetorrent/issues/22): Currently
     // there is no upper bound on this. Consider using an LRU cache or similar.
-    read_cache: Arc<CHashMap<PieceIndex, Vec<CachedBlock>>>,
+    read_cache: CHashMap<PieceIndex, Vec<CachedBlock>>,
+
     /// Handles of all files in torrent, opened in advance during torrent
     /// creation.
     ///
@@ -69,11 +94,10 @@ pub(super) struct Torrent {
     // `self.info.structure`? We could just pass the file info on demand, but
     // that woudl require reallocating this vector every time (to pass a new
     // vector of pairs of `TorrentFile` and `FileInfo`).
-    files: Arc<Vec<sync::RwLock<TorrentFile>>>,
-    /// The concatenation of all expected piece hashes.
-    piece_hashes: Vec<u8>,
-    /// Disk IO statistics.
-    stats: Arc<Stats>,
+    files: Vec<sync::RwLock<TorrentFile>>,
+
+    /// Various disk IO related statistics.
+    stats: Stats,
 }
 
 #[derive(Default)]
@@ -82,6 +106,10 @@ struct Stats {
     write_count: AtomicU64,
     /// The number of times we failed to write to disk.
     write_failure_count: AtomicUsize,
+    /// The number of bytes successfully read from disk.
+    read_count: AtomicU64,
+    /// The number of times we failed to read from disk.
+    read_failure_count: AtomicUsize,
 }
 
 impl Torrent {
@@ -165,12 +193,14 @@ impl Torrent {
         Ok((
             Self {
                 info,
-                alert_chan,
                 write_buf: HashMap::new(),
-                read_cache: Arc::new(CHashMap::new()),
-                files: Arc::new(files),
+                thread_ctx: Arc::new(ThreadContext {
+                    alert_chan,
+                    read_cache: CHashMap::new(),
+                    files,
+                    stats: Stats::default(),
+                }),
                 piece_hashes,
-                stats: Arc::default(),
             },
             alert_port,
         ))
@@ -186,7 +216,9 @@ impl Torrent {
         let piece_index = info.piece_index;
         if !self.write_buf.contains_key(&piece_index) {
             if let Err(e) = self.start_new_piece(info.piece_index) {
-                self.alert_chan.send(TorrentAlert::PieceWrite(Err(e)))?;
+                self.thread_ctx
+                    .alert_chan
+                    .send(TorrentAlert::PieceWrite(Err(e)))?;
                 // return with ok as the disk task itself shouldn't be aborted
                 // due to invalid input
                 return Ok(());
@@ -206,7 +238,6 @@ impl Torrent {
             // succeeded (otherwise we need to retry later)
             let piece = self.write_buf.remove(&piece_index).unwrap();
             let piece_len = self.info.piece_len;
-            let files = Arc::clone(&self.files);
 
             log::debug!(
                 "Piece {} is complete ({} bytes), flushing {} block(s) to disk",
@@ -217,8 +248,7 @@ impl Torrent {
 
             // don't block the reactor with the potentially expensive hashing
             // and sync file writing
-            let stats = Arc::clone(&self.stats);
-            let alert_chan = self.alert_chan.clone();
+            let ctx = Arc::clone(&self.thread_ctx);
             task::spawn_blocking(move || {
                 let is_piece_valid = piece.matches_hash();
 
@@ -231,7 +261,9 @@ impl Torrent {
 
                     let torrent_piece_offset =
                         piece_index as u64 * piece_len as u64;
-                    if let Err(e) = piece.write(torrent_piece_offset, &*files) {
+                    if let Err(e) =
+                        piece.write(torrent_piece_offset, &*ctx.files)
+                    {
                         log::error!(
                             "Error writing piece {} to disk: {}",
                             piece_index,
@@ -240,11 +272,11 @@ impl Torrent {
                         // TODO(https://github.com/mandreyel/cratetorrent/issues/23):
                         // also place back piece write buffer in torrent and
                         // retry later
-                        stats
+                        ctx.stats
                             .write_failure_count
                             .fetch_add(1, Ordering::Relaxed);
                         // alert torrent of block write failure
-                        alert_chan
+                        ctx.alert_chan
                             .send(TorrentAlert::PieceWrite(Err(e)))
                             .map_err(|e| {
                                 log::error!(
@@ -258,7 +290,7 @@ impl Torrent {
                     }
 
                     log::debug!("Wrote piece {} to disk", piece_index);
-                    stats
+                    ctx.stats
                         .write_count
                         .fetch_add(piece_len as u64, Ordering::Relaxed);
                 } else {
@@ -266,7 +298,7 @@ impl Torrent {
                 }
 
                 // alert torrent of piece completion and hash result
-                alert_chan
+                ctx.alert_chan
                     .send(TorrentAlert::PieceWrite(Ok(PieceComplete {
                         index: piece_index,
                         is_valid: is_piece_valid,
@@ -353,7 +385,7 @@ impl Torrent {
     pub async fn read_block(
         &self,
         block_info: BlockInfo,
-        chan: peer::Sender,
+        result_chan: peer::Sender,
     ) -> Result<()> {
         log::trace!("Reading {} from disk", block_info);
 
@@ -361,7 +393,7 @@ impl Torrent {
         let block_index = block_info.index_in_piece();
 
         // check if piece is in the read cache
-        if let Some(blocks) = self.read_cache.get(&piece_index) {
+        if let Some(blocks) = self.thread_ctx.read_cache.get(&piece_index) {
             log::debug!("Piece {} is in the read cache", piece_index);
             // the block's index in piece may be invalid
             if block_index >= blocks.len() {
@@ -370,7 +402,7 @@ impl Torrent {
                     piece_index,
                     block_info.offset
                 );
-                self.alert_chan.send(TorrentAlert::ReadError {
+                self.thread_ctx.alert_chan.send(TorrentAlert::ReadError {
                     block_info,
                     error: ReadError::InvalidBlockOffset,
                 })?;
@@ -380,7 +412,8 @@ impl Torrent {
 
             // return block via sender
             let block = Arc::clone(&blocks[block_index]);
-            chan.send(peer::Command::Block(Block::new(block_info, block)))?;
+            result_chan
+                .send(peer::Command::Block(Block::new(block_info, block)))?;
         } else {
             // otherwise read in the piece from disk
             log::debug!(
@@ -393,19 +426,17 @@ impl Torrent {
                     Ok(file_range) => file_range,
                     Err(_) => {
                         log::error!("Piece {} not in file", piece_index);
-                        self.alert_chan.send(TorrentAlert::ReadError {
-                            block_info,
-                            error: ReadError::InvalidPieceIndex,
-                        })?;
+                        self.thread_ctx.alert_chan.send(
+                            TorrentAlert::ReadError {
+                                block_info,
+                                error: ReadError::InvalidPieceIndex,
+                            },
+                        )?;
                         // return with ok as the disk task itself shouldn't be aborted
                         // due to invalid input
                         return Ok(());
                     }
                 };
-
-            let piece_len = self.info.piece_len;
-            let files = Arc::clone(&self.files);
-            let read_cache = Arc::clone(&self.read_cache);
 
             // Checking if the file pointed to by info has been downloaded yet
             // is done implicitly as part of the read operation below: if we
@@ -415,37 +446,46 @@ impl Torrent {
             // cost of cloning the channel (which is equivalent to an arc clone)
             // for every read--i.e. we clone on the hot path. Is there a way to
             // only clone when needed?
-            let alert_chan = self.alert_chan.clone();
+            let piece_len = self.info.piece_len;
 
             // don't block the reactor with blocking disk IO
+            let ctx = Arc::clone(&self.thread_ctx);
             task::spawn_blocking(move || {
                 let torrent_piece_offset =
                     piece_index as u64 * piece_len as u64;
                 match piece::read(
                     torrent_piece_offset,
                     file_range,
-                    &files[..],
+                    &ctx.files[..],
                     piece_len,
                 ) {
                     Ok(blocks) => {
                         log::debug!("Read piece {}", piece_index);
                         // pick requested block
                         let block = Arc::clone(&blocks[block_index]);
+
                         // Place piece in read cache. Another concurrent read
                         // could already have read the piece just before this
                         // thread, but replacing it shouldn't be an issue since
                         // we're reading the same data.
-                        read_cache.insert(piece_index, blocks);
+                        ctx.read_cache.insert(piece_index, blocks);
+                        ctx.stats
+                            .read_count
+                            .fetch_add(piece_len as u64, Ordering::Relaxed);
 
                         // send block to peer
-                        chan.send(peer::Command::Block(Block::new(
-                            block_info, block,
-                        )))
-                        .map_err(|e| {
-                            log::error!("Error sending block to peer: {}", e);
-                            e
-                        })
-                        .ok();
+                        result_chan
+                            .send(peer::Command::Block(Block::new(
+                                block_info, block,
+                            )))
+                            .map_err(|e| {
+                                log::error!(
+                                    "Error sending block to peer: {}",
+                                    e
+                                );
+                                e
+                            })
+                            .ok();
                     }
                     Err(e) => {
                         log::error!(
@@ -453,7 +493,11 @@ impl Torrent {
                             piece_index,
                             e
                         );
-                        alert_chan
+
+                        ctx.stats
+                            .read_failure_count
+                            .fetch_add(1, Ordering::Relaxed);
+                        ctx.alert_chan
                             .send(TorrentAlert::ReadError {
                                 block_info,
                                 error: e,
