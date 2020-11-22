@@ -4,7 +4,8 @@ use tokio::{
 };
 
 use crate::{
-    error::Error, peer, storage_info::StorageInfo, BlockInfo, TorrentId,
+    error::Error, peer, storage_info::StorageInfo, BlockInfo, PieceIndex,
+    TorrentId,
 };
 use io::Disk;
 
@@ -171,7 +172,7 @@ pub(crate) type TorrentAlertReceiver = UnboundedReceiver<TorrentAlert>;
 pub(crate) enum TorrentAlert {
     /// Sent when some blocks were written to disk or an error ocurred while
     /// writing.
-    BatchWrite(Result<BatchWrite, WriteError>),
+    PieceWrite(Result<PieceComplete, WriteError>),
     /// There was an error reading a block.
     ReadError {
         block_info: BlockInfo,
@@ -179,21 +180,15 @@ pub(crate) enum TorrentAlert {
     },
 }
 
-/// Type returned on each successful batch of blocks written to disk.
+/// The type returned on completing a piece.
 #[derive(Debug)]
-pub(crate) struct BatchWrite {
-    /// The piece blocks that were written to the disk in this batch.
+pub(crate) struct PieceComplete {
+    /// The index of the piece.
+    pub index: PieceIndex,
+    /// Whether the piece is valid.
     ///
-    /// There is some inefficiency in having the piece index in all blocks,
-    /// however, this allows for supporting alerting writes of blocks in
-    /// multiple pieces, which is a feature for later (and for now this is kept
-    /// for simplicity).
-    ///
-    /// If the piece is invalid, this vector is empty.
-    pub blocks: Vec<BlockInfo>,
-    /// This field is set for the block write that completes the piece and
-    /// contains whether the downloaded piece's hash matches its expected hash.
-    pub is_piece_valid: Option<bool>,
+    /// If the piece is invalid, it is not written to disk.
+    pub is_valid: bool,
 }
 
 #[cfg(test)]
@@ -297,17 +292,12 @@ mod tests {
             });
 
             // wait for disk write result
-            if let Some(TorrentAlert::BatchWrite(Ok(batch))) =
+            if let Some(TorrentAlert::PieceWrite(Ok(piece))) =
                 torrent_disk_alert_port.recv().await
             {
-                // piece is complete so it should be hashed and be valid
-                assert_eq!(batch.is_piece_valid, Some(true));
-                // verify that the message contains all four blocks
-                for_each_block(index, piece.len() as u32, |block| {
-                    let pos = batch.blocks.iter().position(|b| *b == block);
-                    println!("Verifying piece {} block {:?}", index, block);
-                    assert!(pos.is_some());
-                });
+                // piece is complete so it should be hashed and valid
+                assert_eq!(piece.index, index);
+                assert_eq!(piece.is_valid, true);
             } else {
                 assert!(false, "Piece could not be written to disk");
             }
@@ -365,13 +355,11 @@ mod tests {
         });
 
         // wait for disk write result
-        if let Some(TorrentAlert::BatchWrite(Ok(batch))) =
+        if let Some(TorrentAlert::PieceWrite(Ok(piece))) =
             torrent_disk_alert_port.recv().await
         {
-            // piece is complete so it should be hashed but be invalid
-            assert_eq!(batch.is_piece_valid, Some(false));
-            // verify that the message doesn't contain any blocks
-            assert!(batch.blocks.is_empty());
+            assert_eq!(piece.index, index);
+            assert_eq!(piece.is_valid, false);
         } else {
             assert!(false, "piece could not be written to disk");
         }

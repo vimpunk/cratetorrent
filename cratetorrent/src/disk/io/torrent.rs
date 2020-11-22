@@ -10,7 +10,7 @@ use tokio::{sync::mpsc, task};
 use super::{piece, Piece, TorrentFile};
 use crate::{
     disk::{
-        error::*, BatchWrite, TorrentAlert, TorrentAlertReceiver,
+        error::*, PieceComplete, TorrentAlert, TorrentAlertReceiver,
         TorrentAlertSender,
     },
     peer,
@@ -174,7 +174,7 @@ impl Torrent {
         let piece_index = info.piece_index;
         if !self.write_buf.contains_key(&piece_index) {
             if let Err(e) = self.start_new_piece(info.piece_index) {
-                self.alert_chan.send(TorrentAlert::BatchWrite(Err(e)))?;
+                self.alert_chan.send(TorrentAlert::PieceWrite(Err(e)))?;
                 // return with ok as the disk task itself shouldn't be aborted
                 // due to invalid input
                 return Ok(());
@@ -209,30 +209,15 @@ impl Torrent {
                 let is_piece_valid = piece.matches_hash();
 
                 // save piece to disk if it's valid
-                let blocks = if is_piece_valid {
+                if is_piece_valid {
                     log::debug!("Piece {} is valid", piece_index);
                     let torrent_piece_offset = piece_index as u64 * piece_len as u64;
                     piece.write(torrent_piece_offset, &*files)?;
-
-                    // collect block infos for torrent to identify which
-                    // blocks were written to disk
-                    let blocks = piece
-                        .blocks
-                        .iter()
-                        .map(|(offset, block)| BlockInfo {
-                            piece_index: info.piece_index,
-                            offset: *offset,
-                            len: block.len() as u32,
-                        })
-                        .collect();
-
-                    blocks
                 } else {
                     log::warn!("Piece {} is not valid", info.piece_index);
-                    Vec::new()
                 };
 
-                Ok((is_piece_valid, blocks))
+                Ok(is_piece_valid)
             })
             .await
             // our code doesn't panic in the task so until better strategies
@@ -247,17 +232,17 @@ impl Torrent {
             // TODO(https://github.com/mandreyel/cratetorrent/issues/23): also
             // place back piece write buffer in torrent and retry later
             match write_result {
-                Ok((is_piece_valid, blocks)) => {
+                Ok(is_valid) => {
                     // record write statistics if the piece is valid
-                    if is_piece_valid {
+                    if is_valid {
                         self.stats.write_count += piece_len as u64;
                     }
 
                     // alert torrent of block writes and piece completion
-                    self.alert_chan.send(TorrentAlert::BatchWrite(Ok(
-                        BatchWrite {
-                            blocks,
-                            is_piece_valid: Some(is_piece_valid),
+                    self.alert_chan.send(TorrentAlert::PieceWrite(Ok(
+                        PieceComplete {
+                            index: piece_index,
+                            is_valid,
                         },
                     )))?;
                 }
@@ -266,7 +251,7 @@ impl Torrent {
                     self.stats.write_failure_count += 1;
 
                     // alert torrent of block write failure
-                    self.alert_chan.send(TorrentAlert::BatchWrite(Err(e)))?;
+                    self.alert_chan.send(TorrentAlert::PieceWrite(Err(e)))?;
                 }
             }
         }

@@ -186,40 +186,45 @@ impl Torrent {
         disk_alert: TorrentAlert,
     ) -> Result<bool> {
         match disk_alert {
-            TorrentAlert::BatchWrite(write_result) => {
+            TorrentAlert::PieceWrite(write_result) => {
                 log::debug!("Disk write result {:?}", write_result);
-
                 match write_result {
-                    Ok(batch) => {
+                    Ok(piece) => {
                         // if this write completed a piece, check torrent
                         // completion
-                        if let Some(is_piece_valid) = batch.is_piece_valid {
-                            if is_piece_valid {
-                                let missing_piece_count = self
-                                    .state
-                                    .context
-                                    .piece_picker
-                                    .read()
-                                    .await
-                                    .count_missing_pieces();
-                                log::info!(
-                                    "Finished piece {} download, valid: {}, left: {}",
-                                    batch.blocks.first().unwrap().piece_index,
-                                    is_piece_valid, missing_piece_count
-                                );
+                        if piece.is_valid {
+                            // note that this piece picker is set as complete by
+                            // peer sessions
+                            let missing_piece_count = self
+                                .state
+                                .context
+                                .piece_picker
+                                .read()
+                                .await
+                                .count_missing_pieces();
+                            log::info!(
+                                "Finished piece {} download, valid: {}, left: {}",
+                                piece.index,
+                                piece.is_valid, missing_piece_count
+                            );
 
-                                // if the torrent is fully downloaded, stop the
-                                // download loop
-                                if missing_piece_count == 0 {
-                                    log::info!(
-                                        "Finished torrent download, exiting"
-                                    );
-                                    return Ok(true);
-                                }
-                            } else {
-                                log::warn!("Received invalid piece, aborting");
+                            // if the torrent is fully downloaded, stop the
+                            // download loop
+                            if missing_piece_count == 0 {
+                                // TODO: return a global alert here instead and
+                                // let the engine decide whether to stop the
+                                // torrent
+                                log::info!(
+                                    "Finished torrent download, exiting"
+                                );
                                 return Ok(true);
                             }
+                        } else {
+                            // TODO(https://github.com/mandreyel/cratetorrent/issues/61):
+                            // Implement parole mode for the peers that sent
+                            // corrupt data.
+                            log::warn!("Received invalid piece, aborting");
+                            return Ok(true);
                         }
                     }
                     Err(e) => {
