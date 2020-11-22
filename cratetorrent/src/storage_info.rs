@@ -140,6 +140,11 @@ impl StorageInfo {
         Ok(files)
     }
 
+    /// Returns the piece's absolute offset in the torrent.
+    pub fn torrent_piece_offset(&self, index: PieceIndex) -> u64 {
+        index as u64 * self.piece_len as u64
+    }
+
     /// Returns the length of the piece at the given index.
     pub fn piece_len(&self, index: PieceIndex) -> Result<u32> {
         if index == self.piece_count - 1 {

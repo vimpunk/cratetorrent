@@ -704,8 +704,7 @@ impl PeerSession {
         // find block in the list of pending requests
         if !was_present {
             peer_warn!(self, "Received not requested block: {:?}", block_info);
-            // silently ignore this block if we didn't expected
-            // it
+            // silently ignore this block if we didn't expected it
             //
             // TODO(https://github.com/mandreyel/cratetorrent/issues/10): In
             // the future we could add logic that only accepts blocks within
@@ -805,9 +804,12 @@ impl PeerSession {
         let info = block.info();
         peer_info!(self, "Read from disk {}", info);
 
+        // remove peer's pending request
+        let was_present = self.incoming_requests.remove(&info);
+
         // check if the request hasn't been canceled yet
-        if !self.incoming_requests.contains(&info) {
-            peer_warn!(self, "Peer canceled request, dropping {}", info);
+        if !was_present {
+            peer_warn!(self, "No matching request entry for {}", info);
             return Ok(());
         }
 

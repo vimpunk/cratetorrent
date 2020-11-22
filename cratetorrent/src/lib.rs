@@ -75,12 +75,12 @@ pub(crate) struct BlockInfo {
 impl BlockInfo {
     /// Returns the index of the block within its piece, assuming the default
     /// block length of 16 KiB.
-    pub fn index_in_piece(&self) -> PieceIndex {
+    pub fn index_in_piece(&self) -> usize {
         // we need to use "lower than or equal" as this may be the last block in
         // which case it may be shorter than the default block length
         debug_assert!(self.len <= BLOCK_LEN);
         debug_assert!(self.len > 0);
-        (self.offset / BLOCK_LEN) as PieceIndex
+        (self.offset / BLOCK_LEN) as usize
     }
 }
 
@@ -103,9 +103,9 @@ impl fmt::Display for BlockInfo {
 ///
 /// Panics if the index multiplied by the default block length would exceed the
 /// piece length.
-pub(crate) fn block_len(piece_len: u32, index: usize) -> u32 {
-    let index = index as u32;
-    let block_offset = index * BLOCK_LEN;
+pub(crate) fn block_len(piece_len: u32, block_index: usize) -> u32 {
+    let block_index = block_index as u32;
+    let block_offset = block_index * BLOCK_LEN;
     assert!(piece_len > block_offset);
     std::cmp::min(piece_len - block_offset, BLOCK_LEN)
 }

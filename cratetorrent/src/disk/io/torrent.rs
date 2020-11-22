@@ -239,17 +239,18 @@ impl Torrent {
             // TODO: remove from in memory store only if the disk write
             // succeeded (otherwise we need to retry later)
             let piece = self.write_buf.remove(&piece_index).unwrap();
-            let piece_len = self.info.piece_len;
 
             log::debug!(
                 "Piece {} is complete ({} bytes), flushing {} block(s) to disk",
                 info.piece_index,
-                piece_len,
+                piece.len,
                 piece.blocks.len()
             );
 
             // don't block the reactor with the potentially expensive hashing
             // and sync file writing
+            let torrent_piece_offset =
+                self.info.torrent_piece_offset(piece_index);
             let ctx = Arc::clone(&self.thread_ctx);
             task::spawn_blocking(move || {
                 let is_piece_valid = piece.matches_hash();
@@ -261,8 +262,6 @@ impl Torrent {
                         piece_index
                     );
 
-                    let torrent_piece_offset =
-                        piece_index as u64 * piece_len as u64;
                     if let Err(e) =
                         piece.write(torrent_piece_offset, &*ctx.files)
                     {
@@ -294,7 +293,7 @@ impl Torrent {
                     log::debug!("Wrote piece {} to disk", piece_index);
                     ctx.stats
                         .write_count
-                        .fetch_add(piece_len as u64, Ordering::Relaxed);
+                        .fetch_add(piece.len as u64, Ordering::Relaxed);
                 } else {
                     log::warn!("Piece {} is not valid", info.piece_index);
                 }
@@ -444,17 +443,12 @@ impl Torrent {
             // is done implicitly as part of the read operation below: if we
             // can't read any bytes, the file likely does not exist.
 
-            // TODO: Read errors should be vanishingly rare yet we incur the
-            // cost of cloning the channel (which is equivalent to an arc clone)
-            // for every read--i.e. we clone on the hot path. Is there a way to
-            // only clone when needed?
-            let piece_len = self.info.piece_len;
-
             // don't block the reactor with blocking disk IO
+            let torrent_piece_offset =
+                self.info.torrent_piece_offset(piece_index);
+            let piece_len = self.info.piece_len(piece_index)?;
             let ctx = Arc::clone(&self.thread_ctx);
             task::spawn_blocking(move || {
-                let torrent_piece_offset =
-                    piece_index as u64 * piece_len as u64;
                 match piece::read(
                     torrent_piece_offset,
                     file_range,
