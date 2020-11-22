@@ -22,7 +22,7 @@ use tokio_util::codec::{Framed, FramedParts};
 
 use crate::{
     disk::DiskHandle, download::PieceDownload, error::*,
-    torrent::TorrentContext, Bitfield, Block, BlockInfo,
+    torrent::TorrentContext, Bitfield, Block, BlockInfo, PieceIndex,
 };
 use codec::*;
 use state::*;
@@ -40,6 +40,8 @@ type Receiver = UnboundedReceiver<Command>;
 pub(crate) enum Command {
     /// The result of reading a block from disk.
     Block(Block),
+    /// Notifies this peer session that a new piece is available.
+    NewPiece(PieceIndex),
     /// Eventually shut down the peer session.
     Shutdown,
 }
@@ -177,7 +179,10 @@ impl PeerSession {
             // set basic peer information
             self.state.peer = Some(PeerInfo {
                 id: peer_handshake.peer_id,
-                pieces: None,
+                pieces: Bitfield::repeat(
+                    false,
+                    self.torrent.storage.piece_count,
+                ),
             });
 
             // now that we have the handshake, we need to switch to the peer
@@ -237,7 +242,10 @@ impl PeerSession {
             // set basic peer information
             self.state.peer = Some(PeerInfo {
                 id: peer_handshake.peer_id,
-                pieces: None,
+                pieces: Bitfield::repeat(
+                    false,
+                    self.torrent.storage.piece_count,
+                ),
             });
 
             // we reply with the handshake
@@ -339,6 +347,15 @@ impl PeerSession {
                     match cmd {
                         Command::Block(block)=> {
                             self.send_block(&mut sink, block).await?;
+                        }
+                        Command::NewPiece(piece_index) => {
+                            // if peer doesn't have the piece, announce it
+                            if let Some(peer) = &self.state.peer {
+                                if !peer.pieces[piece_index]  {
+                                    peer_debug!(self, "Announcing piece {}", piece_index);
+                                    sink.send(Message::Have{ piece_index }).await?;
+                                }
+                            }
                         }
                         Command::Shutdown => {
                             peer_info!(self, "Shutting down session");
@@ -462,7 +479,7 @@ impl PeerSession {
             .register_availability(&bitfield)?;
         debug_assert!(self.state.is_interested);
         if let Some(peer_info) = &mut self.state.peer {
-            peer_info.pieces = Some(bitfield);
+            peer_info.pieces = bitfield;
         }
 
         // send interested message to peer
@@ -558,6 +575,10 @@ impl PeerSession {
                     "Received 'have' message for piece {}",
                     piece_index
                 );
+                // register's piece availability for this peer
+                if let Some(peer) = &mut self.state.peer {
+                    peer.pieces.set(piece_index, true);
+                }
                 // need to recalculate interest with each received piece
                 self.state.is_interested = self
                     .torrent

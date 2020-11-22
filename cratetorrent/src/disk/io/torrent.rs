@@ -14,7 +14,7 @@ use tokio::{sync::mpsc, task};
 use super::{piece, Piece, TorrentFile};
 use crate::{
     disk::{
-        error::*, PieceComplete, TorrentAlert, TorrentAlertReceiver,
+        error::*, PieceCompletion, TorrentAlert, TorrentAlertReceiver,
         TorrentAlertSender,
     },
     peer,
@@ -220,7 +220,7 @@ impl Torrent {
             if let Err(e) = self.start_new_piece(info.piece_index) {
                 self.thread_ctx
                     .alert_chan
-                    .send(TorrentAlert::PieceWrite(Err(e)))?;
+                    .send(TorrentAlert::PieceCompletion(Err(e)))?;
                 // return with ok as the disk task itself shouldn't be aborted
                 // due to invalid input
                 return Ok(());
@@ -278,7 +278,7 @@ impl Torrent {
                             .fetch_add(1, Ordering::Relaxed);
                         // alert torrent of block write failure
                         ctx.alert_chan
-                            .send(TorrentAlert::PieceWrite(Err(e)))
+                            .send(TorrentAlert::PieceCompletion(Err(e)))
                             .map_err(|e| {
                                 log::error!(
                                     "Error sending piece result: {}",
@@ -300,7 +300,7 @@ impl Torrent {
 
                 // alert torrent of piece completion and hash result
                 ctx.alert_chan
-                    .send(TorrentAlert::PieceWrite(Ok(PieceComplete {
+                    .send(TorrentAlert::PieceCompletion(Ok(PieceCompletion {
                         index: piece_index,
                         is_valid: is_piece_valid,
                     })))

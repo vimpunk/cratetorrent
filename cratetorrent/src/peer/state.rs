@@ -308,7 +308,7 @@ pub(super) struct PeerInfo {
     /// Peer's 20 byte BitTorrent id.
     pub id: PeerId,
     /// All pieces peer has, updated when it announces to us a new piece.
-    pub pieces: Option<Bitfield>,
+    pub pieces: Bitfield,
 }
 
 /// At any given time, a connection with a peer is in one of the below states.

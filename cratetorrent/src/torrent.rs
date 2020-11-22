@@ -192,7 +192,7 @@ impl Torrent {
         disk_alert: TorrentAlert,
     ) -> Result<bool> {
         match disk_alert {
-            TorrentAlert::PieceWrite(write_result) => {
+            TorrentAlert::PieceCompletion(write_result) => {
                 log::debug!("Disk write result {:?}", write_result);
                 match write_result {
                     Ok(piece) => {
@@ -213,6 +213,15 @@ impl Torrent {
                                 piece.index,
                                 piece.is_valid, missing_piece_count
                             );
+
+                            // tell all peers that we got a new piece
+                            for peer in self.peers.iter() {
+                                if let Some(chan) = &peer.chan {
+                                    chan.send(peer::Command::NewPiece(
+                                        piece.index,
+                                    ))?;
+                                }
+                            }
 
                             // if the torrent is fully downloaded, stop the
                             // download loop
@@ -267,6 +276,8 @@ struct Peer {
     /// The join handle to the peer session task.
     ///
     /// This is set when the session is started.
+    // TODO(https://github.com/mandreyel/cratetorrent/issues/62): this will be
+    // used once global stop command is implemented
     handle: Option<task::JoinHandle<Result<()>>>,
 }
 

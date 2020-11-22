@@ -172,7 +172,7 @@ pub(crate) type TorrentAlertReceiver = UnboundedReceiver<TorrentAlert>;
 pub(crate) enum TorrentAlert {
     /// Sent when some blocks were written to disk or an error ocurred while
     /// writing.
-    PieceWrite(Result<PieceComplete, WriteError>),
+    PieceCompletion(Result<PieceCompletion, WriteError>),
     /// There was an error reading a block.
     ReadError {
         block_info: BlockInfo,
@@ -182,7 +182,7 @@ pub(crate) enum TorrentAlert {
 
 /// The type returned on completing a piece.
 #[derive(Debug)]
-pub(crate) struct PieceComplete {
+pub(crate) struct PieceCompletion {
     /// The index of the piece.
     pub index: PieceIndex,
     /// Whether the piece is valid.
@@ -292,7 +292,7 @@ mod tests {
             });
 
             // wait for disk write result
-            if let Some(TorrentAlert::PieceWrite(Ok(piece))) =
+            if let Some(TorrentAlert::PieceCompletion(Ok(piece))) =
                 torrent_disk_alert_port.recv().await
             {
                 // piece is complete so it should be hashed and valid
@@ -355,7 +355,7 @@ mod tests {
         });
 
         // wait for disk write result
-        if let Some(TorrentAlert::PieceWrite(Ok(piece))) =
+        if let Some(TorrentAlert::PieceCompletion(Ok(piece))) =
             torrent_disk_alert_port.recv().await
         {
             assert_eq!(piece.index, index);
