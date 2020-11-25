@@ -303,6 +303,7 @@ impl PeerSession {
             if own_pieces.any() {
                 peer_info!(self, "Sending piece availability");
                 sink.send(Message::Bitfield(own_pieces.clone())).await?;
+                peer_info!(self, "Sent piece availability");
             }
         }
 
@@ -453,12 +454,13 @@ impl PeerSession {
         sink: &mut SplitSink<Framed<TcpStream, PeerCodec>, Message>,
         mut bitfield: Bitfield,
     ) -> Result<()> {
+        peer_info!(self, "Handling peer Bitfield message");
+        peer_trace!(self, "Bitfield: {:?}", bitfield);
+
         debug_assert_eq!(
             self.state.connection,
             ConnectionState::AvailabilityExchange
         );
-        peer_info!(self, "Handling peer Bitfield message");
-        peer_trace!(self, "Bitfield: {:?}", bitfield);
 
         // The bitfield raw data that is sent over the wire may be longer than
         // the logical pieces it represents, if there the number of pieces in
@@ -482,11 +484,14 @@ impl PeerSession {
             peer_info.pieces = bitfield;
         }
 
-        // send interested message to peer
-        peer_info!(self, "Interested in peer");
-        sink.send(Message::Interested).await?;
-        self.state.uploaded_protocol_counter +=
-            MessageId::Interested.header_len();
+        // we may have become interested in peer
+        if self.state.is_interested {
+            // send interested message to peer
+            peer_info!(self, "Interested in peer");
+            sink.send(Message::Interested).await?;
+            self.state.uploaded_protocol_counter +=
+                MessageId::Interested.header_len();
+        }
 
         Ok(())
     }
@@ -538,7 +543,8 @@ impl PeerSession {
                     peer_info!(self, "Peer became interested");
                     self.state.is_peer_interested = true;
                     // TODO(https://github.com/mandreyel/cratetorrent/issues/60):
-                    // impleent the proper unchoke algorithm in `Torrent`
+                    // we currently unchkoe peer unconditionally, but we should
+                    // implement the proper unchoke algorithm in `Torrent`
                     peer_info!(self, "Unchoking peer");
                     self.state.is_peer_choked = false;
                     sink.send(Message::Unchoke).await?;
@@ -599,7 +605,15 @@ impl PeerSession {
     ) -> Result<()> {
         peer_trace!(self, "Making requests");
 
-        // FIXME: sometimes we don't seem to be making any requests at all
+        if self.state.is_choked {
+            peer_debug!(self, "Cannot make requests while choked");
+            return Ok(());
+        }
+
+        if !self.state.is_interested {
+            peer_debug!(self, "Cannot make requests if not interested");
+            return Ok(());
+        }
 
         // TODO: optimize this by preallocating the vector in self
         let mut requests = Vec::new();
