@@ -19,7 +19,7 @@ source common.sh
 # start the container (if it's not already running)
 ./start_transmission_seed.sh --name "${seed_container}"
 
-torrent_name=dir-test
+torrent_name=single-peer-dir-test
 # the seeded file
 src_path="${assets_dir}/${torrent_name}"
 # and its metainfo
@@ -30,6 +30,7 @@ metainfo_cont_path="/cratetorrent/${torrent_name}.torrent"
 download_dir=/tmp/cratetorrent
 # the final download destination on the host
 download_path="${download_dir}/${torrent_name}"
+listen_addr=0.0.0.0:51234
 
 # relative paths of the download resources
 file1=file1.txt
@@ -94,36 +95,5 @@ fi
     --src-path "${src_path}" \
     --download-dir "${download_dir}" \
     --metainfo-path "${metainfo_path}" \
+    --listen-addr "${listen_addr}" \
     --seeds "${seed_container}"
-
-################################################################################
-# 3. Verification
-################################################################################
-
-# top level
-download_file1="${download_path}/${file1}"
-download_file2="${download_path}/${file2}"
-# first dir
-download_subdir1="${download_path}/${subdir1}"
-download_file3="${download_path}/${file3}"
-# nested dir
-download_subdir2="${download_path}/${subdir2}"
-download_file4="${download_path}/${file4}"
-
-# check directories first
-for dir in "${download_path}" "${download_subdir1}" "${download_subdir2}"
-do
-    if [ ! -d "${dir}" ]; then
-        echo "FAILURE: destination directory ${dir} does not exist!"
-        exit "${download_not_found}"
-    fi
-done
-
-# then the files: existence and content equality
-verify_file "${file1_path}" "${download_file1}"
-verify_file "${file2_path}" "${download_file2}"
-verify_file "${file3_path}" "${download_file3}"
-verify_file "${file4_path}" "${download_file4}"
-
-echo
-echo "SUCCESS: downloaded archive matches source archive"

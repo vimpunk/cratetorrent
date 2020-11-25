@@ -1,7 +1,6 @@
-use {
-    std::{net::SocketAddr, path::PathBuf},
-    tokio::runtime::Runtime,
-};
+use std::{net::SocketAddr, path::PathBuf};
+
+use tokio::runtime::Runtime;
 
 use crate::{
     disk::{self, Alert},
@@ -9,14 +8,15 @@ use crate::{
     metainfo::Metainfo,
     storage_info::StorageInfo,
     torrent::Torrent,
-    PeerId,
+    Bitfield, PeerId,
 };
 
-/// Connects to a single seed and downloads the torrent or aborts on error.
-pub fn run_torrent(
+/// Connects to seed peers and downloads the torrent.
+pub fn download_torrent(
     client_id: PeerId,
     download_dir: PathBuf,
     metainfo: Metainfo,
+    listen_addr: SocketAddr,
     seeds: Vec<SocketAddr>,
 ) -> Result<()> {
     if seeds.is_empty() {
@@ -25,16 +25,59 @@ pub fn run_torrent(
     }
 
     let mut rt = Runtime::new()?;
-    rt.block_on(async move {
-        start_disk_and_torrent(client_id, download_dir, metainfo, seeds).await
-    })
+    rt.block_on(start_engine(
+        client_id,
+        download_dir,
+        metainfo,
+        listen_addr,
+        Mode::Download { seeds },
+    ))
 }
 
-async fn start_disk_and_torrent(
+/// Seeds a torrent until an error occurs.
+pub fn seed_torrent(
     client_id: PeerId,
     download_dir: PathBuf,
     metainfo: Metainfo,
-    seeds: Vec<SocketAddr>,
+    listen_addr: SocketAddr,
+) -> Result<()> {
+    let mut rt = Runtime::new()?;
+    rt.block_on(start_engine(
+        client_id,
+        download_dir,
+        metainfo,
+        listen_addr,
+        Mode::Seed,
+    ))
+}
+
+enum Mode {
+    Download { seeds: Vec<SocketAddr> },
+    Seed,
+}
+
+impl Mode {
+    fn own_pieces(&self, piece_count: usize) -> Bitfield {
+        match self {
+            Self::Download { .. } => Bitfield::repeat(false, piece_count),
+            Self::Seed => Bitfield::repeat(true, piece_count),
+        }
+    }
+
+    fn seeds(self) -> Vec<SocketAddr> {
+        match self {
+            Self::Download { seeds } => seeds,
+            _ => Vec::new(),
+        }
+    }
+}
+
+async fn start_engine(
+    client_id: PeerId,
+    download_dir: PathBuf,
+    metainfo: Metainfo,
+    listen_addr: SocketAddr,
+    mode: Mode,
 ) -> Result<()> {
     let (disk_join_handle, disk, mut alert_port) = disk::spawn()?;
 
@@ -72,17 +115,18 @@ async fn start_disk_and_torrent(
             return Ok(());
         };
 
+    let own_pieces = mode.own_pieces(storage_info.piece_count);
     let mut torrent = Torrent::new(
         id,
         disk.clone(),
         torrent_disk_alert_port,
         info_hash,
         storage_info,
+        own_pieces,
         client_id,
-        &seeds,
-    )?;
-    // run torrent to completion
-    torrent.start().await?;
+    );
+    let seeds = mode.seeds();
+    torrent.start(listen_addr, &seeds).await?;
 
     // send a shutdown command to disk
     disk.shutdown()?;

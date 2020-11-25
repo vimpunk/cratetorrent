@@ -14,24 +14,24 @@ seed2_container=tr-seed-2
 
 assets_dir="$(pwd)/assets"
 
-# Verifies that the downloaded file is the same as its source file.
+# Verifies that the downloaded file or directory is the same as its source.
 #
 # Arguments:
-# - $1 source file absolute path
-# - $2 downloaded file absolute path
-function verify_file {
+# - $1 source torrent absolute path
+# - $2 downloaded torrent absolute path
+function verify_download {
     src=$1
     dl=$2
-    if [ ! -f "${dl}" ]; then
+    if [ ! -e "${dl}" ]; then
         echo "FAILURE: destination file ${dl} does not exist!"
         exit "${download_not_found}"
     fi
 
     # assert that the downloaded file is the same as the original
     echo
-    echo "Comparing downloaded file ${dl} to source file ${src}"
-    if ! cmp --silent "${dl}" "${src}"; then
-        echo "FAILURE: downloaded file does not match source file"
+    echo "Comparing downloaded torrent ${dl} to source ${src}"
+    if ! diff -q -r "${dl}" "${src}"; then
+        echo "FAILURE: downloaded torrent does not match source file"
         exit "${invalid_download}"
     fi
 }

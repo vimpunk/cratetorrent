@@ -1,6 +1,6 @@
 [package]
 name = "cratetorrent"
-version = "1.0.0-alpha.1"
+version = "1.0.0-alpha.2"
 authors = ["mandreyel <mandreyel@protonmail.com>"]
 edition = "2018"
 
@@ -9,6 +9,7 @@ edition = "2018"
 [dependencies]
 bitvec = "0.17"
 bytes = "0.5"
+chashmap = "2.2"
 futures = "0.3"
 hex = "0.4"
 log = "0.4"
@@ -25,6 +26,7 @@ tokio-util = { version = "0.2", features = ["codec"] }
 [dev-dependencies]
 criterion = "0.3"
 lazy_static = "1.4"
+pretty_assertions = "0.6"
 
 [[bench]]
 name = "iovecs"

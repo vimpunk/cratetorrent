@@ -1,8 +1,7 @@
-use {
-    clap::{App, Arg},
-    cratetorrent::metainfo::*,
-    std::{fs, path::PathBuf},
-};
+use std::{fs, net::SocketAddr, path::PathBuf};
+
+use clap::{App, Arg};
+use cratetorrent::metainfo::*;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
@@ -10,6 +9,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // set up cli args
     let matches = App::new("Cratetorrent CLI")
         .version("1.0.0-alpha.1")
+        .arg(
+            Arg::with_name("listen")
+                .short("l")
+                .long("listen")
+                .value_name("SOCKET_ADDR")
+                .help(
+                    "The socket address on which to listen for new connections",
+                )
+                .takes_value(true),
+        )
         .arg(
             Arg::with_name("seeds")
                 .short("s")
@@ -39,12 +48,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .get_matches();
 
     // parse cli args
-    let seeds = matches
-        .value_of("seeds")
-        .ok_or_else(|| "--seeds must be set")?
-        .split(',')
-        .filter_map(|s| s.parse().ok())
-        .collect();
+
+    // mandatory
+    let listen_addr = matches.value_of("listen");
+    println!("{:?}", listen_addr);
+    let listen_addr = listen_addr
+        .ok_or_else(|| "--listen must be specified")?
+        .parse()?;
     let metainfo_path = matches
         .value_of("metainfo")
         .ok_or_else(|| "--seed must be set")?;
@@ -53,26 +63,44 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ok_or_else(|| "--download-dir must be set")?
         .into();
 
+    // optional
+    let seeds: Vec<SocketAddr> = matches
+        .value_of("seeds")
+        .unwrap_or_default()
+        .split(',')
+        .filter_map(|s| s.parse().ok())
+        .collect();
+
     // read in torrent metainfo
     let metainfo = fs::read(metainfo_path)?;
     let metainfo = Metainfo::from_bytes(&metainfo)?;
 
-    println!("seeds: {:?}", seeds);
     println!("metainfo: {:?}", metainfo);
     println!("piece count: {}", metainfo.piece_count());
     println!("info hash: {}", hex::encode(&metainfo.info_hash));
+    println!("seeds: {:?}", seeds);
 
     // arbitrary client id for now
     const CLIENT_ID: &str = "cbt-2020-03-03-00000";
     let mut client_id = [0; 20];
     client_id.copy_from_slice(CLIENT_ID.as_bytes());
 
-    cratetorrent::engine::run_torrent(
-        client_id,
-        download_dir,
-        metainfo,
-        seeds,
-    )?;
+    if seeds.is_empty() {
+        cratetorrent::engine::seed_torrent(
+            client_id,
+            download_dir,
+            metainfo,
+            listen_addr,
+        )?;
+    } else {
+        cratetorrent::engine::download_torrent(
+            client_id,
+            download_dir,
+            metainfo,
+            listen_addr,
+            seeds,
+        )?;
+    }
 
     Ok(())
 }

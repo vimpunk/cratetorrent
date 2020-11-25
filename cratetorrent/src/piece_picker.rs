@@ -13,17 +13,16 @@ pub(crate) struct PiecePicker {
 }
 
 impl PiecePicker {
-    /// Creates a new empty piece picker for the given number of pieces.
-    ///
-    /// Empty means that we don't have any of the pieces yet, so piece picker
-    /// will pick all of them, if available from our peers.
-    pub fn new(piece_count: usize) -> Self {
+    /// Creates a new piece picker with the given own_pieces we already have.
+    pub fn new(own_pieces: Bitfield) -> Self {
         let mut pieces = Vec::new();
-        pieces.resize_with(piece_count, Piece::default);
-        Self {
-            own_pieces: Bitfield::repeat(false, piece_count),
-            pieces,
-        }
+        pieces.resize_with(own_pieces.len(), Piece::default);
+        Self { own_pieces, pieces }
+    }
+
+    /// Returns an immutable reference to a bitfield of the pieces we own.
+    pub fn own_pieces(&self) -> &Bitfield {
+        &self.own_pieces
     }
 
     /// Returns the number of missing pieces that are needed to complete the
@@ -84,6 +83,20 @@ impl PiecePicker {
         Ok(interested)
     }
 
+    pub fn register_piece_availability(
+        &mut self,
+        index: PieceIndex,
+    ) -> Result<bool> {
+        log::trace!("Registering newly available piece {}", index);
+        match self.own_pieces.get(index) {
+            Some(is_interested) => {
+                self.pieces[index].frequency += 1;
+                Ok(*is_interested)
+            }
+            None => Err(Error::InvalidPieceIndex),
+        }
+    }
+
     /// Tells the piece picker that we have downloaded the piece at the given
     /// index.
     pub fn received_piece(&mut self, index: PieceIndex) {
@@ -132,7 +145,7 @@ mod tests {
     #[test]
     fn test_pick_all_pieces() {
         let piece_count = 15;
-        let mut piece_picker = PiecePicker::new(piece_count);
+        let mut piece_picker = PiecePicker::empty(piece_count);
         let available_pieces = Bitfield::repeat(true, piece_count);
         piece_picker
             .register_availability(&available_pieces)
@@ -163,7 +176,7 @@ mod tests {
     #[test]
     fn test_received_piece() {
         let piece_count = 15;
-        let mut piece_picker = PiecePicker::new(piece_count);
+        let mut piece_picker = PiecePicker::empty(piece_count);
         let available_pieces = Bitfield::repeat(true, piece_count);
         piece_picker
             .register_availability(&available_pieces)
@@ -193,7 +206,7 @@ mod tests {
     fn test_is_interested() {
         // empty piece picker
         let piece_count = 15;
-        let mut piece_picker = PiecePicker::new(piece_count);
+        let mut piece_picker = PiecePicker::empty(piece_count);
 
         // we are interested if peer has all pieces
         let available_pieces = Bitfield::repeat(true, piece_count);
@@ -210,7 +223,7 @@ mod tests {
 
         // half full piece picker
         let piece_count = 15;
-        let mut piece_picker = PiecePicker::new(piece_count);
+        let mut piece_picker = PiecePicker::empty(piece_count);
         for index in 0..8 {
             piece_picker.received_piece(index);
         }
@@ -235,7 +248,7 @@ mod tests {
 
         // full piece picker
         let piece_count = 15;
-        let mut piece_picker = PiecePicker::new(piece_count);
+        let mut piece_picker = PiecePicker::empty(piece_count);
         for index in 0..piece_count {
             piece_picker.received_piece(index);
         }
@@ -244,5 +257,11 @@ mod tests {
         assert!(!piece_picker
             .register_availability(&available_pieces)
             .unwrap());
+    }
+
+    impl PiecePicker {
+        fn empty(piece_count: usize) -> Self {
+            Self::new(Bitfield::repeat(false, piece_count))
+        }
     }
 }

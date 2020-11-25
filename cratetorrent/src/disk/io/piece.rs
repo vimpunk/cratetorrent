@@ -1,12 +1,16 @@
-use std::{collections::BTreeMap, ops::Range, sync};
+use std::{
+    collections::BTreeMap,
+    ops::Range,
+    sync::{self, Arc},
+};
 
 use sha1::{Digest, Sha1};
 
 use crate::{
-    block_count,
+    block_count, block_len,
     disk::{error::*, io::file::TorrentFile},
     iovecs::IoVec,
-    FileIndex, Sha1Hash,
+    CachedBlock, FileIndex, Sha1Hash,
 };
 
 /// An in-progress piece download that keeps in memory the so far downloaded
@@ -136,4 +140,81 @@ impl Piece {
 
         Ok(())
     }
+}
+
+/// Reads a piece's blocks from the specified portion of the file from disk.
+///
+/// # Arguments
+///
+/// * `torrent_piece_offset` - The absolute offset of the piece's first byte in
+///     the whole torrent. From this value the relative offset of piece within
+///     file is calculated.
+/// * `file_range` - The files that contain data of the piece.
+/// * `files` - A slice of all files in torrent.
+/// * `len` - The length of the piece to read in.  While this function is
+///     currently used to read the whole piece, it could also be used to read
+///     only a portion of the piece or several pieces with this argument.
+pub(super) fn read<'a>(
+    torrent_piece_offset: u64,
+    file_range: Range<FileIndex>,
+    files: &[sync::RwLock<TorrentFile>],
+    len: u32,
+) -> Result<Vec<CachedBlock>, ReadError> {
+    // reserve a read buffer for all blocks in piece
+    let block_count = block_count(len);
+    let mut blocks = Vec::with_capacity(block_count);
+    for i in 0..block_count {
+        let block_len = block_len(len, i);
+        let mut buf = Vec::new();
+        buf.resize(block_len as usize, 0u8);
+        blocks.push(Arc::new(buf))
+    }
+
+    // convert the blocks to IO slices that the underlying
+    // systemcall can deal with
+    let mut iovecs: Vec<IoVec<&mut [u8]>> =
+        blocks
+            .iter_mut()
+            .map(|b| {
+                IoVec::from_mut_slice(Arc::get_mut(b).expect(
+                    "cannot get mut ref to buffer only used by this thread",
+                ).as_mut_slice())
+            })
+            .collect();
+    let mut bufs = iovecs.as_mut_slice();
+
+    // loop through all files piece overlaps with and read that part of
+    // file
+    let files = &files[file_range];
+    debug_assert!(!files.is_empty());
+    let len = len as u64;
+    // the offset at which we need to read from torrent, which is updated
+    // with each read
+    let mut torrent_read_offset = torrent_piece_offset;
+    let mut total_read_count = 0;
+
+    for file in files.iter() {
+        let file = file.read().unwrap();
+
+        // determine which part of the file we need to read from
+        debug_assert!(len > total_read_count);
+        let remaining_piece_len = len - total_read_count;
+        let file_slice = file
+            .info
+            .get_slice(torrent_read_offset, remaining_piece_len);
+        // an empty file slice shouldn't occur as it would mean that piece
+        // was thought to span fewer files than it actually does
+        debug_assert!(file_slice.len > 0);
+
+        // read data
+        bufs = file.read(file_slice, bufs)?;
+
+        torrent_read_offset += file_slice.len as u64;
+        total_read_count += file_slice.len;
+    }
+
+    // we should have read in the whole piece
+    debug_assert_eq!(total_read_count, len);
+
+    Ok(blocks)
 }

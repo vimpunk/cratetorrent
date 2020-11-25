@@ -6,7 +6,7 @@ use std::{
 use bytes::{Buf, BufMut, BytesMut};
 use tokio_util::codec::{Decoder, Encoder};
 
-use crate::{Bitfield, BlockInfo};
+use crate::{Bitfield, BlockData, BlockInfo};
 
 /// The message sent at the beginning of a peer session by both sides of the
 /// connection.
@@ -154,7 +154,8 @@ impl Decoder for HandshakeCodec {
 }
 
 /// The actual messages exchanged by peers.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Debug, PartialEq)]
+#[cfg_attr(test, derive(Clone))]
 pub(crate) enum Message {
     KeepAlive,
     Bitfield(Bitfield),
@@ -169,7 +170,7 @@ pub(crate) enum Message {
     Block {
         piece_index: usize,
         offset: u32,
-        data: Vec<u8>,
+        data: BlockData,
     },
     Cancel(BlockInfo),
 }
@@ -509,7 +510,7 @@ impl Decoder for PeerCodec {
                 Message::Block {
                     piece_index,
                     offset,
-                    data,
+                    data: data.into(),
                 }
             }
             MessageId::Cancel => {

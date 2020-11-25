@@ -12,6 +12,7 @@ USAGE: $1 --torrent-name NAME \\
           --src-path PATH \\
           --download-dir PATH \\
           --metainfo-dir PATH \\
+          --listen-addr ADDR \\
           --seeds SEED1,SEED2,...
 
 OPTIONS:
@@ -33,8 +34,14 @@ for arg in "$@"; do
         --metainfo-path)
             metainfo_path=$2
         ;;
+        --listen-addr)
+            listen_addr=$2
+        ;;
         --seeds)
             IFS=',' read -r -a seeds <<< "$2"
+        ;;
+        --seed-port)
+            seed_port=$2
         ;;
         --h|--help)
             print_help
@@ -64,16 +71,23 @@ if [ -z "${metainfo_path}" ]; then
     print_help
     exit 1
 fi
+if [ -z "${listen_addr}" ]; then
+    echo "Error: --listen-addr must be set"
+    print_help
+    exit 1
+fi
 if [ -z "${seeds}" ]; then
     echo "Error: --seeds must be set"
     print_help
     exit 1
 fi
 
+seed_port="${seed_port:-${transmission_port}}"
+
 # collect the IP addresses of all seeds within the docker network
 for seed in "${seeds[@]}"; do
     ip="$(get_container_ip "${seed}")"
-    addr="${ip}:${transmission_port}"
+    addr="${ip}:${seed_port}"
     if [ -z "${seeds_addrs}" ]; then
         seeds_addrs="${addr}"
     else
@@ -94,7 +108,7 @@ if [ ! -f "${metainfo_path}" ]; then
     echo "Error: metainfo ${metainfo_path} does not exist!"
     exit "${metainfo_not_found}"
 fi
-if [ ! -f "${src_path}" ] && [ ! -d "${src_path}" ]; then
+if [ ! -e "${src_path}" ]; then
     echo "Error: source file ${src_path} does not exist!"
     exit "${source_not_found}"
 fi
@@ -121,7 +135,7 @@ fi
 
 # provide way to override the log level but default to tracing everything in the
 # cratetorrent lib and binary
-rust_log=${RUST_LOG:-cratetorrent=trace,cratetorrent_cli=trace}
+rust_log=${RUST_LOG:-warn,cratetorrent=trace,cratetorrent_cli=trace}
 # the path of the metainfo inside the container
 metainfo_cont_path="/cratetorrent/${torrent_name}.torrent"
 
@@ -130,6 +144,7 @@ metainfo_cont_path="/cratetorrent/${torrent_name}.torrent"
 time docker run \
     -ti \
     --rm \
+    --env LISTEN="${listen_addr}" \
     --env SEEDS="${seeds_addrs}" \
     --env METAINFO_PATH="${metainfo_cont_path}" \
     --env DOWNLOAD_DIR="${download_dir}" \
@@ -144,11 +159,8 @@ time docker run \
 
 # the final download destination on the host
 download_path="${download_dir}/${torrent_name}"
+# assert that the downloaded file is the same as the original
+verify_download "${src_path}" "${download_path}"
 
-# first check if the torrent was downloaded in the expected path
-if [ ! -f "${download_path}" ] && [ ! -d "${download_path}" ]; then
-    echo "FAILURE: downloaded torrent does not exist at ${download_path}!"
-    exit "${download_not_found}"
-fi
-
-# the rest of the verification is up to the caller
+echo
+echo "SUCCESS: downloaded file matches source file"

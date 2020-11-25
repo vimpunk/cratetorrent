@@ -6,7 +6,7 @@ use super::{
     error::*, Alert, AlertReceiver, AlertSender, Command, CommandReceiver,
     CommandSender, TorrentAllocation,
 };
-use crate::{error::Error, BlockInfo, TorrentId};
+use crate::{error::Error, peer, BlockInfo, TorrentId};
 use file::TorrentFile;
 use piece::Piece;
 use torrent::Torrent;
@@ -53,13 +53,13 @@ impl Disk {
             match cmd {
                 Command::NewTorrent {
                     id,
-                    info,
+                    storage_info,
                     piece_hashes,
                 } => {
                     log::trace!(
                         "Disk received NewTorrent command: id={}, info={:?}",
                         id,
-                        info
+                        storage_info
                     );
                     if self.torrents.contains_key(&id) {
                         log::warn!("Torrent {} already allocated", id);
@@ -72,7 +72,7 @@ impl Disk {
                     // NOTE: Do _NOT_ return on failure, we don't want to kill
                     // the disk task due to potential disk IO errors: we just
                     // want to log it and notify engine of it.
-                    let torrent_res = Torrent::new(info, piece_hashes);
+                    let torrent_res = Torrent::new(storage_info, piece_hashes);
                     match torrent_res {
                         Ok((torrent, alert_port)) => {
                             log::info!("Torrent {} successfully allocated", id);
@@ -83,7 +83,7 @@ impl Disk {
                             ))?;
                         }
                         Err(e) => {
-                            log::warn!(
+                            log::error!(
                                 "Torrent {} allocation failure: {}",
                                 id,
                                 e
@@ -94,8 +94,19 @@ impl Disk {
                         }
                     }
                 }
-                Command::WriteBlock { id, info, data } => {
-                    self.write_block(id, info, data).await?;
+                Command::WriteBlock {
+                    id,
+                    block_info,
+                    data,
+                } => {
+                    self.write_block(id, block_info, data).await?;
+                }
+                Command::ReadBlock {
+                    id,
+                    block_info,
+                    result_chan,
+                } => {
+                    self.read_block(id, block_info, result_chan).await?;
                 }
                 Command::Shutdown => {
                     log::info!("Shutting down disk event loop");
@@ -115,10 +126,10 @@ impl Disk {
     async fn write_block(
         &self,
         id: TorrentId,
-        info: BlockInfo,
+        block_info: BlockInfo,
         data: Vec<u8>,
     ) -> Result<()> {
-        log::trace!("Saving torrent {} block {:?} to disk", id, info);
+        log::trace!("Saving torrent {} {} to disk", id, block_info);
 
         // check torrent id
         //
@@ -126,15 +137,44 @@ impl Disk {
         // torrent id: could it be that disk requests for a torrent arrive after
         // a torrent has been removed?
         let torrent = self.torrents.get(&id).ok_or_else(|| {
-            log::warn!("Torrent {} not found", id);
+            log::error!("Torrent {} not found", id);
             Error::InvalidTorrentId
         })?;
-        torrent.write().await.write_block(info, data).await
+        torrent.write().await.write_block(block_info, data).await
+    }
+
+    /// Attempts to read a block from disk and return the result via the given
+    /// sender.
+    ///
+    /// Returns an error if the torrent id is invalid.
+    ///
+    /// If the block could not be read due to IO failure, the torrent is
+    /// notified of it.
+    async fn read_block(
+        &self,
+        id: TorrentId,
+        block_info: BlockInfo,
+        chan: peer::Sender,
+    ) -> Result<()> {
+        log::trace!("Reading torrent {} {} from disk", id, block_info);
+
+        // check torrent id
+        //
+        // TODO: maybe we don't want to crash the disk task due to an invalid
+        // torrent id: could it be that disk requests for a torrent arrive after
+        // a torrent has been removed?
+        let torrent = self.torrents.get(&id).ok_or_else(|| {
+            log::error!("Torrent {} not found", id);
+            Error::InvalidTorrentId
+        })?;
+        torrent.read().await.read_block(block_info, chan).await
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use sha1::{Digest, Sha1};
+
     use std::{
         collections::BTreeMap,
         fs,
@@ -143,8 +183,6 @@ mod tests {
         path::{Path, PathBuf},
         sync,
     };
-
-    use sha1::{Digest, Sha1};
 
     use super::*;
     use crate::{iovecs::IoVec, storage_info::FileInfo, FileIndex, BLOCK_LEN};
@@ -237,6 +275,76 @@ mod tests {
             .expect("cannot remove test file");
     }
 
+    #[test]
+    fn should_not_read_piece_from_empty_file() {
+        let file_range = 0..1;
+        let piece = make_piece(file_range.clone());
+        let download_dir = Path::new(DOWNLOAD_DIR);
+        let file = TorrentFile::new(
+            download_dir,
+            FileInfo {
+                path: PathBuf::from("Piece_read_empty_single_file_error.test"),
+                torrent_offset: 0,
+                len: 2 * piece.len as u64,
+            },
+        )
+        .expect("cannot create test file");
+        let files = &[sync::RwLock::new(file)];
+
+        // reading piece from empty file should result in error
+        let torrent_piece_offset = 0;
+        let result =
+            piece::read(torrent_piece_offset, file_range, files, piece.len);
+        assert!(matches!(result, Err(ReadError::MissingData)));
+
+        // clean up env
+        fs::remove_file(download_dir.join(&files[0].read().unwrap().info.path))
+            .expect("cannot remove test file");
+    }
+
+    #[test]
+    fn should_read_piece_from_single_file() {
+        let file_range = 0..1;
+        let piece = make_piece(file_range.clone());
+        let download_dir = Path::new(DOWNLOAD_DIR);
+        let file = TorrentFile::new(
+            download_dir,
+            FileInfo {
+                path: PathBuf::from("Piece_read_single_file.test"),
+                torrent_offset: 0,
+                len: 2 * piece.len as u64,
+            },
+        )
+        .expect("cannot create test file");
+        let files = &[sync::RwLock::new(file)];
+
+        let torrent_piece_offset = 0;
+        piece
+            .write(torrent_piece_offset, files)
+            .expect("cannot write piece to file");
+
+        // read piece as list of blocks
+        let blocks =
+            piece::read(torrent_piece_offset, file_range, files, piece.len)
+                .expect("cannot read piece from file");
+
+        // compare contents
+        // map Vec<Arc<Vec<u8>>> to Vec<Vec<u8>>
+        let actual: Vec<_> = blocks
+            .iter()
+            .map(AsRef::as_ref)
+            .cloned()
+            .flatten()
+            .collect();
+        let expected: Vec<_> =
+            piece.blocks.values().flatten().copied().collect();
+        assert_eq!(actual, expected);
+
+        // clean up env
+        fs::remove_file(download_dir.join(&files[0].read().unwrap().info.path))
+            .expect("cannot remove test file");
+    }
+
     /// Tests that writing piece to multiple files works.
     #[test]
     fn should_write_piece_to_multiple_files() {
@@ -309,9 +417,71 @@ mod tests {
 
         // clean up env
         for file in files.iter() {
-            let path = download_dir.join(&file.write().unwrap().info.path);
+            let path = download_dir.join(&file.read().unwrap().info.path);
             fs::remove_file(path).expect("cannot remove test file");
         }
+    }
+
+    #[test]
+    fn should_read_piece_from_multiple_files() {
+        let file_range = 0..3;
+        let piece = make_piece(file_range.clone());
+        let download_dir = Path::new(DOWNLOAD_DIR);
+        let file1 = TorrentFile::new(
+            download_dir,
+            FileInfo {
+                path: PathBuf::from("Piece_write_files1.test"),
+                torrent_offset: 0,
+                len: BLOCK_LEN as u64 + 3,
+            },
+        )
+        .expect("cannot create test file 1");
+        let file2 = TorrentFile::new(
+            download_dir,
+            FileInfo {
+                path: PathBuf::from("Piece_write_files2.test"),
+                torrent_offset: file1.info.len,
+                len: BLOCK_LEN as u64 - 1500,
+            },
+        )
+        .expect("cannot create test file 2");
+        let file3 = TorrentFile::new(
+            download_dir,
+            FileInfo {
+                path: PathBuf::from("Piece_write_files3.test"),
+                torrent_offset: file2.info.torrent_offset + file2.info.len,
+                len: piece.len as u64 - (file1.info.len + file2.info.len),
+            },
+        )
+        .expect("cannot create test file 3");
+        let files = &[
+            sync::RwLock::new(file1),
+            sync::RwLock::new(file2),
+            sync::RwLock::new(file3),
+        ];
+
+        // piece starts at the beginning of files
+        let torrent_piece_offset = 0;
+        piece
+            .write(torrent_piece_offset, files)
+            .expect("cannot write piece to file");
+
+        // read piece as list of blocks
+        let blocks =
+            piece::read(torrent_piece_offset, file_range, files, piece.len)
+                .expect("cannot read piece from files");
+
+        // compare contents
+        // map Vec<Arc<Vec<u8>>> to Vec<Vec<u8>>
+        let actual: Vec<_> = blocks
+            .iter()
+            .map(AsRef::as_ref)
+            .cloned()
+            .flatten()
+            .collect();
+        let expected: Vec<_> =
+            piece.blocks.values().flatten().copied().collect();
+        assert_eq!(actual, expected);
     }
 
     /// Creates a piece for testing that has 4 blocks of length `BLOCK_LEN`.

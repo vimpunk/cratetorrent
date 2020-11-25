@@ -155,7 +155,6 @@ As to whether running all peer sessions and torrent on the same local task
 over running each on a separate task is an open question and more research is
 needed.
 
-
 ## Piece picker
 
 Each torrent has a piece picker, which is the entity that collects information
@@ -411,6 +410,14 @@ start.
 Since the minimum timeout granularity is measured in seconds, the timeout
 procedure is also part of the session tick.
 
+### Seeding
+
+Seeding is relatively uncomplicated, on the peer session level, anyway. The peer
+sends us requests for a block and we check if 1) the block is correct, 2) aren't
+choked and 3) aren't already requesting the same block. If these checks pass,
+the peer session sends a request to the disk task to [fetch the
+block](#reading-from-disk).
+
 ### Messages
 
 The messages a peer can exchange is detailed [here](./PEER_MESSAGES.md).
@@ -456,15 +463,15 @@ by all entities using it. In this case, we would have the following issues:
   peer session tasks referring to the same `Disk`, whereas with the task based
   solution `Disk` is the only one accessing its own internal state.
 - Worse separation of concerns, leading to code that is more difficult to reason
-  about and thus potentially more bugs. Whereas having `Disk` on a separate task
-  allows for a sequential model of execution, which is clearer and less
+  about and thus potentially have more bugs. Whereas having `Disk` on a separate
+  task allows for a sequential model of execution, which is clearer and less
   error-prone.
 
 Spawning the disk task returns a command channel (aka disk handle) and a global
 alert port (aka receiver): the former is used for sending commands to disk and
 the latter is used to receive back the results of certain commands. However,
 because `mpsc` channels can only have a single receiver and because each torrent
-needs its own alert port, we a second layer of alert channels for torrents.
+needs its own alert port, we use a second layer of alert channels for torrents.
 
 Thus, when `Disk` receives a command to create a torrent, it creates the torrent
 specific alert channel's send and receive halves, and the latter is returned in
@@ -706,6 +713,49 @@ is also taken care of by `IoVecs`.
       to disk (as the syscall doesn't guarantee that all provided bytes can be
       written).
 
+### Reading from disk
+
+Reading from disk is somewhat similar to writing: we make use of a read buffer
+(or cache), we use vectored IO over potentially multiple files, and use almost
+the same `mpsc` infrastructure to communicate results. Therefore this is going
+to be an overview of the differences.
+
+#### Communicating results
+The major difference is how results are communicated: while for block writes the
+piece result is communicated to the torrent, the result of a disk read is
+communicated directly to a peer. This is for two reasons:
+- The torrent doesn't need to know about disk reads, so sending the read block
+  first to torrent and then from torrent to the peer would not only be
+  redundant, it would introduce some complexity.
+- Although profiling is needed, it's likely more optimal to directly send the
+  block to peer.
+
+Now the reason I say likely is because there is a trade-off: currently peer
+needs to pass a clone of its command sender with each disk read to the disk
+task (otherwise the disk task wouldn't know to whom to return the block). This
+incurs two updates to the atomic reference count (creation and drop), so this
+solution is not entirely optimal either. For now it suffices though.
+
+However, an _error_ is communicated to the torrent, rather than a peer session.
+This is because the peer session is the wrong layer to deal with such global
+errors. So the torrent is chosen. In the future it may be the engine that
+handles such errors, but there is currently no real engine so this is kept in
+torrent for now.
+
+#### Read cache
+The read cache is brutally simple at this step of the alpha version. For each
+block request, we read in the _entire_ piece from disk, and then store it in a
+hashmap in memory. That's it. Subsequent reads to blocks in the same piece will
+hit the cache.
+
+The problem here of course is that there is no eviction: so memory use could
+blow up here very fast. This is one of the reasons why cratetorrent is still a
+toy project (besides being very obviously in alpha).
+
+In the future the read cache size will be configurable, as well as various other
+parameters, such as how many blocks to read in when caching a piece (read cache
+line size).
+
 
 ## Anatomy of a block fetch
 
@@ -719,6 +769,19 @@ is also taken care of by `IoVecs`.
    channel (or the IO error if any occurred).
 5. `Torrent` receives this message, processes it, and forwards it to the peer
    session.
+
+
+## Anatomy of seeding a block
+
+1. `PeerSession` receives a request for a block from peer.
+2. Various conditions are [checked](#seeding) and a block read request is sent
+   to the disk task, along with a copy of the peer session's command sender.
+3. Check if the block's piece is already in the read cache.
+4. If not, the entire piece for which the block was requested is read from disk
+   and placed in the read cache.
+5. Return the block via the provided sender.
+6. Peer eventually receives the block from the disk task and sends it to the
+   peer if there hadn't been any cancel messages during this time.
 
 
 ## Error handling

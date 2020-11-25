@@ -80,6 +80,8 @@ pub(crate) struct StorageInfo {
     /// piece length.
     pub last_piece_len: u32,
     /// The sum of the length of all files in the torrent.
+    // TODO: consider renaming to `torrent_len` to better reflect that the
+    // torrent may already be downloaded
     pub download_len: u64,
     /// The download destination directory of the torrent.
     ///
@@ -138,15 +140,20 @@ impl StorageInfo {
         Ok(files)
     }
 
+    /// Returns the piece's absolute offset in the torrent.
+    pub fn torrent_piece_offset(&self, index: PieceIndex) -> u64 {
+        index as u64 * self.piece_len as u64
+    }
+
     /// Returns the length of the piece at the given index.
-    // TODO: consider panicking instead, as it's more or less an application
-    // error to provide an out of bounds index
     pub fn piece_len(&self, index: PieceIndex) -> Result<u32> {
         if index == self.piece_count - 1 {
             Ok(self.last_piece_len)
         } else if index < self.piece_count - 1 {
             Ok(self.piece_len)
         } else {
+            // TODO: consider panicking instead, as it's more or less an application
+            // error to provide an out of bounds index
             log::error!("Piece {} is invalid for torrent: {:?}", index, self);
             Err(Error::InvalidPieceIndex)
         }

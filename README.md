@@ -39,7 +39,11 @@ Tested on stable Rust (1.43).
 The CLI binary is currently very basic, but you can connect to a seed by
 running the following from the repo root:
 ```
-cargo run --release -p cratetorrent-cli
+cargo run --release -p cratetorrent-cli \
+    --listen 0.0.0.0:50051 \
+    --seeds 192.168.0.10:50051,192.168.0.172:49985 \
+    --metainfo path/to/mytorrent.torrent \
+    --download-dir ~/Downloads
 ```
 
 ### In Docker
@@ -57,6 +61,7 @@ And finally run it:
 ```
 docker run \
     -ti \
+    --env LISTEN="${listen_addr}" \
     --env SEED="${seed_addr}" \
     --env METAINFO_PATH="${metainfo_cont_path}" \
     --env RUST_LOG=cratetorrent=trace,cratetorrent_cli=trace \

@@ -9,7 +9,7 @@ function print_help {
 This script starts a Transmission seed container with the specified parameters,
 if it's not already running.
 
-USAGE: $1 --name <name>
+USAGE: $1 --name NAME
 
 OPTIONS:
     -n|--name   The name to give to the container.

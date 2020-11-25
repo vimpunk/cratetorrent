@@ -155,7 +155,7 @@ impl<'a> IoVecs<'a> {
         // 0 | 16  | len >= 25 -> f
         // 1 | 32  | len >= 32 -> t
         //
-        // Another edge case is that the file boundary is at a buffer boundary.
+        // Another edge case is when the file boundary is at a buffer boundary.
         //
         // -----------------------------------
         // | file slice: 32                  |
@@ -204,14 +204,15 @@ impl<'a> IoVecs<'a> {
             // is at the file boundary.
 
             // Find the position where we need to split the iovec. We need the
-            // relative offset of the buffer from its start, which we can get by
-            // first getting the absolute offset of the buffer from the start of
-            // all buffers, and then subtracting that from the file length.
+            // relative offset in the buffer, which we can get by first getting
+            // the absolute offset of the buffer withiin all buffers and then
+            // subtracting that from the file length.
             let buf_to_split = bufs[bufs_split_pos].as_slice();
             let buf_offset = bufs_len - buf_to_split.len();
             let buf_split_pos = max_len - buf_offset;
             debug_assert!(buf_split_pos < buf_to_split.len());
 
+            // TODO: should we calculate `buf_split_pos` inside this function?
             Self::split_within_buffer(bufs, bufs_split_pos, buf_split_pos)
         }
     }
@@ -238,8 +239,6 @@ impl<'a> IoVecs<'a> {
 
     /// Creates a split where the split occurs within one of the buffers of
     /// `bufs`.
-    ///
-    /// TODO: we can calculate `buf_split_pos` inside this function
     fn split_within_buffer(
         bufs: &'a mut [IoVec<&'a [u8]>],
         split_pos: usize,
@@ -256,11 +255,14 @@ impl<'a> IoVecs<'a> {
         // We need to convert the second half of the split buffer into its
         // raw representation, as we can't store a reference to it as well
         // as store mutable references to the rest of the buffer in
-        // `IoVecs`. This, however, is also safe, as we don't leak the
-        // raw buffer and pointers for other code to unsafely reconstruct
-        // the slice. The slice is only reconstructined in
-        // `IoVecs::into_second_half`, assigning it to the `IoVec` at
-        // `split_pos` in `bufs`, without touching its underlying memory.
+        // `IoVecs`.
+        // This is safe:
+        // 1. The second half of the buffer is not used until the buffer
+        //    is reconstructed.
+        // 2. And we don't leak the raw buffer or pointers for other code to
+        //    unsafely reconstruct the slice. The slice is only reconstructined
+        //    in `IoVecs::into_second_half`, assigning it to the `IoVec` at
+        //    `split_pos` in `bufs`, without touching its underlying memory.
         let split_buf_second_half = RawBuf {
             ptr: split_buf_second_half.as_ptr(),
             len: split_buf_second_half.len(),
@@ -507,20 +509,73 @@ struct RawBuf {
     len: usize,
 }
 
+/// This function is analogous to [`IoVecs::advance`], except that it works on a
+/// list of mutable iovec buffers, while the former is for an immutable list of
+/// such buffers.
+///
+/// The reason this is separate is because there is no need for the `IoVecs`
+/// abstraction when working with vectored read IO: `preadv` only reads as much
+/// from files as the buffers have capacity for. This is in fact symmetrical to
+/// how `pwritev` works, which writes as much as is available in the buffers.
+/// However, it has the effect that it may extend the file size, which is what
+/// `IoVecs` guards against. Since this protection is not necessary for reads,
+/// but advancing the buffer cursor is, a free function is available for this
+/// purpose.
+pub fn advance<'a>(
+    bufs: &'a mut [IoVec<&'a mut [u8]>],
+    n: usize,
+) -> &'a mut [IoVec<&'a mut [u8]>] {
+    // number of buffers to remove
+    let mut bufs_to_remove_count = 0;
+    // total length of all the to be removed buffers
+    let mut total_removed_len = 0;
+
+    for buf in bufs.iter() {
+        let buf_len = buf.as_slice().len();
+        // if the last byte to be removed is in this buffer, don't remove
+        // buffer, we just need to adjust its offset
+        if total_removed_len + buf_len > n {
+            break;
+        } else {
+            // otherwise there are more bytes to remove than this buffer,
+            // ergo we want to remove it
+            total_removed_len += buf_len;
+            bufs_to_remove_count += 1;
+        }
+    }
+
+    let bufs = &mut bufs[bufs_to_remove_count..];
+    // if not all buffers were removed, check if we need to trim more bytes from
+    // this buffer
+    if !bufs.is_empty() {
+        let buf = bufs[0].as_slice();
+        let offset = n - total_removed_len;
+        // TODO: document safety
+        let slice = unsafe {
+            std::slice::from_raw_parts_mut(
+                buf.as_ptr().add(offset) as *mut u8,
+                buf.len() - offset,
+            )
+        };
+        let _ = std::mem::replace(&mut bufs[0], IoVec::from_mut_slice(slice));
+    }
+    bufs
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // Tests that splitting of the blocks that align with the file boundary at
-    // the last block is a noop.
-    //
-    // -----------------------------------
-    // | file slice: 32                  |
-    // -----------------------------------
-    // | block: 16      | block: 16      |
-    // -----------------------------------
+    /// Tests that splitting of the blocks that align with the file boundary at
+    /// the last block is a noop.
+    ///
+    /// -----------------------------------
+    /// | file slice: 32                  |
+    /// -----------------------------------
+    /// | block: 16      | block: 16      |
+    /// -----------------------------------
     #[test]
-    fn test_bufs_same_size_as_file() {
+    fn should_not_split_buffers_same_size_as_file() {
         let file_len = 32;
         let blocks =
             vec![(0..16).collect::<Vec<u8>>(), (16..32).collect::<Vec<u8>>()];
@@ -554,16 +609,16 @@ mod tests {
         assert!(second_half.is_empty());
     }
 
-    // Tests that splitting of the blocks whose combined length is smaller than
-    // that of the file is a noop.
-    //
-    // --------------------------------------------
-    // | file slice: 42                           |
-    // --------------------------------------------
-    // | block: 16      | block: 16      |
-    // -----------------------------------
+    /// Tests that splitting of the blocks whose combined length is smaller than
+    /// that of the file is a noop.
+    ///
+    /// --------------------------------------------
+    /// | file slice: 42                           |
+    /// --------------------------------------------
+    /// | block: 16      | block: 16      |
+    /// -----------------------------------
     #[test]
-    fn test_bufs_smaller_than_file() {
+    fn should_not_split_buffers_smaller_than_file() {
         let file_len = 42;
         let blocks =
             vec![(0..16).collect::<Vec<u8>>(), (16..32).collect::<Vec<u8>>()];
@@ -596,18 +651,18 @@ mod tests {
         assert!(second_half.is_empty());
     }
 
-    // Tests splitting of the blocks that do not align with file boundary at the
-    // last block.
-    //
-    // ------------------------------
-    // | file slice: 25             |
-    // -----------------------------------
-    // | block: 16      | block: 16 ^    |
-    // -----------------------------^-----
-    //                              ^
-    //              split here into 9 and 7 long halves
+    /// Tests splitting of the blocks that do not align with file boundary at the
+    /// last block.
+    ///
+    /// ------------------------------
+    /// | file slice: 25             |
+    /// -----------------------------------
+    /// | block: 16      | block: 16 ^    |
+    /// -----------------------------^-----
+    ///                              ^
+    ///              split here into 9 and 7 long halves
     #[test]
-    fn test_bufs_larger_than_file_at_last_block() {
+    fn should_split_last_buffer_not_at_boundary() {
         let file_len = 25;
         let blocks =
             vec![(0..16).collect::<Vec<u8>>(), (16..32).collect::<Vec<u8>>()];
@@ -646,17 +701,17 @@ mod tests {
         assert_eq!(second_half, expected_second_half);
     }
 
-    // Tests splitting of the blocks that do not align with file boundary.
-    //
-    // ------------------------------
-    // | file slice: 25             |
-    // ----------------------------------------------------
-    // | block: 16      | block: 16 ^    | block: 16      |
-    // -----------------------------^----------------------
-    //                              ^
-    //              split here into 9 and 7 long halves
+    /// Tests splitting of the blocks that do not align with file boundary.
+    ///
+    /// ------------------------------
+    /// | file slice: 25             |
+    /// ----------------------------------------------------
+    /// | block: 16      | block: 16 ^    | block: 16      |
+    /// -----------------------------^----------------------
+    ///                              ^
+    ///              split here into 9 and 7 long halves
     #[test]
-    fn test_bufs_larger_than_file() {
+    fn should_split_middle_buffer_not_at_boundary() {
         let file_len = 25;
         let blocks = vec![
             (0..16).collect::<Vec<u8>>(),
@@ -701,10 +756,10 @@ mod tests {
         assert_eq!(second_half, expected_second_half);
     }
 
-    // Tests that advancting only a fraction of the first half of the split does
-    // not affect the rest of the buffers.
+    /// Tests that advancing only a fraction of the first half of the split does
+    /// not affect the rest of the buffers.
     #[test]
-    fn test_partial_advance_with_split() {
+    fn partial_advance_in_first_half_should_not_affect_rest() {
         let file_len = 25;
         let blocks = vec![
             (0..16).collect::<Vec<u8>>(),
@@ -716,7 +771,8 @@ mod tests {
             blocks.iter().map(|buf| IoVec::from_slice(&buf)).collect();
         let mut iovecs = IoVecs::bounded(&mut bufs, file_len);
 
-        // advance past the first buffer
+        // advance past the first buffer (less then the whole write buffer/file
+        // length)
         let advance_count = 18;
         iovecs.advance(advance_count);
 
@@ -753,127 +809,10 @@ mod tests {
         assert_eq!(second_half, expected_second_half);
     }
 
-    // Tests that advancting the full write buffer advances only up to the first
-    // half of the split, not affecting the second half.
+    /// Tests that advancing only a fraction of the first half of the split in
+    /// multiple steps does not affect the rest of the buffers.
     #[test]
-    fn test_full_advance_with_split() {
-        let file_len = 25;
-        let blocks = vec![
-            (0..16).collect::<Vec<u8>>(),
-            (16..32).collect::<Vec<u8>>(),
-            (32..48).collect::<Vec<u8>>(),
-        ];
-
-        let mut bufs: Vec<_> =
-            blocks.iter().map(|buf| IoVec::from_slice(&buf)).collect();
-        let mut iovecs = IoVecs::bounded(&mut bufs, file_len);
-
-        // sanity checks that we're correctly creating the bounded iovecs split
-        // within a buffer
-        debug_assert!(iovecs.split.is_some());
-        debug_assert!(iovecs
-            .split
-            .as_ref()
-            .unwrap()
-            .split_buf_second_half
-            .is_some());
-
-        // advance past the first buffer
-        let advance_count = file_len;
-        iovecs.advance(advance_count);
-
-        // the first half of the split should be empty
-        let first_half: Vec<_> = iovecs
-            .as_slice()
-            .iter()
-            .map(IoVec::as_slice)
-            .flatten()
-            .collect();
-        assert!(first_half.is_empty());
-
-        // restore the second half of the split buffer, which shouldn't be
-        // affected by the above advance
-        let second_half = iovecs.into_tail();
-        // compare the contents of the second half of the split: convert it to
-        // a flat vector for easier comparison
-        let second_half: Vec<_> =
-            second_half.iter().map(IoVec::as_slice).flatten().collect();
-        // the length should be the length of the second half the split buffer
-        // as well as the remaining block's length
-        assert_eq!(second_half.len(), 7 + 16);
-        // the expected second half is just the bytes after the file slice number of bytes
-        let expected_second_half: Vec<_> =
-            blocks.iter().flatten().skip(file_len as usize).collect();
-        assert_eq!(second_half, expected_second_half);
-    }
-
-    // Tests that advancting the full write buffer advances only up to the first
-    // half of the split that is at a buffer boundary, not affecting the second
-    // half.
-    #[test]
-    fn test_full_advance_with_boundary_split() {
-        let file_len = 32;
-        let blocks = vec![
-            (0..16).collect::<Vec<u8>>(),
-            (16..32).collect::<Vec<u8>>(),
-            (32..48).collect::<Vec<u8>>(),
-        ];
-
-        let mut bufs: Vec<_> =
-            blocks.iter().map(|buf| IoVec::from_slice(&buf)).collect();
-        let mut iovecs = IoVecs::bounded(&mut bufs, file_len);
-
-        // advance past the iovecs bound
-        let advance_count = file_len;
-        iovecs.advance(advance_count);
-
-        // the first half of the split should be empty
-        let first_half: Vec<_> = iovecs
-            .as_slice()
-            .iter()
-            .map(IoVec::as_slice)
-            .flatten()
-            .collect();
-        assert!(first_half.is_empty());
-
-        // restore the second half of the split buffer, which shouldn't be
-        // affected by the above advance
-        let second_half = iovecs.into_tail();
-        // compare the contents of the second half of the split: convert it to
-        // a flat vector for easier comparison
-        let second_half: Vec<_> =
-            second_half.iter().map(IoVec::as_slice).flatten().collect();
-        // the length should be the length of the second half the split buffer
-        // as well as the remaining block's length
-        assert_eq!(second_half.len(), 16);
-        // the expected second half is just the bytes after the file slice number of bytes
-        let expected_second_half: Vec<_> =
-            blocks.iter().flatten().skip(file_len as usize).collect();
-        assert_eq!(second_half, expected_second_half);
-    }
-
-    #[test]
-    #[should_panic]
-    fn test_advance_past_buffers_panic() {
-        let file_len = 32;
-        let blocks = vec![
-            (0..16).collect::<Vec<u8>>(),
-            (16..32).collect::<Vec<u8>>(),
-            (32..48).collect::<Vec<u8>>(),
-        ];
-
-        let mut bufs: Vec<_> =
-            blocks.iter().map(|buf| IoVec::from_slice(&buf)).collect();
-        let mut iovecs = IoVecs::bounded(&mut bufs, file_len);
-
-        let advance_count = file_len + 5;
-        iovecs.advance(advance_count);
-    }
-
-    // Tests that advancting only a fraction of the first half of the split does
-    // not affect the rest of the buffers.
-    #[test]
-    fn test_incremental_full_advance_with_split() {
+    fn advances_in_first_half_should_not_affect_rest() {
         let file_len = 25;
         let blocks = vec![
             (0..16).collect::<Vec<u8>>(),
@@ -897,7 +836,8 @@ mod tests {
             .map(IoVec::as_slice)
             .flatten()
             .collect();
-        // the expected first half is just the file slice number of bytes
+        // the expected first half is just the file slice number of bytes after
+        // advancing
         let expected_first_half: Vec<_> = blocks
             .iter()
             .flatten()
@@ -933,5 +873,140 @@ mod tests {
         let expected_second_half: Vec<_> =
             blocks.iter().flatten().skip(file_len as usize).collect();
         assert_eq!(second_half, expected_second_half);
+    }
+
+    /// Tests that advancing the full write buffer advances only up to the first
+    /// half of the split, that is at a buffer boundary, not affecting the second
+    /// half.
+    #[test]
+    fn consuming_first_half_should_not_affect_second_half() {
+        let file_len = 32;
+        let blocks = vec![
+            (0..16).collect::<Vec<u8>>(),
+            (16..32).collect::<Vec<u8>>(),
+            (32..48).collect::<Vec<u8>>(),
+        ];
+
+        let mut bufs: Vec<_> =
+            blocks.iter().map(|buf| IoVec::from_slice(&buf)).collect();
+        let mut iovecs = IoVecs::bounded(&mut bufs, file_len);
+
+        // advance past the first two buffers, onto the iovecs bound
+        let advance_count = file_len;
+        iovecs.advance(advance_count);
+
+        // the first half of the split should be empty
+        let first_half: Vec<_> = iovecs
+            .as_slice()
+            .iter()
+            .map(IoVec::as_slice)
+            .flatten()
+            .collect();
+        assert!(first_half.is_empty());
+
+        // restore the second half of the split buffer, which shouldn't be
+        // affected by the above advance
+        let second_half = iovecs.into_tail();
+        // compare the contents of the second half of the split: convert it to
+        // a flat vector for easier comparison
+        let second_half: Vec<_> =
+            second_half.iter().map(IoVec::as_slice).flatten().collect();
+        // the length should be the length of the second half the split buffer
+        // as well as the remaining block's length
+        assert_eq!(second_half.len(), 16);
+        // the expected second half is just the bytes after the file slice
+        // number of bytes
+        let expected_second_half: Vec<_> =
+            blocks.iter().flatten().skip(file_len as usize).collect();
+        assert_eq!(second_half, expected_second_half);
+    }
+
+    #[test]
+    #[should_panic]
+    fn should_panic_advancing_past_end() {
+        let file_len = 32;
+        let blocks = vec![
+            (0..16).collect::<Vec<u8>>(),
+            (16..32).collect::<Vec<u8>>(),
+            (32..48).collect::<Vec<u8>>(),
+        ];
+
+        let mut bufs: Vec<_> =
+            blocks.iter().map(|buf| IoVec::from_slice(&buf)).collect();
+        let mut iovecs = IoVecs::bounded(&mut bufs, file_len);
+
+        let advance_count = file_len + 5;
+        iovecs.advance(advance_count);
+    }
+
+    #[test]
+    fn should_advance_into_first_buffer() {
+        let mut bufs = vec![vec![0, 1, 2], vec![3, 4, 5]];
+        let mut iovecs: Vec<_> =
+            bufs.iter_mut().map(|b| IoVec::from_mut_slice(b)).collect();
+
+        // should trim some from the first buffer
+        let n = 2;
+        let iovecs = advance(&mut iovecs, n);
+        let actual: Vec<_> = iovecs
+            .iter()
+            .map(|b| b.as_slice().to_vec())
+            .flatten()
+            .collect();
+        let expected: Vec<_> = bufs.iter().flatten().skip(n).copied().collect();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn should_trim_whole_first_buffer() {
+        let mut bufs = vec![vec![0, 1, 2], vec![3, 4, 5], vec![6, 7, 8]];
+        let mut iovecs: Vec<_> =
+            bufs.iter_mut().map(|b| IoVec::from_mut_slice(b)).collect();
+
+        // should trim entire first buffer
+        let n = 3;
+        let iovecs = advance(&mut iovecs, n);
+        let actual: Vec<_> = iovecs
+            .iter()
+            .map(|b| b.as_slice().to_vec())
+            .flatten()
+            .collect();
+        let expected: Vec<_> = bufs.iter().flatten().skip(n).copied().collect();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn should_advance_into_second_buffer() {
+        let mut bufs = vec![vec![0, 1, 2], vec![3, 4, 5], vec![6, 7, 8]];
+        let mut iovecs: Vec<_> =
+            bufs.iter_mut().map(|b| IoVec::from_mut_slice(b)).collect();
+
+        // should trim entire first buffer and some from second
+        let n = 5;
+        let iovecs = advance(&mut iovecs, n);
+        let actual: Vec<_> = iovecs
+            .iter()
+            .map(|b| b.as_slice().to_vec())
+            .flatten()
+            .collect();
+        let expected: Vec<_> = bufs.iter().flatten().skip(n).copied().collect();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn should_trim_all_buffers() {
+        let mut bufs = vec![vec![0, 1, 2], vec![3, 4, 5], vec![6, 7, 8]];
+        let mut iovecs: Vec<_> =
+            bufs.iter_mut().map(|b| IoVec::from_mut_slice(b)).collect();
+
+        // should trim everything
+        let n = 9;
+        let iovecs = advance(&mut iovecs, n);
+        let actual: Vec<_> = iovecs
+            .iter()
+            .map(|b| b.as_slice().to_vec())
+            .flatten()
+            .collect();
+        assert_eq!(actual, vec![]);
     }
 }
