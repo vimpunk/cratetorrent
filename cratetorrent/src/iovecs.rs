@@ -836,7 +836,8 @@ mod tests {
             .map(IoVec::as_slice)
             .flatten()
             .collect();
-        // the expected first half is just the file slice number of bytes
+        // the expected first half is just the file slice number of bytes after
+        // advancing
         let expected_first_half: Vec<_> = blocks
             .iter()
             .flatten()

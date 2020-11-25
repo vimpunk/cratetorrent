@@ -365,8 +365,8 @@ mod tests {
         }
     }
 
-    /// Tests writing of a complete valid torrent's pieces and verifying that an
-    /// alert of each disk write is returned by the disk task.
+    /// Tests reading of a torrent piece's block and verifying that it is
+    /// returned via the provided sender.
     #[tokio::test]
     async fn should_read_piece_blocks() {
         let (_, disk_handle, mut alert_port) = spawn().unwrap();
