@@ -509,7 +509,18 @@ struct RawBuf {
     len: usize,
 }
 
-// TODO: docs
+/// This function is analogous to [`IoVecs::advance`], except that it works on a
+/// list of mutable iovec buffers, while the former is for an immutable list of
+/// such buffers.
+///
+/// The reason this is separate is because there is no need for the `IoVecs`
+/// abstraction when working with vectored read IO: `preadv` only reads as much
+/// from files as the buffers have capacity for. This is in fact symmetrical to
+/// how `pwritev` works, which writes as much as is available in the buffers.
+/// However, it has the effect that it may extend the file size, which is what
+/// `IoVecs` guards against. Since this protection is not necessary for reads,
+/// but advancing the buffer cursor is, a free function is available for this
+/// purpose.
 pub fn advance<'a>(
     bufs: &'a mut [IoVec<&'a mut [u8]>],
     n: usize,

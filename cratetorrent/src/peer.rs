@@ -466,7 +466,7 @@ impl PeerSession {
         Ok(())
     }
 
-    /// Handles messages expected in the `Connected` state.
+    /// Handles messages from peer that are expected in the `Connected` state.
     async fn handle_msg(
         &mut self,
         sink: &mut SplitSink<Framed<TcpStream, PeerCodec>, Message>,
@@ -695,7 +695,7 @@ impl PeerSession {
         let was_present = self.outgoing_requests.remove(&block_info);
 
         // if block was not among our pending requests than it was either not
-        // requested or it arrived after we had cancelled it
+        // requested or it arrived after we had canceled it
         if !was_present {
             peer_warn!(self, "Received not requested block: {:?}", block_info);
             // silently ignore this block if we didn't expected it
@@ -760,7 +760,12 @@ impl PeerSession {
     }
 
     /// Handles the peer request message.
-    /// TODO: docs
+    ///
+    /// If the request is valid and that peer may make requests, we instruct the
+    /// disk task to fetch the block from disk. Later, when the disk is fetched,
+    /// we receive a message on the peer session's command port in
+    /// [`Self::run`]. This is when the block is actually sent to peer, if by
+    /// the request is not cancelled by then.
     async fn handle_request_msg(
         &mut self,
         block_info: BlockInfo,
@@ -797,6 +802,8 @@ impl PeerSession {
         Ok(())
     }
 
+    /// Sends the block to peer if the peer still wants it (hasn't canceled the
+    /// request).
     async fn send_block(
         &mut self,
         sink: &mut SplitSink<Framed<TcpStream, PeerCodec>, Message>,
@@ -830,7 +837,8 @@ impl PeerSession {
         Ok(())
     }
 
-    /// Handles the announcement of a new piece that peer has.
+    /// Handles the announcement of a new piece that peer has. This may cause us
+    /// to become interested in peer and start making requests.
     async fn handle_have_msg(&mut self, piece_index: PieceIndex) -> Result<()> {
         peer_info!(self, "Received 'have' message for piece {}", piece_index);
 
