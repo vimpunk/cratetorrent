@@ -153,9 +153,8 @@ impl TorrentFile {
             // read a piece from a portion of a file not yet downloaded or
             // otherwise missing
             if read_count == 0 {
-                return Err(ReadError::DataMissing);
+                return Err(ReadError::MissingData);
             }
-
 
             // tally up the total read count
             total_read_count += read_count;

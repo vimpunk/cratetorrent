@@ -185,11 +185,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::{
-        iovecs::IoVec,
-        storage_info::{FileInfo, FileSlice},
-        FileIndex, BLOCK_LEN,
-    };
+    use crate::{iovecs::IoVec, storage_info::FileInfo, FileIndex, BLOCK_LEN};
 
     const DOWNLOAD_DIR: &str = "/tmp";
 
@@ -280,9 +276,36 @@ mod tests {
     }
 
     #[test]
+    fn should_not_read_piece_from_empty_file() {
+        let file_range = 0..1;
+        let piece = make_piece(file_range.clone());
+        let download_dir = Path::new(DOWNLOAD_DIR);
+        let file = TorrentFile::new(
+            download_dir,
+            FileInfo {
+                path: PathBuf::from("Piece_read_empty_single_file_error.test"),
+                torrent_offset: 0,
+                len: 2 * piece.len as u64,
+            },
+        )
+        .expect("cannot create test file");
+        let files = &[sync::RwLock::new(file)];
+
+        // reading piece from empty file should result in error
+        let torrent_piece_offset = 0;
+        let result =
+            piece::read(torrent_piece_offset, file_range, files, piece.len);
+        assert!(matches!(result, Err(ReadError::MissingData)));
+
+        // clean up env
+        fs::remove_file(download_dir.join(&files[0].read().unwrap().info.path))
+            .expect("cannot remove test file");
+    }
+
+    #[test]
     fn should_read_piece_from_single_file() {
         let file_range = 0..1;
-        let piece = make_piece(file_range);
+        let piece = make_piece(file_range.clone());
         let download_dir = Path::new(DOWNLOAD_DIR);
         let file = TorrentFile::new(
             download_dir,
@@ -300,32 +323,19 @@ mod tests {
             .write(torrent_piece_offset, files)
             .expect("cannot write piece to file");
 
-        // read piece into list of read buffers
-        let mut read_bufs: Vec<_> = piece
-            .blocks
-            .values()
-            .map(|b| {
-                let mut v = Vec::new();
-                v.resize(b.len(), 0);
-                v
-            })
-            .collect();
-        let mut iovecs: Vec<_> = read_bufs
-            .iter_mut()
-            .map(|b| IoVec::from_mut_slice(b))
-            .collect();
-        let file_slice = FileSlice {
-            offset: 0,
-            len: piece.len as u64,
-        };
-        files[0]
-            .read()
-            .unwrap()
-            .read(file_slice, &mut iovecs)
-            .expect("cannot read file");
+        // read piece as list of blocks
+        let blocks =
+            piece::read(torrent_piece_offset, file_range, files, piece.len)
+                .expect("cannot read piece from file");
 
         // compare contents
-        let actual: Vec<_> = read_bufs.iter().flatten().copied().collect();
+        // map Vec<Arc<Vec<u8>>> to Vec<Vec<u8>>
+        let actual: Vec<_> = blocks
+            .iter()
+            .map(AsRef::as_ref)
+            .cloned()
+            .flatten()
+            .collect();
         let expected: Vec<_> =
             piece.blocks.values().flatten().copied().collect();
         assert_eq!(actual, expected);
@@ -467,7 +477,6 @@ mod tests {
             .iter()
             .map(AsRef::as_ref)
             .cloned()
-            //.map(|a| a.as_ref().clone())
             .flatten()
             .collect();
         let expected: Vec<_> =

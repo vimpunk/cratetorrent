@@ -67,7 +67,7 @@ pub(crate) enum ReadError {
     InvalidBlockOffset,
     /// The block is valid within torrent but its data has not been downloaded
     /// yet or has been deleted.
-    DataMissing,
+    MissingData,
     /// An IO error ocurred.
     Io(std::io::Error),
 }
@@ -77,7 +77,7 @@ impl fmt::Display for ReadError {
         match self {
             Self::InvalidPieceIndex => write!(fmt, "invalid piece index"),
             Self::InvalidBlockOffset => write!(fmt, "invalid block offset"),
-            Self::DataMissing => write!(fmt, "torrent data missing"),
+            Self::MissingData => write!(fmt, "torrent data missing"),
             Self::Io(e) => write!(fmt, "{}", e),
         }
     }
