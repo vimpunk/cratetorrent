@@ -46,6 +46,13 @@ pub(crate) enum Command {
     Shutdown,
 }
 
+/// Determines who initiated the connection.
+#[derive(Clone, Copy, PartialEq)]
+enum Direction {
+    Outbound,
+    Inbound,
+}
+
 /// A stopped or active connection with another BitTorrent peer.
 ///
 /// This entity implements the BitTorrent wire protocol: it is responsible for
@@ -141,73 +148,14 @@ impl PeerSession {
     pub async fn start_outbound(&mut self) -> Result<()> {
         peer_info!(self, "Starting outbound session");
 
+        // establish the TCP connection
         peer_info!(self, "Connecting to peer");
         self.state.connection = ConnectionState::Connecting;
         let socket = TcpStream::connect(self.addr).await?;
         peer_info!(self, "Connected to peer");
 
-        let mut socket = Framed::new(socket, HandshakeCodec);
-
-        // this is an outbound connection, so we have to send the first
-        // handshake
-        self.state.connection = ConnectionState::Handshaking;
-        let handshake =
-            Handshake::new(self.torrent.info_hash, self.torrent.client_id);
-        peer_info!(self, "Sending handshake");
-        self.state.uploaded_protocol_counter += handshake.len();
-        socket.send(handshake).await?;
-
-        // receive peer's handshake
-        peer_info!(self, "Waiting for peer handshake");
-        if let Some(peer_handshake) = socket.next().await {
-            let peer_handshake = peer_handshake?;
-            peer_info!(self, "Received peer handshake");
-            peer_trace!(self, "Peer handshake: {:?}", peer_handshake);
-            // codec should only return handshake if the protocol string in it
-            // is valid
-            debug_assert_eq!(peer_handshake.prot, PROTOCOL_STRING.as_bytes());
-
-            self.state.downloaded_protocol_counter += peer_handshake.len();
-
-            // verify that the advertised torrent info hash is the same as ours
-            if peer_handshake.info_hash != self.torrent.info_hash {
-                peer_info!(self, "Peer handshake invalid info hash");
-                // abort session, info hash is invalid
-                return Err(Error::InvalidPeerInfoHash);
-            }
-
-            // set basic peer information
-            self.state.peer = Some(PeerInfo {
-                id: peer_handshake.peer_id,
-                pieces: Bitfield::repeat(
-                    false,
-                    self.torrent.storage.piece_count,
-                ),
-            });
-
-            // now that we have the handshake, we need to switch to the peer
-            // message codec and save the socket in self (note that we need to
-            // keep the buffer from the original codec as it may contain bytes
-            // of any potential message the peer may have sent after the
-            // handshake)
-            let old_parts = socket.into_parts();
-            let mut new_parts = FramedParts::new(old_parts.io, PeerCodec);
-            // reuse buffers of previous codec
-            new_parts.read_buf = old_parts.read_buf;
-            new_parts.write_buf = old_parts.write_buf;
-            let socket = Framed::from_parts(new_parts);
-
-            // enter the piece availability exchange state
-            self.state.connection = ConnectionState::AvailabilityExchange;
-            peer_info!(self, "Session state: {:?}", self.state.connection);
-
-            // run the session
-            self.run(socket).await?;
-        }
-        // TODO(https://github.com/mandreyel/cratetorrent/issues/20): handle
-        // not recieving anything with an error rather than an Ok(())
-
-        Ok(())
+        let socket = Framed::new(socket, HandshakeCodec);
+        self.start(socket, Direction::Outbound).await
     }
 
     /// Starts an inbound peer session from an existing TCP connection.
@@ -217,8 +165,26 @@ impl PeerSession {
     /// It returns if the connection is closed or an error occurs.
     pub async fn start_inbound(&mut self, socket: TcpStream) -> Result<()> {
         peer_info!(self, "Starting inbound session");
+        let socket = Framed::new(socket, HandshakeCodec);
+        self.start(socket, Direction::Inbound).await
+    }
 
-        let mut socket = Framed::new(socket, HandshakeCodec);
+    /// Helper method for the common steps of setting up a session.
+    async fn start(
+        &mut self,
+        mut socket: Framed<TcpStream, HandshakeCodec>,
+        direction: Direction,
+    ) -> Result<()> {
+        // if this is an outbound connection, we have to send the first
+        // handshake
+        if direction == Direction::Outbound {
+            self.state.connection = ConnectionState::Handshaking;
+            let handshake =
+                Handshake::new(self.torrent.info_hash, self.torrent.client_id);
+            peer_info!(self, "Sending handshake");
+            self.state.uploaded_protocol_counter += handshake.len();
+            socket.send(handshake).await?;
+        }
 
         // receive peer's handshake
         peer_info!(self, "Waiting for peer handshake");
@@ -248,13 +214,17 @@ impl PeerSession {
                 ),
             });
 
-            // we reply with the handshake
-            self.state.connection = ConnectionState::Handshaking;
-            let handshake =
-                Handshake::new(self.torrent.info_hash, self.torrent.client_id);
-            peer_info!(self, "Sending handshake");
-            self.state.uploaded_protocol_counter += handshake.len();
-            socket.send(handshake).await?;
+            // if this is an inbound connection, we reply with the handshake
+            if direction == Direction::Inbound {
+                self.state.connection = ConnectionState::Handshaking;
+                let handshake = Handshake::new(
+                    self.torrent.info_hash,
+                    self.torrent.client_id,
+                );
+                peer_info!(self, "Sending handshake");
+                self.state.uploaded_protocol_counter += handshake.len();
+                socket.send(handshake).await?;
+            }
 
             // now that we have the handshake, we need to switch to the peer
             // message codec and save the socket in self (note that we need to
