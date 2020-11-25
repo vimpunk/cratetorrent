@@ -540,6 +540,7 @@ impl PeerSession {
                     // TODO(https://github.com/mandreyel/cratetorrent/issues/60):
                     // impleent the proper unchoke algorithm in `Torrent`
                     peer_info!(self, "Unchoking peer");
+                    self.state.is_peer_choked = false;
                     sink.send(Message::Unchoke).await?;
                 }
             }
@@ -570,22 +571,7 @@ impl PeerSession {
                 self.handle_request_msg(block_info).await?;
             }
             Message::Have { piece_index } => {
-                peer_info!(
-                    self,
-                    "Received 'have' message for piece {}",
-                    piece_index
-                );
-                // register's piece availability for this peer
-                if let Some(peer) = &mut self.state.peer {
-                    peer.pieces.set(piece_index, true);
-                }
-                // need to recalculate interest with each received piece
-                self.state.is_interested = self
-                    .torrent
-                    .piece_picker
-                    .write()
-                    .await
-                    .register_piece_availability(piece_index)?;
+                self.handle_have_msg(piece_index).await?;
             }
             Message::Cancel(block_info) => {
                 peer_info!(
@@ -593,6 +579,8 @@ impl PeerSession {
                     "Received 'cancel' message for {}",
                     block_info
                 );
+                // before processing request validate block info
+                self.validate_block_info(&block_info)?;
                 self.incoming_requests.remove(&block_info);
             }
         }
@@ -722,7 +710,8 @@ impl PeerSession {
         // remove block from our pending requests queue
         let was_present = self.outgoing_requests.remove(&block_info);
 
-        // find block in the list of pending requests
+        // if block was not among our pending requests than it was either not
+        // requested or it arrived after we had cancelled it
         if !was_present {
             peer_warn!(self, "Received not requested block: {:?}", block_info);
             // silently ignore this block if we didn't expected it
@@ -794,11 +783,13 @@ impl PeerSession {
     ) -> Result<()> {
         peer_info!(self, "Received request: {:?}", block_info);
 
-        // TODO: validate block info
+        // before processing request validate block info
+        self.validate_block_info(&block_info)?;
 
         // check if peer is not choked: if they are, they can't request blocks
         if self.state.is_peer_choked {
             peer_warn!(self, "Choked peer sent request");
+            return Err(Error::ChokedPeerSentRequest);
         }
 
         // check if peer is not already requesting this block
@@ -853,5 +844,64 @@ impl PeerSession {
         self.state.update_upload_stats(info.len);
 
         Ok(())
+    }
+
+    /// Handles the announcement of a new piece that peer has.
+    async fn handle_have_msg(&mut self, piece_index: PieceIndex) -> Result<()> {
+        peer_info!(self, "Received 'have' message for piece {}", piece_index);
+
+        // validate piece index
+        self.torrent.storage.piece_len(piece_index).map_err(|e| {
+            peer_warn!(
+                self,
+                "Peer sent have with inavlid piece index: {}",
+                piece_index
+            );
+            e
+        })?;
+
+        // register's piece availability for this peer
+        if let Some(peer) = &mut self.state.peer {
+            // It's important to check if peer already has this piece.
+            // Otherwise we'd record duplicate pieces in the swarm in the below
+            // availability registration.
+            if peer.pieces[piece_index] {
+                return Ok(());
+            }
+            peer.pieces.set(piece_index, true);
+        }
+
+        // need to recalculate interest with each received piece
+        self.state.is_interested = self
+            .torrent
+            .piece_picker
+            .write()
+            .await
+            .register_piece_availability(piece_index)?;
+        Ok(())
+    }
+
+    /// Validates that the block info refers to a valid piece's valid block in
+    /// torrent.
+    fn validate_block_info(&self, info: &BlockInfo) -> Result<()> {
+        peer_trace!(self, "Validating {}", info);
+        let piece_len = self
+            .torrent
+            .storage
+            .piece_len(info.piece_index)
+            .map_err(|_| {
+                peer_warn!(
+                    self,
+                    "Peer sent invalid piece index: {}",
+                    info.piece_index
+                );
+                Error::InvalidBlockInfo
+            })?;
+        if info.len > 0 && info.offset + info.len <= piece_len {
+            Ok(())
+        } else {
+            peer_warn!(self, "Peer sent invalid {}", info);
+            Err(Error::InvalidBlockInfo)
+        }
     }
 }

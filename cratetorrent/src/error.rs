@@ -20,7 +20,7 @@ pub enum Error {
     /// The bitfield contained a different number of pieces than our own.
     InvalidBitfield,
     /// The block length is not 16 KiB.
-    InvalidBlockLength,
+    InvalidBlockInfo,
     /// The torrent download location is not valid.
     // TODO: consider adding more variations (path exists, doesn't exist,
     // permission issues)
