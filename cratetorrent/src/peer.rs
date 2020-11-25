@@ -794,14 +794,19 @@ impl PeerSession {
     ) -> Result<()> {
         peer_info!(self, "Received request: {:?}", block_info);
 
+        // TODO: validate block info
+
+        // check if peer is not choked: if they are, they can't request blocks
+        if self.state.is_peer_choked {
+            peer_warn!(self, "Choked peer sent request");
+        }
+
         // check if peer is not already requesting this block
         if self.incoming_requests.contains(&block_info) {
             // TODO: if peer keeps spamming us, close connection
             peer_warn!(self, "Peer sent duplicate block request");
             return Ok(());
         }
-
-        // TODO: validate block info
 
         peer_info!(self, "Issuing disk IO read for block: {:?}", block_info);
         self.incoming_requests.insert(block_info);

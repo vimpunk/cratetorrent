@@ -14,6 +14,9 @@ pub enum Error {
     /// The channel on which some component in engine was listening or sending
     /// died.
     Channel,
+    /// Peers are not allowed to request blocks while they are choked. If they
+    /// do so, their connection is severed.
+    ChokedPeerSentRequest,
     /// The bitfield contained a different number of pieces than our own.
     InvalidBitfield,
     /// The block length is not 16 KiB.
