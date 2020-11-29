@@ -22,6 +22,7 @@ mod peer;
 mod piece_picker;
 mod storage_info;
 mod torrent;
+mod tracker;
 
 /// The type of a piece's index.
 ///

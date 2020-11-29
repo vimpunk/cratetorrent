@@ -14,6 +14,7 @@ futures = "0.3"
 hex = "0.4"
 log = "0.4"
 nix = "0.17"
+reqwest = "0.10"
 serde = "1.0"
 serde_bencode = "0.2"
 serde_bytes = "0.11"
@@ -22,10 +23,12 @@ sha-1 = "0.8"
 # TODO(#54): specify exact features to use to cut down build times
 tokio = { version = "0.2", features = ["full"] }
 tokio-util = { version = "0.2", features = ["codec"] }
+url = "2.2"
 
 [dev-dependencies]
 criterion = "0.3"
 lazy_static = "1.4"
+mockito = "0.27"
 pretty_assertions = "0.6"
 
 [[bench]]
