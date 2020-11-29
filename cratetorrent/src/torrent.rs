@@ -1,7 +1,10 @@
 use std::{
     collections::HashMap,
     net::SocketAddr,
-    sync::Arc,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
     time::{Duration, Instant},
 };
 
@@ -22,6 +25,7 @@ use crate::{
     peer::{self, PeerSession},
     piece_picker::PiecePicker,
     storage_info::StorageInfo,
+    tracker::{Announce, Event, Tracker},
     Bitfield, PeerId, PieceIndex, Sha1Hash, TorrentId,
 };
 
@@ -45,6 +49,10 @@ pub(crate) struct Torrent {
     /// The channel has to be wrapped in a `stream::Fuse` so that we can
     /// `select!` on it in the torrent event loop.
     disk_alert_port: Fuse<TorrentAlertReceiver>,
+    /// The trackers we can announce to.
+    trackers: Vec<TrackerEntry>,
+    /// The address on which torrent should listen for new peers.
+    listen_addr: SocketAddr,
 }
 
 impl Torrent {
@@ -61,7 +69,9 @@ impl Torrent {
         info_hash: Sha1Hash,
         storage_info: StorageInfo,
         have_pieces: Bitfield,
+        trackers: Vec<Tracker>,
         client_id: PeerId,
+        listen_addr: SocketAddr,
     ) -> Self {
         let piece_picker = PiecePicker::new(have_pieces);
         let status = State {
@@ -72,33 +82,35 @@ impl Torrent {
                 info_hash,
                 client_id,
                 storage: storage_info,
+                stats: TorrentStats::default(),
             }),
             start_time: None,
             run_duration: Duration::default(),
         };
         let disk_alert_port = disk_alert_port.fuse();
 
+        let trackers =
+            trackers.into_iter().map(|t| TrackerEntry::new(t)).collect();
+
         Self {
             peers: Vec::new(),
             state: status,
             disk,
             disk_alert_port,
+            trackers,
+            listen_addr,
         }
     }
 
     /// Starts the torrent and runs until an error is encountered.
-    pub async fn start(
-        &mut self,
-        listen_addr: SocketAddr,
-        seeds: &[SocketAddr],
-    ) -> Result<()> {
+    pub async fn start(&mut self, peers: &[SocketAddr]) -> Result<()> {
         log::info!("Starting torrent");
 
         // record the torrent starttime
         self.state.start_time = Some(Instant::now());
 
         // start all seed peer sessions, if any
-        for addr in seeds.iter().cloned() {
+        for addr in peers.iter().cloned() {
             let (session, chan) = PeerSession::new(
                 Arc::clone(&self.state.context),
                 self.disk.clone(),
@@ -107,10 +119,15 @@ impl Torrent {
             self.peers.push(Peer::start_outbound(session, chan))
         }
 
+        // TODO: if the torrent is a seed, don't send the started event, just an
+        // empty announce (verify this is the case)
+        self.announce_to_trackers(Instant::now(), Some(Event::Started))
+            .await?;
+
         let mut loop_timer = time::interval(Duration::from_secs(1)).fuse();
         let mut prev_instant = None;
 
-        let mut listener = TcpListener::bind(&listen_addr).await?;
+        let mut listener = TcpListener::bind(&self.listen_addr).await?;
         let mut incoming = listener.incoming().fuse();
 
         // the torrent loop is triggered every second by the loop timer and by
@@ -156,6 +173,10 @@ impl Torrent {
                                 chan.send(peer::Command::Shutdown).ok();
                             }
                         }
+
+                        // tell trackers we're leaving
+                        self.announce_to_trackers(Instant::now(), Some(Event::Stopped)).await?;
+
                         return Ok(());
                     }
                 }
@@ -177,10 +198,150 @@ impl Torrent {
         self.state.run_duration += elapsed_since_last_tick;
         *prev_tick_time = Some(now);
 
+        // check if we need to announce to some trackers
+        let event = None;
+        self.announce_to_trackers(now, event).await?;
+
         log::debug!(
             "Torrent running for {}s",
             self.state.run_duration.as_secs()
         );
+
+        Ok(())
+    }
+
+    /// Chacks whether we need to announce to any trackers of if we need to request
+    /// peers.
+    async fn announce_to_trackers(
+        &mut self,
+        now: Instant,
+        event: Option<Event>,
+    ) -> Result<()> {
+        // calculate transfer statistics in advance
+        let uploaded = self
+            .state
+            .context
+            .stats
+            .uploaded_payload_count
+            .load(Ordering::Relaxed);
+        let downloaded = self
+            .state
+            .context
+            .stats
+            .downloaded_payload_count
+            .load(Ordering::Relaxed);
+        let left = self.state.context.storage.download_len - downloaded;
+
+        /// The minimum number of peers we want to keep in torrent at all times.
+        /// This will be configurable later.
+        const MIN_PEER_COUNT: usize = 10;
+
+        for tracker in self.trackers.iter_mut() {
+            // Check if the torrent's peer count has fallen below the minimum.
+            // But don't request new peers otherwise or if we're about to stop
+            // torrent.
+            let needed_peer_count = if self.peers.len() >= MIN_PEER_COUNT
+                || event == Some(Event::Stopped)
+            {
+                None
+            } else {
+                Some(MIN_PEER_COUNT - self.peers.len())
+            };
+
+            // we can override the normal annoucne interval if we need peers or
+            // if we have an event to announce
+            if event.is_some()
+                || (needed_peer_count.is_some() && tracker.can_announce(now))
+                || tracker.should_announce(now)
+            {
+                let params = Announce {
+                    tracker_id: tracker.id.clone(),
+                    info_hash: self.state.context.info_hash.clone(),
+                    peer_id: self.state.context.client_id.clone(),
+                    port: self.listen_addr.port(),
+                    peer_count: needed_peer_count,
+                    uploaded,
+                    downloaded,
+                    left,
+                    ip: None,
+                    event,
+                };
+                // TODO: We probably don't want to block the torrent event loop
+                // here waiting on the tracker response. Instead, poll the
+                // future in the event loop select call.
+                match tracker.client.announce(params).await {
+                    Ok(resp) => {
+                        if let Some(tracker_id) = resp.tracker_id {
+                            tracker.id = Some(tracker_id);
+                        }
+                        if let Some(failure_reason) = resp.failure_reason {
+                            log::warn!(
+                                "Error contacting tracker {}: {}",
+                                tracker.client,
+                                failure_reason
+                            );
+                        }
+                        if let Some(warning_message) = resp.warning_message {
+                            log::warn!(
+                                "Warning from tracker {}: {}",
+                                tracker.client,
+                                warning_message
+                            );
+                        }
+                        if tracker.interval.is_none() {
+                            log::info!(
+                                "Tracker {} interval: {} s",
+                                tracker.client,
+                                resp.interval.as_secs()
+                            );
+                            tracker.interval = Some(resp.interval);
+                        }
+                        if tracker.min_interval.is_none() {
+                            log::info!(
+                                "Tracker {} min interval: {} s",
+                                tracker.client,
+                                resp.min_interval.as_secs()
+                            );
+                            tracker.min_interval = Some(resp.min_interval);
+                        }
+
+                        if let (Some(seeder_count), Some(leecher_count)) =
+                            (resp.seeder_count, resp.leecher_count)
+                        {
+                            log::debug!(
+                                "Torrent seeds: {} and leeches: {}",
+                                seeder_count,
+                                leecher_count
+                            );
+                        }
+
+                        if !resp.peers.is_empty() {
+                            log::debug!(
+                                "Received peers from tracker {}: {:?}",
+                                tracker.client,
+                                resp.peers
+                            );
+                            for addr in resp.peers.into_iter() {
+                                let (session, chan) = PeerSession::new(
+                                    Arc::clone(&self.state.context),
+                                    self.disk.clone(),
+                                    addr,
+                                );
+                                self.peers
+                                    .push(Peer::start_outbound(session, chan))
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!(
+                            "Error announcing to tracker {}: {}",
+                            tracker.client,
+                            e
+                        );
+                    }
+                }
+            }
+        }
 
         Ok(())
     }
@@ -304,7 +465,7 @@ impl Peer {
     }
 }
 
-/// Status information of a torrent.
+/// Internal state information of torrent.
 struct State {
     /// Information that is shared with peer sessions.
     context: Arc<TorrentContext>,
@@ -328,6 +489,13 @@ struct State {
 pub(crate) struct TorrentContext {
     /// The torrent ID, unique in this engine.
     pub id: TorrentId,
+    /// The info hash of the torrent, derived from its metainfo. This is used to
+    /// identify the torrent with other peers and trackers.
+    pub info_hash: Sha1Hash,
+    /// The arbitrary client id, chosen by the user of this library. This is
+    /// advertised to peers and trackers.
+    pub client_id: PeerId,
+
     /// The piece picker picks the next most optimal piece to download and is
     /// shared by all peers in a torrent.
     pub piece_picker: Arc<RwLock<PiecePicker>>,
@@ -343,12 +511,81 @@ pub(crate) struct TorrentContext {
     // TODO: Benchmark whether using the nested locking approach isn't too slow.
     // For mvp it should do.
     pub downloads: RwLock<HashMap<PieceIndex, RwLock<PieceDownload>>>,
-    /// The info hash of the torrent, derived from its metainfo. This is used to
-    /// identify the torrent with other peers and trackers.
-    pub info_hash: Sha1Hash,
-    /// The arbitrary client id, chosen by the user of this library. This is
-    /// advertised to peers and trackers.
-    pub client_id: PeerId,
+
     /// Info about the torrent's storage (piece length, download length, etc).
     pub storage: StorageInfo,
+
+    /// Statistics updated by peers of torrent, hence being in context.
+    pub stats: TorrentStats,
+}
+
+/// Holds statistics related to a torrent.
+///
+/// This is shared with peer sessions so that they can update these stats in
+/// real time. Therefore this type needs to be `Send + Sync`.
+#[derive(Default)]
+pub(crate) struct TorrentStats {
+    /// Counts the total bytes sent during protocol chatter.
+    pub downloaded_protocol_count: AtomicU64,
+    /// Counts the total bytes received during protocol chatter.
+    pub uploaded_protocol_count: AtomicU64,
+    /// Counts the total downloaded block bytes.
+    pub downloaded_payload_count: AtomicU64,
+    /// Counts the total uploaded block bytes.
+    pub uploaded_payload_count: AtomicU64,
+}
+
+/// Contains the tracker client as well as additional metadata about the
+/// tracker.
+struct TrackerEntry {
+    client: Tracker,
+    /// If a previous announce contained a tracker_id, it should be included in
+    /// next announces. Therefore it is cached here.
+    id: Option<String>,
+    /// The last announce time is kept here so that we don't request too often.
+    last_announce_time: Option<Instant>,
+    /// The interval at which we should update the tracker of our progress.
+    /// This is set after the first announce request.
+    interval: Option<Duration>,
+    /// The absolute minimum interval at which we can contact tracker.
+    /// This is set after the first announce request.
+    min_interval: Option<Duration>,
+}
+
+impl TrackerEntry {
+    fn new(client: Tracker) -> Self {
+        Self {
+            client,
+            id: None,
+            last_announce_time: None,
+            interval: None,
+            min_interval: None,
+        }
+    }
+
+    /// Determines whether we should announce to the tracker at the given time,
+    /// based on when we last announced.
+    ///
+    /// Later this function should take into consideration the client's minimum
+    /// announce frequency settings.
+    fn should_announce(&self, t: Instant) -> bool {
+        if let Some(last_announce_time) = self.last_announce_time {
+            last_announce_time + self.interval.unwrap_or_default() > t
+        } else {
+            true
+        }
+    }
+
+    /// Determines whether we're allowed to announce at the given time.
+    ///
+    /// We may need peers before the next step in the announce interval.
+    /// However, we can't do this too often, so we need to check our last
+    /// announce time first.
+    fn can_announce(&self, t: Instant) -> bool {
+        if let Some(last_announce_time) = self.last_announce_time {
+            last_announce_time + self.min_interval.unwrap_or_default() >= t
+        } else {
+            true
+        }
+    }
 }

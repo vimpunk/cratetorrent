@@ -72,12 +72,17 @@ pub(crate) struct Announce {
     /// for a value between 30 and 50.
     pub peer_count: Option<usize>,
 
+    /// If previously received from the tracker, we must send it with each
+    /// announce.
+    pub tracker_id: Option<String>,
+
     /// Only need be set during the special events defined in [`Event`].
     /// Otherwise when just requesting peers, no event needs to be set.
     pub event: Option<Event>,
 }
 
 /// The optional announce event.
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum Event {
     /// The first request to tracker must include this value.
     Started,
@@ -92,7 +97,8 @@ pub(crate) enum Event {
 #[derive(Debug, Deserialize)]
 #[cfg_attr(test, derive(PartialEq, Serialize))]
 pub(crate) struct Response {
-    tracker_id: Option<String>,
+    /// The tracker id. If set, we must send it with each subsequent announce.
+    pub tracker_id: Option<String>,
 
     /// If this is not empty, no other fields in response are valid. It contains
     /// a human-readable error message as to why the request was invalid.
@@ -126,9 +132,6 @@ pub(crate) struct Tracker {
     client: Client,
     /// The URL of the tracker.
     url: Url,
-    /// If a previous announce contained a tracker_id, it should be included in
-    /// next announces. Therefore it is cached here.
-    tracker_id: Option<String>,
 }
 
 impl Tracker {
@@ -136,7 +139,6 @@ impl Tracker {
         Self {
             client: Client::new(),
             url,
-            tracker_id: None,
         }
     }
 
@@ -174,9 +176,6 @@ impl Tracker {
         if let Some(ip) = &params.ip {
             query.push(("ip", Cow::Owned(ip.to_string())));
         }
-        if let Some(tracker_id) = &self.tracker_id {
-            query.push(("trackerid", Cow::Borrowed(tracker_id)));
-        }
 
         let resp = self
             .client
@@ -189,6 +188,12 @@ impl Tracker {
             .await?;
         let resp = serde_bencode::from_bytes(&resp)?;
         Ok(resp)
+    }
+}
+
+impl fmt::Display for Tracker {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "'{}'", self.url)
     }
 }
 
@@ -382,6 +387,7 @@ mod tests {
             peer_count: Some(2),
             ip: None,
             event: None,
+            tracker_id: None,
         };
         let peer_ip = Ipv4Addr::new(2, 156, 201, 254);
         let peer_port = 49123;

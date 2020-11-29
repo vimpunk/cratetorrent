@@ -146,8 +146,7 @@ Each tracker HTTP request runs asynchronously and is polled by the torrent
 event loop's select call.
 
 Periodically each torrent also sends progress updates to the tracker. The
-periodicity is kept low here to not take up bandwidth. It will be configurable
-in the future.
+periodicity is defined by the tracker, but it may be configurable in the future.
 
 ### Peer sessions
 

@@ -8,6 +8,7 @@ use crate::{
     metainfo::Metainfo,
     storage_info::StorageInfo,
     torrent::Torrent,
+    tracker::Tracker,
     Bitfield, PeerId,
 };
 
@@ -115,6 +116,11 @@ async fn start_engine(
             return Ok(());
         };
 
+    let mut trackers = Vec::with_capacity(metainfo.trackers.len());
+    for tracker_url in metainfo.trackers.into_iter() {
+        trackers.push(Tracker::new(tracker_url));
+    }
+
     let own_pieces = mode.own_pieces(storage_info.piece_count);
     let mut torrent = Torrent::new(
         id,
@@ -123,10 +129,12 @@ async fn start_engine(
         info_hash,
         storage_info,
         own_pieces,
+        trackers,
         client_id,
+        listen_addr,
     );
     let seeds = mode.seeds();
-    torrent.start(listen_addr, &seeds).await?;
+    torrent.start(&seeds).await?;
 
     // send a shutdown command to disk
     disk.shutdown()?;

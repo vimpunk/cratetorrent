@@ -400,7 +400,7 @@ impl PeerSession {
         // keep-alive
 
         // update status
-        self.state.tick();
+        self.state.tick(&self.torrent.stats);
 
         peer_info!(
             self,
