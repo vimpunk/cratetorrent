@@ -166,21 +166,34 @@ impl Metainfo {
             return Err(MetainfoError::InvalidMetainfo);
         };
 
-        let mut trackers = Vec::with_capacity(
-            metainfo
+        let mut trackers = Vec::new();
+        if !metainfo.announce_list.is_empty() {
+            let tracker_count = metainfo
                 .announce_list
                 .iter()
                 .map(|t| t.len())
                 .sum::<usize>()
-                + metainfo.announce.as_ref().map(|_| 1).unwrap_or_default(),
-        );
-        for tier in metainfo.announce_list.iter() {
-            for tracker in tier.iter() {
-                trackers.push(Url::parse(&tracker)?);
+                + metainfo.announce.as_ref().map(|_| 1).unwrap_or_default();
+            trackers.reserve(tracker_count);
+
+            for tier in metainfo.announce_list.iter() {
+                for tracker in tier.iter() {
+                    let url = Url::parse(&tracker)?;
+                    // the tracker may be over UDP, which we don't support (yet)
+                    if url.scheme() == "http" || url.scheme() == "https" {
+                        trackers.push(url);
+                    }
+                }
+            }
+        } else if let Some(tracker) = &metainfo.announce {
+            let url = Url::parse(&tracker)?;
+            if url.scheme() == "http" || url.scheme() == "https" {
+                trackers.push(url);
             }
         }
-        if let Some(tracker) = &metainfo.announce {
-            trackers.push(Url::parse(tracker)?);
+
+        if trackers.is_empty() {
+            log::warn!("No HTTP trackers in metainfo");
         }
 
         // create info hash as a last step
@@ -229,6 +242,7 @@ mod raw {
     pub struct Metainfo {
         pub info: Info,
         pub announce: Option<String>,
+        #[serde(rename = "announce-list")]
         pub announce_list: Vec<Vec<String>>,
     }
 

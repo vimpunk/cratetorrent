@@ -1,11 +1,11 @@
 use std::{
-    borrow::Cow,
     fmt,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     time::Duration,
 };
 
 use bytes::Buf;
+use percent_encoding::{AsciiSet, NON_ALPHANUMERIC};
 use reqwest::{Client, Url};
 use serde::de;
 
@@ -98,29 +98,36 @@ pub(crate) enum Event {
 #[cfg_attr(test, derive(PartialEq, Serialize))]
 pub(crate) struct Response {
     /// The tracker id. If set, we must send it with each subsequent announce.
+    #[serde(rename = "tracker id")]
     pub tracker_id: Option<String>,
 
     /// If this is not empty, no other fields in response are valid. It contains
     /// a human-readable error message as to why the request was invalid.
+    #[serde(rename = "failure reason")]
     pub failure_reason: Option<String>,
 
     /// Optional. Similar to failure_reason, but the response is still processed.
+    #[serde(rename = "warning message")]
     pub warning_message: Option<String>,
 
     /// The number of seconds the client should wait before recontacting tracker.
+    #[serde(default)]
     #[serde(deserialize_with = "deserialize_seconds")]
-    pub interval: Duration,
+    pub interval: Option<Duration>,
 
     /// If present, the client must not reannounce itself before the end of this
     /// interval.
+    #[serde(default)]
+    #[serde(rename = "min interval")]
     #[serde(deserialize_with = "deserialize_seconds")]
-    pub min_interval: Duration,
+    pub min_interval: Option<Duration>,
 
     #[serde(rename = "complete")]
     pub seeder_count: Option<usize>,
     #[serde(rename = "incomplete")]
     pub leecher_count: Option<usize>,
 
+    #[serde(default)]
     #[serde(deserialize_with = "deserialize_peers")]
     pub peers: Vec<SocketAddr>,
 }
@@ -146,40 +153,62 @@ impl Tracker {
         // announce parameters are built up in the query string, see:
         // https://www.bittorrent.org/beps/bep_0003.html trackers section
         let mut query = vec![
+            ("port", params.port.to_string()),
+            ("downloaded", params.downloaded.to_string()),
+            ("uploaded", params.uploaded.to_string()),
+            ("left", params.left.to_string()),
             // Indicates that client accepts a compact response (each peer takes
             // up only 6 bytes where the first four bytes constitute the IP
             // address and the last 2 the port number, in Network Byte Order).
             // The is always true to save network traffic (many trackers don't
             // consider this and send compact lists anyway).
-            ("compact", Cow::Borrowed("1")),
-            (
-                "info_hash",
-                Cow::Owned(
-                    String::from_utf8_lossy(&params.info_hash).to_string(),
-                ),
-            ),
-            (
-                "peer_id",
-                Cow::Owned(
-                    String::from_utf8_lossy(&params.peer_id).to_string(),
-                ),
-            ),
-            ("port", Cow::Owned(params.port.to_string())),
-            ("downloaded", Cow::Owned(params.downloaded.to_string())),
-            ("uploaded", Cow::Owned(params.uploaded.to_string())),
-            ("left", Cow::Owned(params.left.to_string())),
+            ("compact", "1".to_string()),
         ];
-
         if let Some(peer_count) = params.peer_count {
-            query.push(("numwant", Cow::Owned(peer_count.to_string())));
+            query.push(("numwant", peer_count.to_string()));
         }
         if let Some(ip) = &params.ip {
-            query.push(("ip", Cow::Owned(ip.to_string())));
+            query.push(("ip", ip.to_string()));
         }
 
+        // hack:
+        // reqwest uses serde_urlencoded which doesn't support encoding a raw
+        // byte array into a percent encoded string. However, the tracker
+        // expects the url encoded form of the raw info hash, so we need to be
+        // able to map the raw bytes to its url encoded form. The peer id is
+        // also stored as a raw byte array. Using `String::from_utf8_lossy`
+        // would cause information loss.
+        //
+        // We do this using the separate percent_encoding crate, and by
+        // "hard-coding" the info hash and the peer id into the url string. This
+        // is the only way in which reqwest doesn't url encode again the custom
+        // url encoded info hash. All other methods, such as mutating the query
+        // parameters on the `Url` object, or by serializing the info hash with
+        // `serde_bytes` do not work: they throw an error due to expecting valid
+        // utf8.
+        //
+        // However, this is decidedly _not_ great: we're relying on an
+        // undocumented edge case of a third party library (reqwest) that may
+        // very well break in a future update.
+        let url = format!(
+            "{url}\
+            ?info_hash={info_hash}\
+            &peer_id={peer_id}",
+            url = self.url,
+            info_hash = percent_encoding::percent_encode(
+                &params.info_hash,
+                URL_ENCODE_RESERVED
+            ),
+            peer_id = percent_encoding::percent_encode(
+                &params.peer_id,
+                URL_ENCODE_RESERVED
+            ),
+        );
+
+        // send request
         let resp = self
             .client
-            .get(self.url.clone())
+            .get(&url)
             .query(&query)
             .send()
             .await?
@@ -221,6 +250,10 @@ where
         fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
             formatter.write_str("a string or list of dicts representing peers")
         }
+
+        // TODO: we can possibly simplify this by deserializing into an untagged
+        // enum where one of the enums has a `serde(with = "serde_bytes")`
+        // attribute for the compact list
 
         /// Deserializes a compact string of peers.
         ///
@@ -285,13 +318,23 @@ where
 }
 
 /// Deserializes an integer representing seconds into a `Duration`.
-fn deserialize_seconds<'de, D>(deserializer: D) -> Result<Duration, D::Error>
+fn deserialize_seconds<'de, D>(
+    deserializer: D,
+) -> Result<Option<Duration>, D::Error>
 where
     D: de::Deserializer<'de>,
 {
-    let s: u64 = de::Deserialize::deserialize(deserializer)?;
-    Ok(Duration::from_secs(s))
+    let s: Option<u64> = de::Deserialize::deserialize(deserializer)?;
+    Ok(s.map(|s| Duration::from_secs(s)))
 }
+
+/// Contains the characters that need to be URL encoded according to:
+/// https://en.wikipedia.org/wiki/Percent-encoding#Types_of_URI_characters
+const URL_ENCODE_RESERVED: &AsciiSet = &NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'_')
+    .remove(b'~')
+    .remove(b'.');
 
 #[cfg(test)]
 mod tests {
@@ -395,8 +438,8 @@ mod tests {
             tracker_id: None,
             failure_reason: None,
             warning_message: None,
-            interval: Duration::from_secs(15),
-            min_interval: Duration::from_secs(10),
+            interval: Some(Duration::from_secs(15)),
+            min_interval: Some(Duration::from_secs(10)),
             seeder_count: Some(5),
             leecher_count: Some(3),
             peers: vec![SocketAddr::new(peer_ip.into(), peer_port)],

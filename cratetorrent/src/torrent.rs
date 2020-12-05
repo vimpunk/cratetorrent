@@ -202,10 +202,7 @@ impl Torrent {
         let event = None;
         self.announce_to_trackers(now, event).await?;
 
-        log::debug!(
-            "Torrent running for {}s",
-            self.state.run_duration.as_secs()
-        );
+        log::debug!("Info: elapsed: {} s", self.state.run_duration.as_secs());
 
         Ok(())
     }
@@ -271,6 +268,12 @@ impl Torrent {
                 // future in the event loop select call.
                 match tracker.client.announce(params).await {
                     Ok(resp) => {
+                        log::info!(
+                            "Announced to tracker {}, response: {:?}",
+                            tracker.client,
+                            resp
+                        );
+                        tracker.last_announce_time = Some(now);
                         if let Some(tracker_id) = resp.tracker_id {
                             tracker.id = Some(tracker_id);
                         }
@@ -288,21 +291,21 @@ impl Torrent {
                                 warning_message
                             );
                         }
-                        if tracker.interval.is_none() {
+                        if let Some(interval) = resp.interval {
                             log::info!(
                                 "Tracker {} interval: {} s",
                                 tracker.client,
-                                resp.interval.as_secs()
+                                interval.as_secs()
                             );
-                            tracker.interval = Some(resp.interval);
+                            tracker.interval = Some(interval);
                         }
-                        if tracker.min_interval.is_none() {
+                        if let Some(min_interval) = resp.min_interval {
                             log::info!(
-                                "Tracker {} min interval: {} s",
+                                "Tracker {} min min_interval: {} s",
                                 tracker.client,
-                                resp.min_interval.as_secs()
+                                min_interval.as_secs()
                             );
-                            tracker.min_interval = Some(resp.min_interval);
+                            tracker.min_interval = Some(min_interval);
                         }
 
                         if let (Some(seeder_count), Some(leecher_count)) =
@@ -321,14 +324,19 @@ impl Torrent {
                                 tracker.client,
                                 resp.peers
                             );
-                            for addr in resp.peers.into_iter() {
-                                let (session, chan) = PeerSession::new(
-                                    Arc::clone(&self.state.context),
-                                    self.disk.clone(),
-                                    addr,
-                                );
-                                self.peers
-                                    .push(Peer::start_outbound(session, chan))
+                            // FIXME: only connect to a single peer for
+                            // easier debugging purposes
+                            if self.peers.is_empty() {
+                                for addr in resp.peers.into_iter().take(1) {
+                                    let (session, chan) = PeerSession::new(
+                                        Arc::clone(&self.state.context),
+                                        self.disk.clone(),
+                                        addr,
+                                    );
+                                    self.peers.push(Peer::start_outbound(
+                                        session, chan,
+                                    ))
+                                }
                             }
                         }
                     }
