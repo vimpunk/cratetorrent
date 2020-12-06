@@ -1,6 +1,6 @@
 use std::{net::SocketAddr, path::PathBuf};
 
-use tokio::runtime::Runtime;
+use tokio::{runtime::Runtime, sync::mpsc};
 
 use crate::{
     disk::{self, Alert},
@@ -80,7 +80,7 @@ async fn start_engine(
     listen_addr: SocketAddr,
     mode: Mode,
 ) -> Result<()> {
-    let (disk_join_handle, disk, mut alert_port) = disk::spawn()?;
+    let (disk_join_handle, disk, mut disk_port) = disk::spawn()?;
 
     // allocate torrent on disk
     let id = 0;
@@ -88,33 +88,38 @@ async fn start_engine(
     let storage_info = StorageInfo::new(&metainfo, download_dir);
     log::info!("Torrent {} storage info: {:?}", id, storage_info);
 
+    let (torrent_chan, torrent_port) = mpsc::unbounded_channel();
+
     // allocate torrent and wait for its result
-    disk.allocate_new_torrent(id, storage_info.clone(), metainfo.pieces)?;
-    let torrent_disk_alert_port =
-        if let Some(Alert::TorrentAllocation(allocation_result)) =
-            alert_port.recv().await
-        {
-            match allocation_result {
-                Ok(allocation) => {
-                    log::info!("Torrent {} allocated on disk", id);
-                    debug_assert_eq!(allocation.id, id);
-                    allocation.alert_port
-                }
-                Err(e) => {
-                    log::error!(
-                        "Torrent {} could not be allocated on disk: {}",
-                        id,
-                        e
-                    );
-                    return Ok(());
-                }
+    disk.allocate_new_torrent(
+        id,
+        storage_info.clone(),
+        metainfo.pieces,
+        torrent_chan.clone(),
+    )?;
+    if let Some(Alert::TorrentAllocation(allocation_result)) =
+        disk_port.recv().await
+    {
+        match allocation_result {
+            Ok(result_id) => {
+                log::info!("Torrent {} allocated on disk", result_id);
+                debug_assert_eq!(result_id, id);
             }
-        } else {
-            log::error!(
-                "Disk task receive error, disk task most likely stopped"
-            );
-            return Ok(());
-        };
+            Err(e) => {
+                log::error!(
+                    "Torrent {} could not be allocated on disk: {}",
+                    id,
+                    e
+                );
+                return Ok(());
+            }
+        }
+    } else {
+        log::error!(
+            "Received no message from disk task, it most likely stopped."
+        );
+        return Ok(());
+    }
 
     let mut trackers = Vec::with_capacity(metainfo.trackers.len());
     for tracker_url in metainfo.trackers.into_iter() {
@@ -125,7 +130,8 @@ async fn start_engine(
     let mut torrent = Torrent::new(
         id,
         disk.clone(),
-        torrent_disk_alert_port,
+        torrent_chan,
+        torrent_port,
         info_hash,
         storage_info,
         own_pieces,

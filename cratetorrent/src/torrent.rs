@@ -14,20 +14,55 @@ use futures::{
 };
 use tokio::{
     net::{TcpListener, TcpStream},
-    sync::RwLock,
+    sync::{
+        mpsc::{UnboundedReceiver, UnboundedSender},
+        RwLock,
+    },
     task, time,
 };
 
 use crate::{
-    disk::{DiskHandle, TorrentAlert, TorrentAlertReceiver},
+    disk::{DiskHandle, ReadError, WriteError},
     download::PieceDownload,
     error::*,
     peer::{self, PeerSession},
     piece_picker::PiecePicker,
     storage_info::StorageInfo,
     tracker::{Announce, Event, Tracker},
-    Bitfield, PeerId, PieceIndex, Sha1Hash, TorrentId,
+    Bitfield, BlockInfo, PeerId, PieceIndex, Sha1Hash, TorrentId,
 };
+
+/// The channel for communicating with torrent.
+pub(crate) type Sender = UnboundedSender<Message>;
+
+/// The type of channel on which a torrent can listen for block write
+/// completions.
+pub(crate) type Receiver = UnboundedReceiver<Message>;
+
+/// The types of messages that the torrent can receive from other parts of the
+/// engine.
+#[derive(Debug)]
+pub(crate) enum Message {
+    /// Sent when some blocks were written to disk or an error ocurred while
+    /// writing.
+    PieceCompletion(Result<PieceCompletion, WriteError>),
+    /// There was an error reading a block.
+    ReadError {
+        block_info: BlockInfo,
+        error: ReadError,
+    },
+}
+
+/// The type returned on completing a piece.
+#[derive(Debug)]
+pub(crate) struct PieceCompletion {
+    /// The index of the piece.
+    pub index: PieceIndex,
+    /// Whether the piece is valid.
+    ///
+    /// If the piece is invalid, it is not written to disk.
+    pub is_valid: bool,
+}
 
 /// Represents a torrent upload or download.
 ///
@@ -43,12 +78,15 @@ pub(crate) struct Torrent {
     /// The handle to the disk IO task, used to issue commands on it. A copy of
     /// this handle is passed down to each peer session.
     disk: DiskHandle,
-    /// The port on which we're receiving disk IO notifications of block write
-    /// and piece completion.
+    /// A copy of the torrent channel sender. This is not used by torrent iself,
+    /// but a copy is needed so it can be passed to new peer sessions.
+    chan: Sender,
+    /// The port on which other entities in the engine send this torrent
+    /// messages.
     ///
     /// The channel has to be wrapped in a `stream::Fuse` so that we can
     /// `select!` on it in the torrent event loop.
-    disk_alert_port: Fuse<TorrentAlertReceiver>,
+    port: Fuse<Receiver>,
     /// The trackers we can announce to.
     trackers: Vec<TrackerEntry>,
     /// The address on which torrent should listen for new peers.
@@ -65,7 +103,8 @@ impl Torrent {
     pub fn new(
         id: TorrentId,
         disk: DiskHandle,
-        disk_alert_port: TorrentAlertReceiver,
+        chan: Sender,
+        port: Receiver,
         info_hash: Sha1Hash,
         storage_info: StorageInfo,
         have_pieces: Bitfield,
@@ -87,7 +126,7 @@ impl Torrent {
             start_time: None,
             run_duration: Duration::default(),
         };
-        let disk_alert_port = disk_alert_port.fuse();
+        let port = port.fuse();
 
         let trackers =
             trackers.into_iter().map(|t| TrackerEntry::new(t)).collect();
@@ -96,7 +135,8 @@ impl Torrent {
             peers: Vec::new(),
             state: status,
             disk,
-            disk_alert_port,
+            chan,
+            port,
             trackers,
             listen_addr,
         }
@@ -162,8 +202,8 @@ impl Torrent {
                     );
                     self.peers.push(Peer::start_inbound(socket, session, chan));
                 }
-                disk_alert = self.disk_alert_port.select_next_some() => {
-                    let should_stop = self.handle_disk_alert(disk_alert).await?;
+                msg = self.port.select_next_some() => {
+                    let should_stop = self.handle_message(msg).await?;
                     if should_stop {
                         // send shutdown command to all connected peers
                         for peer in self.peers.iter() {
@@ -354,14 +394,14 @@ impl Torrent {
         Ok(())
     }
 
-    /// Handles the disk message and returns whether the message should cause
-    /// the torrent to stop.
-    async fn handle_disk_alert(
-        &self,
-        disk_alert: TorrentAlert,
-    ) -> Result<bool> {
-        match disk_alert {
-            TorrentAlert::PieceCompletion(write_result) => {
+    /// Handles a message from another task in the engine.
+    ///
+    /// The message may result in the torrent scheduled to be shut down. This
+    /// is indicated by the result value: if it's true, the torrent event loop
+    /// exits.
+    async fn handle_message(&self, msg: Message) -> Result<bool> {
+        match msg {
+            Message::PieceCompletion(write_result) => {
                 log::debug!("Disk write result {:?}", write_result);
                 match write_result {
                     Ok(piece) => {
@@ -418,7 +458,7 @@ impl Torrent {
                     }
                 }
             }
-            TorrentAlert::ReadError { block_info, error } => {
+            Message::ReadError { block_info, error } => {
                 log::error!(
                     "Failed to read from disk {}: {}",
                     block_info,

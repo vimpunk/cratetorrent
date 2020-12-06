@@ -4,7 +4,7 @@ use tokio::sync::{mpsc, RwLock};
 
 use super::{
     error::*, Alert, AlertReceiver, AlertSender, Command, CommandReceiver,
-    CommandSender, TorrentAllocation,
+    CommandSender,
 };
 use crate::{error::Error, peer, BlockInfo, TorrentId};
 use file::TorrentFile;
@@ -55,6 +55,7 @@ impl Disk {
                     id,
                     storage_info,
                     piece_hashes,
+                    sender,
                 } => {
                     log::trace!(
                         "Disk received NewTorrent command: id={}, info={:?}",
@@ -72,15 +73,15 @@ impl Disk {
                     // NOTE: Do _NOT_ return on failure, we don't want to kill
                     // the disk task due to potential disk IO errors: we just
                     // want to log it and notify engine of it.
-                    let torrent_res = Torrent::new(storage_info, piece_hashes);
+                    let torrent_res =
+                        Torrent::new(storage_info, piece_hashes, sender);
                     match torrent_res {
-                        Ok((torrent, alert_port)) => {
+                        Ok(torrent) => {
                             log::info!("Torrent {} successfully allocated", id);
                             self.torrents.insert(id, RwLock::new(torrent));
                             // send notificaiton of allocation success
-                            self.alert_chan.send(Alert::TorrentAllocation(
-                                Ok(TorrentAllocation { id, alert_port }),
-                            ))?;
+                            self.alert_chan
+                                .send(Alert::TorrentAllocation(Ok(id)))?;
                         }
                         Err(e) => {
                             log::error!(
