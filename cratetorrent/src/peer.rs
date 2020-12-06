@@ -366,6 +366,24 @@ impl PeerSession {
                             self.handle_msg(&mut sink, msg).await?;
                         }
 
+                        // if neither of us have any pieces, disconnect, there
+                        // is no point in keeping the connection alive
+                        if self
+                            .torrent
+                            .piece_picker
+                            .read()
+                            .await
+                            .own_pieces()
+                            .not_any()
+                            && self.peer.pieces.not_any()
+                        {
+                            peer_warn!(
+                                self,
+                                "Neither side of connection has any pieces, disconnecting"
+                            );
+                            return Ok(());
+                        }
+
                         // enter connected state
                         self.ctx.set_connection_state(ConnectionState::Connected);
                         peer_info!(self,
