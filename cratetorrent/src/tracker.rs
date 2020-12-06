@@ -149,6 +149,15 @@ impl Tracker {
         }
     }
 
+    /// Sends an announce request to the tracker with the specified parameters.
+    ///
+    /// This may be used by a torrent to request peers to download from and to
+    /// report statistics to the tracker.
+    ///
+    /// # Important
+    ///
+    /// The tracker may not be contacted more often than the minimum interval
+    /// returned in the first announce response.
     pub async fn announce(&self, params: Announce) -> Result<Response> {
         // announce parameters are built up in the query string, see:
         // https://www.bittorrent.org/beps/bep_0003.html trackers section
