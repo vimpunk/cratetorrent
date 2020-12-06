@@ -275,7 +275,7 @@ mod tests {
             _ => unreachable!(),
         };
         fs::remove_file(info.download_dir.join(&file.path))
-            .expect("Failed to clean up disk test torrent file");
+            .expect("cannot clean up disk test torrent file");
     }
 
     /// Tests writing of an invalid piece and verifying that an alert of it
@@ -407,7 +407,7 @@ mod tests {
             _ => unreachable!(),
         };
         fs::remove_file(info.download_dir.join(&file.path))
-            .expect("Failed to clean up disk test torrent file");
+            .expect("cannot clean up disk test torrent file");
     }
 
     /// Calls the provided function for each block in piece, passing it the
@@ -493,11 +493,11 @@ mod tests {
                 let download_path = download_dir.join(&download_rel_path);
                 if download_path.is_file() {
                     fs::remove_file(&download_path).expect(
-                        "Failed to clean up previous disk test torrent file",
+                        "cannot clean up previous disk test torrent file",
                     );
                 } else if download_path.is_dir() {
                     fs::remove_dir_all(&download_path).expect(
-                        "Failed to clean up previous disk test torrent dir",
+                        "cannot clean up previous disk test torrent dir",
                     );
                 }
             }

@@ -21,16 +21,31 @@ use tokio::{
 use tokio_util::codec::{Framed, FramedParts};
 
 use crate::{
-    disk::DiskHandle, download::PieceDownload, error::*,
-    torrent::TorrentContext, Bitfield, Block, BlockInfo, PieceIndex,
+    disk::DiskHandle,
+    download::PieceDownload,
+    error::*,
+    torrent::{self, TorrentContext},
+    Bitfield, Block, BlockInfo, PeerId, PieceIndex, Side,
 };
 use codec::*;
 use state::*;
+
+pub(crate) use state::{ConnectionState, SessionState};
 
 mod codec;
 mod state;
 #[macro_use]
 mod peer_log;
+
+/// The most essential information of a peer session, dervied from
+/// [`crate::peer::state::SessionContext`]. It is sent with each tick to the
+/// torrent via its sender.
+#[derive(Debug)]
+pub(crate) struct SessionInfo {
+    pub state: SessionState,
+    pub peer_side: Side,
+    pub throughput: RoundThroughput,
+}
 
 /// The channel on which torrent can send a command to the peer session task.
 pub(crate) type Sender = UnboundedSender<Command>;
@@ -75,6 +90,7 @@ enum Direction {
 pub(crate) struct PeerSession {
     /// Shared information of the torrent.
     torrent: Arc<TorrentContext>,
+
     /// The entity used to save downloaded file blocks to disk.
     disk: DiskHandle,
     /// The command channel on which peer session is being sent messages.
@@ -85,10 +101,13 @@ pub(crate) struct PeerSession {
     cmd_chan: Sender,
     /// The port on which peer session receives commands.
     cmd_port: Fuse<Receiver>,
-    /// The remote address of the peer.
-    addr: SocketAddr,
-    /// Session related information.
-    state: SessionState,
+
+    /// Information about the peer.
+    peer: PeerInfo,
+    /// Most of the session's information and state is stored here, i.e. it's
+    /// the "context" of the session.
+    ctx: SessionContext,
+
     /// Our pending requests that we sent to peer. It represents the blocks that
     /// we are expecting. Thus, if we receive a block that is not in this list,
     /// we need to drop it. If we receive a block whose request entry is in
@@ -112,6 +131,25 @@ pub(crate) struct PeerSession {
     incoming_requests: HashSet<BlockInfo>,
 }
 
+/// Information about the peer we're connected to.
+#[derive(Debug)]
+pub(super) struct PeerInfo {
+    /// The IP-port pair of the peer.
+    pub addr: SocketAddr,
+    /// Peer's 20 byte BitTorrent id. Updated when the peer sends us its peer
+    /// id, in the handshake.
+    pub id: Option<PeerId>,
+    /// All pieces peer has, updated when it announces to us a new piece.
+    ///
+    /// Defaults to all pieces set to missing.
+    pub pieces: Bitfield,
+    /// Whether the pere is a seed or a leech.
+    ///
+    /// This is essentially a cache of determining how many pieces are set in
+    /// [`Self::pieces`].
+    pub side: Side,
+}
+
 impl PeerSession {
     /// Creates a new session with the peer at the given address.
     ///
@@ -125,14 +163,20 @@ impl PeerSession {
         addr: SocketAddr,
     ) -> (Self, Sender) {
         let (cmd_chan, cmd_port) = mpsc::unbounded_channel();
+        let piece_count = torrent.storage.piece_count;
         (
             Self {
                 torrent,
                 disk,
                 cmd_chan: cmd_chan.clone(),
                 cmd_port: cmd_port.fuse(),
-                addr,
-                state: SessionState::default(),
+                peer: PeerInfo {
+                    addr,
+                    pieces: Bitfield::repeat(false, piece_count),
+                    id: Default::default(),
+                    side: Default::default(),
+                },
+                ctx: SessionContext::default(),
                 outgoing_requests: HashSet::new(),
                 incoming_requests: HashSet::new(),
             },
@@ -150,8 +194,8 @@ impl PeerSession {
 
         // establish the TCP connection
         peer_info!(self, "Connecting to peer");
-        self.state.connection = ConnectionState::Connecting;
-        let socket = TcpStream::connect(self.addr).await?;
+        self.ctx.set_connection_state(ConnectionState::Connecting);
+        let socket = TcpStream::connect(self.peer.addr).await?;
         peer_info!(self, "Connected to peer");
 
         let socket = Framed::new(socket, HandshakeCodec);
@@ -175,14 +219,15 @@ impl PeerSession {
         mut socket: Framed<TcpStream, HandshakeCodec>,
         direction: Direction,
     ) -> Result<()> {
+        self.ctx.set_connection_state(ConnectionState::Handshaking);
+
         // if this is an outbound connection, we have to send the first
         // handshake
         if direction == Direction::Outbound {
-            self.state.connection = ConnectionState::Handshaking;
             let handshake =
                 Handshake::new(self.torrent.info_hash, self.torrent.client_id);
             peer_info!(self, "Sending handshake");
-            self.state.uploaded_protocol_counter += handshake.len();
+            self.ctx.uploaded_protocol_counter += handshake.len();
             socket.send(handshake).await?;
         }
 
@@ -196,7 +241,7 @@ impl PeerSession {
             // is valid
             debug_assert_eq!(peer_handshake.prot, PROTOCOL_STRING.as_bytes());
 
-            self.state.downloaded_protocol_counter += peer_handshake.len();
+            self.ctx.downloaded_protocol_counter += peer_handshake.len();
 
             // verify that the advertised torrent info hash is the same as ours
             if peer_handshake.info_hash != self.torrent.info_hash {
@@ -205,24 +250,17 @@ impl PeerSession {
                 return Err(Error::InvalidPeerInfoHash);
             }
 
-            // set basic peer information
-            self.state.peer = Some(PeerInfo {
-                id: peer_handshake.peer_id,
-                pieces: Bitfield::repeat(
-                    false,
-                    self.torrent.storage.piece_count,
-                ),
-            });
+            // set the peer's id
+            self.peer.id = Some(peer_handshake.peer_id);
 
             // if this is an inbound connection, we reply with the handshake
             if direction == Direction::Inbound {
-                self.state.connection = ConnectionState::Handshaking;
                 let handshake = Handshake::new(
                     self.torrent.info_hash,
                     self.torrent.client_id,
                 );
                 peer_info!(self, "Sending handshake");
-                self.state.uploaded_protocol_counter += handshake.len();
+                self.ctx.uploaded_protocol_counter += handshake.len();
                 socket.send(handshake).await?;
             }
 
@@ -239,11 +277,19 @@ impl PeerSession {
             let socket = Framed::from_parts(new_parts);
 
             // enter the piece availability exchange state
-            self.state.connection = ConnectionState::AvailabilityExchange;
-            peer_info!(self, "Session state: {:?}", self.state.connection);
+            self.ctx
+                .set_connection_state(ConnectionState::AvailabilityExchange);
+            peer_info!(self, "Session state: {:?}", self.ctx.state.connection);
 
             // run the session
-            self.run(socket).await?;
+            if let Err(e) = self.run(socket).await {
+                peer_error!(self, "Session stopped due to an error: {}", e);
+                self.ctx.set_connection_state(ConnectionState::Disconnected);
+                self.torrent.chan.send(torrent::Message::PeerState {
+                    addr: self.peer.addr,
+                    info: self.session_info(),
+                })?;
+            }
         }
         // TODO(https://github.com/mandreyel/cratetorrent/issues/20): handle
         // not recieving anything with an error rather than an Ok(())
@@ -295,7 +341,7 @@ impl PeerSession {
                     // received directly after the handshake (later once we
                     // implement the FAST extension, there will be other piece
                     // availability related messages to handle)
-                    if self.state.connection == ConnectionState::AvailabilityExchange {
+                    if self.ctx.state.connection == ConnectionState::AvailabilityExchange {
                         if let Message::Bitfield(bitfield) = msg {
                             self.handle_bitfield_msg(&mut sink, bitfield).await?;
                         } else {
@@ -305,10 +351,10 @@ impl PeerSession {
                         }
 
                         // enter connected state
-                        self.state.connection = ConnectionState::Connected;
+                        self.ctx.set_connection_state(ConnectionState::Connected);
                         peer_info!(self,
                             "Session state: {:?}",
-                            self.state.connection
+                            self.ctx.state.connection
                         );
                     } else {
                         self.handle_msg(&mut sink, msg).await?;
@@ -321,12 +367,10 @@ impl PeerSession {
                         }
                         Command::NewPiece(piece_index) => {
                             // if peer doesn't have the piece, announce it
-                            if let Some(peer) = &self.state.peer {
-                                if !peer.pieces[piece_index]  {
+                                if !self.peer.pieces[piece_index]  {
                                     peer_debug!(self, "Announcing piece {}", piece_index);
                                     sink.send(Message::Have{ piece_index }).await?;
                                 }
-                            }
                         }
                         Command::Shutdown => {
                             peer_info!(self, "Shutting down session");
@@ -350,11 +394,11 @@ impl PeerSession {
         // resent requests if we have pending requests and more time has elapsed
         // since the last request than the current timeout value
         if let Some(last_outgoing_request_time) =
-            self.state.last_outgoing_request_time
+            self.ctx.last_outgoing_request_time
         {
             let elapsed_since_last_request = Instant::now()
                 .saturating_duration_since(last_outgoing_request_time);
-            let request_timeout = self.state.request_timeout();
+            let request_timeout = self.ctx.request_timeout();
             peer_debug!(
                 self,
                 "Checking request timeout \
@@ -367,9 +411,9 @@ impl PeerSession {
                     self,
                     "Timeout after {} ms (timeouts: {})",
                     elapsed_since_last_request.as_millis(),
-                    self.state.timed_out_request_count + 1,
+                    self.ctx.timed_out_request_count + 1,
                 );
-                self.state.register_request_timeout();
+                self.ctx.register_request_timeout();
                 // Cancel all requests and re-issue a single one (since we can
                 // only request a single block now). Start by freeing up the
                 // block in its piece download.
@@ -385,7 +429,7 @@ impl PeerSession {
                         .write()
                         .await
                         .get_mut(&block.piece_index)
-                        .expect("No corresponding PieceDownload for request")
+                        .expect("no corresponding PieceDownload for request")
                         .write()
                         .await
                         .cancel_request(block);
@@ -399,22 +443,59 @@ impl PeerSession {
         // TODO(https://github.com/mandreyel/cratetorrent/issues/42): send
         // keep-alive
 
+        // if there was any state change, notify torrent
+        if self.ctx.changed {
+            peer_debug!(self, "State changed, updating torrent");
+            self.torrent.chan.send(torrent::Message::PeerState {
+                addr: self.peer.addr,
+                info: self.session_info(),
+            })?;
+        }
+
         // update status
-        self.state.tick(&self.torrent.stats);
+        self.ctx.tick();
 
         peer_trace!(
             self,
             "Info: download rate: {} b/s (peak: {} b/s, total: {} b) \
             queue: {}, rtt: {} ms (~{} s)",
-            self.state.downloaded_payload_counter.avg(),
-            self.state.downloaded_payload_counter.peak(),
-            self.state.downloaded_payload_counter.total(),
-            self.state.target_request_queue_len.unwrap_or(0),
-            self.state.avg_request_rtt.mean().as_millis(),
-            self.state.avg_request_rtt.mean().as_secs(),
+            self.ctx.downloaded_payload_counter.avg(),
+            self.ctx.downloaded_payload_counter.peak(),
+            self.ctx.downloaded_payload_counter.total(),
+            self.ctx.target_request_queue_len.unwrap_or(0),
+            self.ctx.avg_request_rtt.mean().as_millis(),
+            self.ctx.avg_request_rtt.mean().as_secs(),
         );
 
         Ok(())
+    }
+
+    /// Returns a summary of the most important information of the session
+    /// state to send to torrent.
+    #[inline(always)]
+    pub fn session_info(&self) -> SessionInfo {
+        SessionInfo {
+            state: self.ctx.state,
+            peer_side: self.peer.side,
+            throughput: RoundThroughput {
+                uploaded_payload_count: self
+                    .ctx
+                    .uploaded_payload_counter
+                    .round(),
+                downloaded_payload_count: self
+                    .ctx
+                    .downloaded_payload_counter
+                    .round(),
+                uploaded_protocol_count: self
+                    .ctx
+                    .uploaded_protocol_counter
+                    .round(),
+                downloaded_protocol_count: self
+                    .ctx
+                    .downloaded_protocol_counter
+                    .round(),
+            },
+        }
     }
 
     /// Handles a message expected in the `AvailabilityExchange` state
@@ -428,7 +509,7 @@ impl PeerSession {
         peer_trace!(self, "Bitfield: {:?}", bitfield);
 
         debug_assert_eq!(
-            self.state.connection,
+            self.ctx.state.connection,
             ConnectionState::AvailabilityExchange
         );
 
@@ -443,20 +524,21 @@ impl PeerSession {
         bitfield.resize(self.torrent.storage.piece_count, false);
 
         // register peer's pieces with piece picker and determine interest in it
-        let was_interested = self.state.is_interested;
-        self.state.is_interested = self
+        let was_interested = self.ctx.state.is_interested;
+        let is_interested = self
             .torrent
             .piece_picker
             .write()
             .await
             .register_availability(&bitfield)?;
-        debug_assert!(self.state.is_interested);
-        if let Some(peer_info) = &mut self.state.peer {
-            peer_info.pieces = bitfield;
+        self.peer.pieces = bitfield;
+        if self.peer.pieces.all() {
+            self.peer.side = Side::Seed;
         }
 
         // we may have become interested in peer
-        self.check_interest(sink, was_interested).await
+        self.update_interest(sink, was_interested, is_interested)
+            .await
     }
 
     /// Handles messages from peer that are expected in the `Connected` state.
@@ -466,7 +548,7 @@ impl PeerSession {
         msg: Message,
     ) -> Result<()> {
         // record protocol message size
-        self.state.downloaded_protocol_counter += msg.protocol_len();
+        self.ctx.downloaded_protocol_counter += msg.protocol_len();
         match msg {
             Message::Bitfield(_) => {
                 peer_info!(
@@ -479,22 +561,22 @@ impl PeerSession {
                 peer_info!(self, "Peer sent keep alive");
             }
             Message::Choke => {
-                if !self.state.is_choked {
+                if !self.ctx.state.is_choked {
                     peer_info!(self, "Peer choked us");
                     // since we're choked we don't expect to receive blocks
                     // for our pending requests
                     self.outgoing_requests.clear();
-                    self.state.is_choked = true;
+                    self.ctx.update_state(|state| state.is_choked = true);
                 }
             }
             Message::Unchoke => {
-                if self.state.is_choked {
+                if self.ctx.state.is_choked {
                     peer_info!(self, "Peer unchoked us");
-                    self.state.is_choked = false;
+                    self.ctx.update_state(|state| state.is_choked = false);
 
                     // if we're interested, start sending requests
-                    if self.state.is_interested {
-                        self.state.prepare_for_download();
+                    if self.ctx.state.is_interested {
+                        self.ctx.prepare_for_download();
                         // now that we are allowed to request blocks, start the
                         // download pipeline if we're interested
                         self.make_requests(sink).await?;
@@ -502,21 +584,25 @@ impl PeerSession {
                 }
             }
             Message::Interested => {
-                if !self.state.is_peer_interested {
-                    peer_info!(self, "Peer became interested");
-                    self.state.is_peer_interested = true;
+                if !self.ctx.state.is_peer_interested {
                     // TODO(https://github.com/mandreyel/cratetorrent/issues/60):
                     // we currently unchkoe peer unconditionally, but we should
                     // implement the proper unchoke algorithm in `Torrent`
+                    peer_info!(self, "Peer became interested");
                     peer_info!(self, "Unchoking peer");
-                    self.state.is_peer_choked = false;
+                    self.ctx.update_state(|state| {
+                        state.is_peer_interested = true;
+                        state.is_peer_choked = false;
+                    });
                     sink.send(Message::Unchoke).await?;
                 }
             }
             Message::NotInterested => {
-                if self.state.is_peer_interested {
+                if self.ctx.state.is_peer_interested {
                     peer_info!(self, "Peer no longer interested");
-                    self.state.is_peer_interested = false;
+                    self.ctx.update_state(|state| {
+                        state.is_peer_interested = false;
+                    });
                 }
             }
             Message::Block {
@@ -568,12 +654,12 @@ impl PeerSession {
     ) -> Result<()> {
         peer_trace!(self, "Making requests");
 
-        if self.state.is_choked {
+        if self.ctx.state.is_choked {
             peer_debug!(self, "Cannot make requests while choked");
             return Ok(());
         }
 
-        if !self.state.is_interested {
+        if !self.ctx.state.is_interested {
             peer_debug!(self, "Cannot make requests if not interested");
             return Ok(());
         }
@@ -581,7 +667,7 @@ impl PeerSession {
         // TODO: optimize this by preallocating the vector in self
         let mut requests = Vec::new();
         let target_request_queue_len =
-            self.state.target_request_queue_len.unwrap_or_default();
+            self.ctx.target_request_queue_len.unwrap_or_default();
 
         // If we have active downloads, prefer to continue those. This will
         // result in less in-progress pieces.
@@ -659,14 +745,14 @@ impl PeerSession {
                 requests.len(),
                 self.outgoing_requests.len()
             );
-            self.state.last_outgoing_request_time = Some(Instant::now());
+            self.ctx.last_outgoing_request_time = Some(Instant::now());
             // make the actual requests
             for req in requests.into_iter() {
                 self.outgoing_requests.insert(req);
                 // TODO: batch these in a single syscall, or is this already
                 // being done by the tokio codec type?
                 sink.send(Message::Request(req)).await?;
-                self.state.uploaded_protocol_counter +=
+                self.ctx.uploaded_protocol_counter +=
                     MessageId::Request.header_len();
             }
         }
@@ -705,7 +791,7 @@ impl PeerSession {
         self.register_downloaded_block(&block_info).await;
 
         // update download stats
-        self.state.update_download_stats(block_info.len);
+        self.ctx.update_download_stats(block_info.len);
 
         // validate and save the block to disk by sending a write command to the
         // disk task
@@ -732,7 +818,7 @@ impl PeerSession {
         // TODO(https://github.com/mandreyel/cratetorrent/issues/11): can we
         // handle this without unwrapping?
         let download =
-            download.expect("No corresponding PieceDownload for request");
+            download.expect("no corresponding PieceDownload for request");
         download.write().await.received_block(&block_info);
 
         // finish download of piece if this was the last missing block in it
@@ -769,7 +855,7 @@ impl PeerSession {
         self.validate_block_info(&block_info)?;
 
         // check if peer is not choked: if they are, they can't request blocks
-        if self.state.is_peer_choked {
+        if self.ctx.state.is_peer_choked {
             peer_warn!(self, "Choked peer sent request");
             return Err(Error::ChokedPeerSentRequest);
         }
@@ -825,7 +911,7 @@ impl PeerSession {
         peer_info!(self, "Sent {}", info);
 
         // update download stats
-        self.state.update_upload_stats(info.len);
+        self.ctx.update_upload_stats(info.len);
 
         Ok(())
     }
@@ -849,20 +935,21 @@ impl PeerSession {
             e
         })?;
 
-        // register's piece availability for this peer
-        if let Some(peer) = &mut self.state.peer {
-            // It's important to check if peer already has this piece.
-            // Otherwise we'd record duplicate pieces in the swarm in the below
-            // availability registration.
-            if peer.pieces[piece_index] {
-                return Ok(());
-            }
-            peer.pieces.set(piece_index, true);
+        // It's important to check if peer already has this piece.
+        // Otherwise we'd record duplicate pieces in the swarm in the below
+        // availability registration.
+        if self.peer.pieces[piece_index] {
+            return Ok(());
+        }
+
+        self.peer.pieces.set(piece_index, true);
+        if self.peer.pieces.all() {
+            self.peer.side = Side::Seed;
         }
 
         // need to recalculate interest with each received piece
-        let was_interested = self.state.is_interested;
-        self.state.is_interested = self
+        let was_interested = self.ctx.state.is_interested;
+        let is_interested = self
             .torrent
             .piece_picker
             .write()
@@ -870,22 +957,33 @@ impl PeerSession {
             .register_piece_availability(piece_index)?;
 
         // we may have become interested in peer
-        self.check_interest(sink, was_interested).await
+        self.update_interest(sink, was_interested, is_interested)
+            .await
     }
 
-    /// Checks whether we have become interested in the peer.
-    async fn check_interest(
+    /// Checks whether we have become or stopped being interested in the peer.
+    async fn update_interest(
         &mut self,
         sink: &mut SplitSink<Framed<TcpStream, PeerCodec>, Message>,
         was_interested: bool,
+        is_interested: bool,
     ) -> Result<()> {
         // we may have become interested in peer
-        if !was_interested && self.state.is_interested {
-            // send interested message to peer
+        if !was_interested && is_interested {
             peer_info!(self, "Became interested in peer");
-            sink.send(Message::Interested).await?;
-            self.state.uploaded_protocol_counter +=
+            self.ctx.uploaded_protocol_counter +=
                 MessageId::Interested.header_len();
+            self.ctx.update_state(|state| {
+                state.is_interested = is_interested;
+            });
+            // send interested message to peer
+            sink.send(Message::Interested).await?;
+        } else if was_interested && !is_interested {
+            peer_info!(self, "No longer interested in peer");
+            self.ctx.update_state(|state| {
+                state.is_interested = is_interested;
+            });
+            // TODO: do we need to do anything else here?
         }
 
         Ok(())

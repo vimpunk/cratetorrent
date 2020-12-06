@@ -1,20 +1,64 @@
-use std::{
-    sync::atomic::Ordering,
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
 
-use crate::{
-    avg::SlidingDurationAvg, counter::Counter, torrent::TorrentStats, Bitfield,
-    PeerId, BLOCK_LEN,
-};
+use crate::{avg::SlidingDurationAvg, counter::Counter, BLOCK_LEN};
 
-/// Holds and provides facilities to modify the state of a peer session.
-pub(super) struct SessionState {
-    /// Information about a peer that is set after a successful handshake.
-    pub peer: Option<PeerInfo>,
-
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct SessionState {
     /// The current state of the connection.
     pub connection: ConnectionState,
+    /// If we're choked, peer doesn't allow us to download pieces from them.
+    pub is_choked: bool,
+    /// If we're interested, peer has pieces that we don't have.
+    pub is_interested: bool,
+    /// If peer is choked, we don't allow them to download pieces from us.
+    pub is_peer_choked: bool,
+    /// If peer is interested in us, they mean to download pieces that we have.
+    pub is_peer_interested: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct RoundThroughput {
+    /// Counts the downloaded block bytes since the last session summary.
+    pub downloaded_payload_count: u64,
+    /// Counts the uploaded block bytes since the last session summary.
+    pub uploaded_payload_count: u64,
+    /// Counts the bytes received during protocol chatter since the last session
+    /// summary.
+    pub downloaded_protocol_count: u64,
+    /// Counts the bytes sent during protocol chatter since the last session
+    /// summary.
+    pub uploaded_protocol_count: u64,
+}
+
+/// Holds and provides facilities to modify the state of a peer session.
+#[derive(Default)]
+pub(super) struct SessionContext {
+    /// The session state.
+    pub state: SessionState,
+
+    /// Counts the downloaded block bytes.
+    pub downloaded_payload_counter: Counter,
+    /// Counts the uploaded block bytes.
+    pub uploaded_payload_counter: Counter,
+
+    /// Counts the bytes sent during protocol chatter.
+    pub downloaded_protocol_counter: Counter,
+    /// Counts the bytes received during protocol chatter.
+    pub uploaded_protocol_counter: Counter,
+
+    /// A flag to indicate whether since the previous session tick the state has
+    /// changed in a way that requires sending a new message to the torrent
+    /// task. If this is true, the peer session needs to send a state update
+    /// message to torrent.
+    ///
+    /// The fields whose update causes this flag to be set are the ones defined
+    /// before this field, that is:
+    /// - [`Self::state`]
+    /// - [`Self::downloaded_payload_counter`]
+    /// - [`Self::uploaded_payload_counter`]
+    /// - [`Self::downloaded_protocol_counter`]
+    /// - [`Self::uploaded_protocol_counter`]
+    pub changed: bool,
 
     /// Whether the session is in slow start.
     ///
@@ -24,24 +68,6 @@ pub(super) struct SessionState {
     /// increased by one every time one of our requests got served, doubling the
     /// queue size with each round trip.
     pub in_slow_start: bool,
-
-    /// If we're cohked, peer doesn't allow us to download pieces from them.
-    pub is_choked: bool,
-    /// If we're interested, peer has pieces that we don't have.
-    pub is_interested: bool,
-    /// If peer is choked, we don't allow them to download pieces from us.
-    pub is_peer_choked: bool,
-    /// If peer is interested in us, they mean to download pieces that we have.
-    pub is_peer_interested: bool,
-
-    /// Counts the bytes sent during protocol chatter.
-    pub downloaded_protocol_counter: Counter,
-    /// Counts the bytes received during protocol chatter.
-    pub uploaded_protocol_counter: Counter,
-    /// Counts the downloaded block bytes.
-    pub downloaded_payload_counter: Counter,
-    /// Counts the uploaded block bytes.
-    pub uploaded_payload_counter: Counter,
 
     /// The target request queue size is the number of block requests we keep
     /// outstanding to fully saturate the link.
@@ -83,7 +109,7 @@ pub(super) struct SessionState {
     pub timed_out_request_count: usize,
 }
 
-impl SessionState {
+impl SessionContext {
     /// When we check whether to exist slow start mode we want to allow for some
     /// error margin. This is because there may be "micro-fluctuations" in the
     /// download rate but per second but over a longer time the download rate
@@ -114,19 +140,37 @@ impl SessionState {
         self.timed_out_request_count += 1;
         self.request_timed_out = true;
         self.in_slow_start = false;
+
+        self.changed = true;
     }
 
     /// Prepares for requesting blocks.
     ///
     /// This should be called after being unchoked and becoming interested.
     pub fn prepare_for_download(&mut self) {
-        debug_assert!(self.is_interested);
-        debug_assert!(!self.is_choked);
+        debug_assert!(self.state.is_interested);
+        debug_assert!(!self.state.is_choked);
 
         self.in_slow_start = true;
         // reset the target request queue size, which will be adjusted as the
         // download progresses
         self.target_request_queue_len = Some(Self::START_REQUEST_QUEUE_LEN);
+    }
+
+    /// Convenience method to set any field in state and to set the [`Self::changed`]
+    /// flag.
+    #[inline(always)]
+    pub fn update_state(&mut self, f: impl FnOnce(&mut SessionState)) {
+        f(&mut self.state);
+        self.changed = true;
+    }
+
+    /// Convenience method to update connection state and to set the
+    /// [`Self::changed`] flag.
+    #[inline(always)]
+    pub fn set_connection_state(&mut self, c: ConnectionState) {
+        self.state.connection = c;
+        self.changed = true;
     }
 
     /// Updates various statistics around a block download.
@@ -177,17 +221,21 @@ impl SessionState {
                 );
             }
         }
+
+        self.changed = true;
     }
 
     pub fn update_upload_stats(&mut self, block_len: u32) {
         self.last_outgoing_block_time = Some(Instant::now());
         self.uploaded_payload_counter += block_len as u64;
+
+        self.changed = true;
     }
 
     /// Updates various statistics and session state.
     ///
     /// This should be called every second.
-    pub fn tick(&mut self, torrent_stats: &TorrentStats) {
+    pub fn tick(&mut self) {
         self.maybe_exit_slow_start();
 
         // NOTE: This has to be *after* `maybe_exit_slow_start` and *before*
@@ -204,23 +252,8 @@ impl SessionState {
             self.update_target_request_queue_len();
         }
 
-        // copy over this round's transfer tally to the torrent's stats
-        torrent_stats.downloaded_protocol_count.fetch_add(
-            self.downloaded_protocol_counter.total(),
-            Ordering::Relaxed,
-        );
-        torrent_stats.uploaded_protocol_count.fetch_add(
-            self.uploaded_protocol_counter.total(),
-            Ordering::Relaxed,
-        );
-        torrent_stats.downloaded_payload_count.fetch_add(
-            self.downloaded_payload_counter.total(),
-            Ordering::Relaxed,
-        );
-        torrent_stats.uploaded_payload_count.fetch_add(
-            self.uploaded_payload_counter.total(),
-            Ordering::Relaxed,
-        );
+        // reset the dirty flag
+        self.changed = false;
     }
 
     /// Checks if we need to exit slow start.
@@ -229,7 +262,7 @@ impl SessionState {
     /// significantly since the last round.
     fn maybe_exit_slow_start(&mut self) {
         // this only makes sense if we're not choked
-        if !self.is_choked
+        if !self.state.is_choked
             && self.in_slow_start
             && self.target_request_queue_len.is_some()
             && self.downloaded_payload_counter.round() > 0
@@ -297,40 +330,13 @@ impl Default for SessionState {
     /// interested in the other.
     fn default() -> Self {
         Self {
-            connection: ConnectionState::default(),
-
-            in_slow_start: false,
+            connection: Default::default(),
             is_choked: true,
             is_interested: false,
             is_peer_choked: true,
             is_peer_interested: false,
-            downloaded_protocol_counter: Counter::default(),
-
-            uploaded_protocol_counter: Counter::default(),
-            downloaded_payload_counter: Counter::default(),
-            uploaded_payload_counter: Counter::default(),
-
-            target_request_queue_len: None,
-            last_outgoing_request_time: None,
-            last_incoming_block_time: None,
-            last_outgoing_block_time: None,
-
-            peer: None,
-
-            avg_request_rtt: SlidingDurationAvg::default(),
-            request_timed_out: false,
-            timed_out_request_count: 0,
         }
     }
-}
-
-/// Information about the peer we're connected to.
-#[derive(Debug)]
-pub(super) struct PeerInfo {
-    /// Peer's 20 byte BitTorrent id.
-    pub id: PeerId,
-    /// All pieces peer has, updated when it announces to us a new piece.
-    pub pieces: Bitfield,
 }
 
 /// At any given time, a connection with a peer is in one of the below states.
@@ -368,7 +374,7 @@ mod tests {
 
     #[test]
     fn should_prepare_for_download() {
-        let mut s = SessionState::default();
+        let mut s = SessionContext::default();
 
         s.is_interested = true;
         s.is_choked = false;
@@ -381,7 +387,7 @@ mod tests {
 
     #[test]
     fn should_exit_slow_start() {
-        let mut s = SessionState::default();
+        let mut s = SessionContext::default();
 
         s.is_interested = true;
         s.is_choked = false;
@@ -420,7 +426,7 @@ mod tests {
 
     #[test]
     fn should_not_update_target_request_queue_in_slow_start() {
-        let mut s = SessionState::default();
+        let mut s = SessionContext::default();
 
         s.is_interested = true;
         s.is_choked = false;
@@ -440,7 +446,7 @@ mod tests {
 
     #[test]
     fn should_update_target_request_queue() {
-        let mut s = SessionState::default();
+        let mut s = SessionContext::default();
 
         s.is_interested = true;
         s.is_choked = false;
@@ -464,7 +470,7 @@ mod tests {
 
     #[test]
     fn should_update_download_stats_in_slow_start() {
-        let mut s = SessionState::default();
+        let mut s = SessionContext::default();
 
         s.is_interested = true;
         s.is_choked = false;
