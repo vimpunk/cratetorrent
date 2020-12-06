@@ -107,6 +107,10 @@ pub(super) struct SessionContext {
     pub avg_request_rtt: SlidingDurationAvg,
     pub request_timed_out: bool,
     pub timed_out_request_count: usize,
+
+    /// The time the BitTorrent connection was established (i.e. after
+    /// handshaking)
+    pub connected_time: Option<Instant>,
 }
 
 impl SessionContext {

@@ -319,6 +319,8 @@ impl PeerSession {
         &mut self,
         socket: Framed<TcpStream, PeerCodec>,
     ) -> Result<()> {
+        self.ctx.connected_time = Some(Instant::now());
+
         // split the sink and stream so that we can pass the sink while holding
         // a reference to the stream in the loop
         let (mut sink, stream) = socket.split();
@@ -344,8 +346,8 @@ impl PeerSession {
         // other parts of the engine
         loop {
             select! {
-                _instant = loop_timer.select_next_some() => {
-                    self.tick(&mut sink).await?;
+                now = loop_timer.select_next_some() => {
+                    self.tick(&mut sink, now.into_std()).await?;
                 }
                 msg = stream.select_next_some() => {
                     let msg = msg?;
@@ -401,9 +403,19 @@ impl PeerSession {
     async fn tick(
         &mut self,
         sink: &mut SplitSink<Framed<TcpStream, PeerCodec>, Message>,
+        now: Instant,
     ) -> Result<()> {
-        // TODO(https://github.com/mandreyel/cratetorrent/issues/43): check peer
-        // inactivity timeout
+        // if we haven't become interested in each other for too long,
+        // disconnect
+        if !self.ctx.state.is_interested
+            && !self.ctx.state.is_peer_interested
+            && now.saturating_duration_since(
+                self.ctx.connected_time.expect("not connected"),
+            ) >= INACTIVITY_TIMEOUT
+        {
+            peer_warn!(self, "Not interested in each other, disconnecting");
+            return Err(Error::InactivityTimeout);
+        }
 
         // resent requests if we have pending requests and more time has elapsed
         // since the last request than the current timeout value
@@ -1027,3 +1039,7 @@ impl PeerSession {
         }
     }
 }
+
+/// After this timeout if the peers haven't become intereseted in each other,
+/// the connection is severed.
+const INACTIVITY_TIMEOUT: Duration = Duration::from_secs(60);

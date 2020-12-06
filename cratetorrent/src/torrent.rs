@@ -530,7 +530,10 @@ impl Peer {
         task::spawn(async move { session.start_outbound().await });
         Self {
             chan: Some(chan),
-            state: Default::default(),
+            state: SessionState {
+                connection: ConnectionState::Connecting,
+                ..Default::default()
+            },
             side: Default::default(),
         }
     }
@@ -543,7 +546,10 @@ impl Peer {
         task::spawn(async move { session.start_inbound(socket).await });
         Self {
             chan: Some(chan),
-            state: Default::default(),
+            state: SessionState {
+                connection: ConnectionState::Handshaking,
+                ..Default::default()
+            },
             side: Default::default(),
         }
     }
