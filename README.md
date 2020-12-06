@@ -8,19 +8,22 @@ C++.
 
 ## Features
 
-Single download of a torrent with multiple peer connections, if given their
-addresses and the path to the torrent metainfo. Downloads are relatively fast
-with various throughput optimizations. However, there are no multiple torrents,
-no seeding, or any other feature you might expect from a full-fledged BitTorrent
-library.
+The following features are currently supported:
+- Single torrent downloads or uploads, with
+- an arbitrary number of peer connections.
+- Peers may be specified by their address, or if the torrent's metainfo file
+  contains trackers, peers are requested from these trackers.
+- Note, however, that the torrent state management is not up to par currently,
+  so downloads only really work when the seeds are specified.
 
-Features are continuously added, please see the [project
-milestones](https://github.com/mandreyel/cratetorrent/issues/26). Eventually, I
-hope to develop cratetorrent into a full-fledged BitTorrent engine library that
-can be used as the engine underneath torrent clients, so this means that
-features supported by popular clients (such as DHT, magnet links, BitTorrent
-protocol 2, stream encryption, and others) will be supported by cratetorrent
-too.
+Features are continuously added, see the [project
+milestones](https://github.com/mandreyel/cratetorrent/issues/26).
+
+Eventually, I hope to develop cratetorrent into a full-fledged BitTorrent engine
+library that can be used as the engine underneath torrent clients. This means
+that features supported by popular clients (such as DHT, magnet links,
+BitTorrent protocol 2, stream encryption, and others) will be supported by
+cratetorrent in the future.
 
 
 ## Project structure
@@ -75,30 +78,14 @@ path of the torrent file mapped into the container.
 
 ## Tests
 
-Cratetorrent is well tested to ensure correct functionality. It includes an
-exhaustive suite of unit tests verifying the correctness of each part of the
-code base, defined inline in the Rust source code.
-
-There is also a host of integration tests for verifying the functionality of the
-whole engine, ranging from testing the download of a single file through a
-single connection, through downloading a torrent from several peers, to seeding
-to other peers, stress testing, and others, added simultaneously with
-functionality added. To see more, please see the [integration tests
-folder](tests).
+Cratetorrent is well tested to ensure correct functionality. It includes:
+- an exhaustive suite of inline unit tests,
+- and integration tests of various downloads and uploads, in the [integration
+tests folder](tests).
 
 
 ## Design
 
-The design and development of cratetorrent is, as much as possible, documented
-in the [design doc](DESIGN.md). You will find (fairly low-level) information
-about the _current_ he architecture of the code and rationale for the design
-decisions that have been taken. It is continuously updated as development, as
-much as possible, is driven by well-defined feature specification and subsequent
-(code) design specification before any code is written.
-
-
-## Research
-
-While the thoughts behind the current state of the implementation are stored
-in the design doc, thoughts and research on future functionality is stored in
-the [research doc](RESEARCH.md).
+The cratetorrent design is documented in the [design doc](DESIGN.md). This
+mostly concerns developers of cratetorrent, as it contains fairly low-level
+descriptions.

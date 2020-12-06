@@ -29,7 +29,7 @@ impl fmt::Display for NewTorrentError {
             Self::AlreadyExists => {
                 write!(fmt, "disk torrent entry already exists")
             }
-            Self::Io(e) => write!(fmt, "{}", e),
+            Self::Io(e) => e.fmt(fmt),
         }
     }
 }

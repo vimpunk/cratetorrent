@@ -131,7 +131,22 @@ a public method to start a torrent until completion.
   the files it needs to download, the destination directory, and others.
 - Torrent tick: periodically loops through all its peer connections and performs
   actions like stats collections, later choking/unchoking, resume state saving,
-  and others.
+  requesting peers from tracker(s) if needed, and others.
+
+### Trackers
+
+Currently HTTP trackers are supported. These are used to request peers to
+download from, as well as to announce our download or upload statistics.
+
+This is handled in torrent's event loop. The tracker has an interval in which we
+are allowed to request peers to not overwhelm the tracker, which may only be
+overridden if the torrent has no peers to download from.
+
+Each tracker HTTP request runs asynchronously and is polled by the torrent
+event loop's select call.
+
+Periodically each torrent also sends progress updates to the tracker. The
+periodicity is defined by the tracker, but it may be configurable in the future.
 
 ### Peer sessions
 

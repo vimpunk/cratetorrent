@@ -1,16 +1,11 @@
 use std::{convert::From, fmt};
 
-pub use {
-    serde_bencode::Error as BencodeError,
-    tokio::{io::Error as IoError, sync::mpsc::error::SendError},
-};
+pub use tokio::{io::Error as IoError, sync::mpsc::error::SendError};
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 #[derive(Debug)]
 pub enum Error {
-    /// Holds bencode serialization or deserialization related errors.
-    Bencode(BencodeError),
     /// The channel on which some component in engine was listening or sending
     /// died.
     Channel,
@@ -25,18 +20,12 @@ pub enum Error {
     // TODO: consider adding more variations (path exists, doesn't exist,
     // permission issues)
     InvalidDownloadPath,
-    /// The torrent metainfo is not valid.
-    InvalidMetainfo,
     /// The torrent ID did not correspond to any entry.
     InvalidTorrentId,
     /// Peer's torrent info hash did not match ours.
     InvalidPeerInfoHash,
     /// The piece index was larger than the number of pieces in torrent.
     InvalidPieceIndex,
-    /// The chain of piece hashes in the torrent metainfo file was not
-    /// a multiple of 20, or is otherwise invalid and thus the torrent could not
-    /// be started.
-    InvalidPieces,
     /// The bitfield message was not sent after the handshake. According to the
     /// protocol, it should only be accepted after the handshake and when
     /// received at any other time, connection is severed.
@@ -49,8 +38,8 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         use Error::*;
         match self {
-            Bencode(e) => write!(f, "{}", e),
-            Io(e) => write!(f, "{}", e),
+            Io(e) => e.fmt(f),
+            // TODO: implement display properly
             _ => write!(f, "{:?}", *self),
         }
     }
@@ -60,7 +49,6 @@ impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         use Error::*;
         match self {
-            Bencode(e) => Some(e),
             Io(e) => Some(e),
             _ => None,
         }
@@ -78,11 +66,5 @@ impl From<IoError> for Error {
 impl<T> From<SendError<T>> for Error {
     fn from(_: SendError<T>) -> Self {
         Self::Channel
-    }
-}
-
-impl From<BencodeError> for Error {
-    fn from(e: BencodeError) -> Self {
-        Self::Bencode(e)
     }
 }

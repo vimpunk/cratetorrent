@@ -1007,6 +1007,6 @@ mod tests {
             .map(|b| b.as_slice().to_vec())
             .flatten()
             .collect();
-        assert_eq!(actual, vec![]);
+        assert!(actual.is_empty());
     }
 }

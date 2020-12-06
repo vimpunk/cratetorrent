@@ -1,7 +1,11 @@
-use std::time::{Duration, Instant};
+use std::{
+    sync::atomic::Ordering,
+    time::{Duration, Instant},
+};
 
 use crate::{
-    avg::SlidingDurationAvg, counter::Counter, Bitfield, PeerId, BLOCK_LEN,
+    avg::SlidingDurationAvg, counter::Counter, torrent::TorrentStats, Bitfield,
+    PeerId, BLOCK_LEN,
 };
 
 /// Holds and provides facilities to modify the state of a peer session.
@@ -183,7 +187,7 @@ impl SessionState {
     /// Updates various statistics and session state.
     ///
     /// This should be called every second.
-    pub fn tick(&mut self) {
+    pub fn tick(&mut self, torrent_stats: &TorrentStats) {
         self.maybe_exit_slow_start();
 
         // NOTE: This has to be *after* `maybe_exit_slow_start` and *before*
@@ -199,9 +203,27 @@ impl SessionState {
         if !self.request_timed_out {
             self.update_target_request_queue_len();
         }
+
+        // copy over this round's transfer tally to the torrent's stats
+        torrent_stats.downloaded_protocol_count.fetch_add(
+            self.downloaded_protocol_counter.total(),
+            Ordering::Relaxed,
+        );
+        torrent_stats.uploaded_protocol_count.fetch_add(
+            self.uploaded_protocol_counter.total(),
+            Ordering::Relaxed,
+        );
+        torrent_stats.downloaded_payload_count.fetch_add(
+            self.downloaded_payload_counter.total(),
+            Ordering::Relaxed,
+        );
+        torrent_stats.uploaded_payload_count.fetch_add(
+            self.uploaded_payload_counter.total(),
+            Ordering::Relaxed,
+        );
     }
 
-    /// Check if we need to exit slow start.
+    /// Checks if we need to exit slow start.
     ///
     /// We leave slow start if the download rate has not increased
     /// significantly since the last round.

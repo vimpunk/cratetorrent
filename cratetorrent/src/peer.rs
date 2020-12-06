@@ -400,9 +400,9 @@ impl PeerSession {
         // keep-alive
 
         // update status
-        self.state.tick();
+        self.state.tick(&self.torrent.stats);
 
-        peer_info!(
+        peer_trace!(
             self,
             "Info: download rate: {} b/s (peak: {} b/s, total: {} b) \
             queue: {}, rtt: {} ms (~{} s)",
@@ -443,6 +443,7 @@ impl PeerSession {
         bitfield.resize(self.torrent.storage.piece_count, false);
 
         // register peer's pieces with piece picker and determine interest in it
+        let was_interested = self.state.is_interested;
         self.state.is_interested = self
             .torrent
             .piece_picker
@@ -455,15 +456,7 @@ impl PeerSession {
         }
 
         // we may have become interested in peer
-        if self.state.is_interested {
-            // send interested message to peer
-            peer_info!(self, "Interested in peer");
-            sink.send(Message::Interested).await?;
-            self.state.uploaded_protocol_counter +=
-                MessageId::Interested.header_len();
-        }
-
-        Ok(())
+        self.check_interest(sink, was_interested).await
     }
 
     /// Handles messages from peer that are expected in the `Connected` state.
@@ -547,7 +540,7 @@ impl PeerSession {
                 self.handle_request_msg(block_info).await?;
             }
             Message::Have { piece_index } => {
-                self.handle_have_msg(piece_index).await?;
+                self.handle_have_msg(sink, piece_index).await?;
             }
             Message::Cancel(block_info) => {
                 peer_info!(
@@ -839,7 +832,11 @@ impl PeerSession {
 
     /// Handles the announcement of a new piece that peer has. This may cause us
     /// to become interested in peer and start making requests.
-    async fn handle_have_msg(&mut self, piece_index: PieceIndex) -> Result<()> {
+    async fn handle_have_msg(
+        &mut self,
+        sink: &mut SplitSink<Framed<TcpStream, PeerCodec>, Message>,
+        piece_index: PieceIndex,
+    ) -> Result<()> {
         peer_info!(self, "Received 'have' message for piece {}", piece_index);
 
         // validate piece index
@@ -864,12 +861,33 @@ impl PeerSession {
         }
 
         // need to recalculate interest with each received piece
+        let was_interested = self.state.is_interested;
         self.state.is_interested = self
             .torrent
             .piece_picker
             .write()
             .await
             .register_piece_availability(piece_index)?;
+
+        // we may have become interested in peer
+        self.check_interest(sink, was_interested).await
+    }
+
+    /// Checks whether we have become interested in the peer.
+    async fn check_interest(
+        &mut self,
+        sink: &mut SplitSink<Framed<TcpStream, PeerCodec>, Message>,
+        was_interested: bool,
+    ) -> Result<()> {
+        // we may have become interested in peer
+        if !was_interested && self.state.is_interested {
+            // send interested message to peer
+            peer_info!(self, "Became interested in peer");
+            sink.send(Message::Interested).await?;
+            self.state.uploaded_protocol_counter +=
+                MessageId::Interested.header_len();
+        }
+
         Ok(())
     }
 
