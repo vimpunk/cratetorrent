@@ -74,6 +74,8 @@ pub(crate) struct PieceCompletion {
 pub(crate) struct Torrent {
     /// The peers in this torrent.
     peers: HashMap<SocketAddr, Peer>,
+    /// The peers returned by tracker to which we can connect.
+    available_peers: Vec<SocketAddr>,
     /// Information that is shared with peer sessions.
     ctx: Arc<TorrentContext>,
     /// The handle to the disk IO task, used to issue commands on it. A copy of
@@ -139,6 +141,7 @@ impl Torrent {
 
         Self {
             peers: HashMap::new(),
+            available_peers: Vec::new(),
             disk,
             ctx: Arc::new(TorrentContext {
                 id,
@@ -167,18 +170,10 @@ impl Torrent {
     pub async fn start(&mut self, peers: &[SocketAddr]) -> Result<()> {
         log::info!("Starting torrent");
 
+        self.available_peers.extend_from_slice(peers);
+
         // record the torrent starttime
         self.start_time = Some(Instant::now());
-
-        // start all seed peer sessions, if any
-        for addr in peers.iter().cloned() {
-            let (session, chan) = PeerSession::new(
-                Arc::clone(&self.ctx),
-                self.disk.clone(),
-                addr,
-            );
-            self.peers.insert(addr, Peer::start_outbound(session, chan));
-        }
 
         // TODO: if the torrent is a seed, don't send the started event, just an
         // empty announce (verify this is the case)
@@ -259,6 +254,11 @@ impl Torrent {
         self.run_duration += elapsed_since_last_tick;
         *prev_tick_time = Some(now);
 
+        // check if we can connect some peers
+        // NOTE: do this before announcing as we don't want to block new
+        // connections with the potentially long running announce requests
+        self.connect_peers();
+
         // check if we need to announce to some trackers
         let event = None;
         self.announce_to_trackers(now, event).await?;
@@ -266,6 +266,23 @@ impl Torrent {
         log::debug!("Info: elapsed: {} s", self.run_duration.as_secs());
 
         Ok(())
+    }
+
+    /// Attempts to connect available peers, if we have any.
+    fn connect_peers(&mut self) {
+        let connect_count = MAX_CONNECTED_PEER_COUNT
+            .saturating_sub(self.peers.len())
+            .min(self.available_peers.len());
+        log::debug!("Connecting {} peer(s)", connect_count);
+        for addr in self.available_peers.drain(0..connect_count) {
+            log::info!("Connecting to peer {}", addr);
+            let (session, chan) = PeerSession::new(
+                Arc::clone(&self.ctx),
+                self.disk.clone(),
+                addr,
+            );
+            self.peers.insert(addr, Peer::start_outbound(session, chan));
+        }
     }
 
     /// Chacks whether we need to announce to any trackers of if we need to request
@@ -280,20 +297,17 @@ impl Torrent {
         let downloaded = self.downloaded_payload_counter.total();
         let left = self.ctx.storage.download_len - downloaded;
 
-        /// The minimum number of peers we want to keep in torrent at all times.
-        /// This will be configurable later.
-        const MIN_PEER_COUNT: usize = 10;
-
         for tracker in self.trackers.iter_mut() {
             // Check if the torrent's peer count has fallen below the minimum.
             // But don't request new peers otherwise or if we're about to stop
             // torrent.
-            let needed_peer_count = if self.peers.len() >= MIN_PEER_COUNT
+            let needed_peer_count = if self.peers.len()
+                >= MIN_REQUESTED_PEER_COUNT
                 || event == Some(Event::Stopped)
             {
                 None
             } else {
-                Some(MIN_PEER_COUNT - self.peers.len())
+                Some(MIN_REQUESTED_PEER_COUNT - self.peers.len())
             };
 
             // we can override the normal annoucne interval if we need peers or
@@ -316,7 +330,9 @@ impl Torrent {
                 };
                 // TODO: We probably don't want to block the torrent event loop
                 // here waiting on the tracker response. Instead, poll the
-                // future in the event loop select call.
+                // future in the event loop select call, or spawn the tracker
+                // announce on a separate task and return the result as
+                // an mpsc message.
                 match tracker.client.announce(params).await {
                     Ok(resp) => {
                         log::info!(
@@ -375,21 +391,7 @@ impl Torrent {
                                 tracker.client,
                                 resp.peers
                             );
-                            // FIXME: only connect to a single peer for
-                            // easier debugging purposes
-                            if self.peers.is_empty() {
-                                for addr in resp.peers.into_iter().take(1) {
-                                    let (session, chan) = PeerSession::new(
-                                        Arc::clone(&self.ctx),
-                                        self.disk.clone(),
-                                        addr,
-                                    );
-                                    self.peers.insert(
-                                        addr,
-                                        Peer::start_outbound(session, chan),
-                                    );
-                                }
-                            }
+                            self.available_peers.extend(resp.peers.into_iter());
                         }
                     }
                     Err(e) => {
@@ -469,7 +471,7 @@ impl Torrent {
                             // download loop
                             if missing_piece_count == 0 {
                                 // TODO: return a global alert here instead and
-                                // let the engine decide whether to stop the
+                                // let the user decide whether to stop the
                                 // torrent
                                 log::info!(
                                     "Finished torrent download, exiting"
@@ -641,3 +643,10 @@ impl TrackerEntry {
         }
     }
 }
+
+/// The minimum number of peers we want to keep in torrent at all times.
+/// This will be configurable later.
+const MIN_REQUESTED_PEER_COUNT: usize = 10;
+/// The max number of connected peers torrent should have.
+// TODO: make this configurable
+const MAX_CONNECTED_PEER_COUNT: usize = 50;

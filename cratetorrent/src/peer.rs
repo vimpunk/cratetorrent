@@ -290,9 +290,23 @@ impl PeerSession {
                     info: self.session_info(),
                 })?;
             }
+        } else {
+            peer_error!(self, "No handshake received");
+            self.ctx.set_connection_state(ConnectionState::Disconnected);
+            self.torrent.chan.send(torrent::Message::PeerState {
+                addr: self.peer.addr,
+                info: self.session_info(),
+            })?;
         }
-        // TODO(https://github.com/mandreyel/cratetorrent/issues/20): handle
-        // not recieving anything with an error rather than an Ok(())
+
+        // we exited cleanly as a result of a shutdown, but we still need to send
+        // a state update message to torrent to actualize possible download
+        // stats changes
+        self.ctx.set_connection_state(ConnectionState::Disconnected);
+        self.torrent.chan.send(torrent::Message::PeerState {
+            addr: self.peer.addr,
+            info: self.session_info(),
+        })?;
 
         Ok(())
     }
