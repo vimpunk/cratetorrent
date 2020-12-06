@@ -461,7 +461,7 @@ mod tests {
             8:completei5e\
             10:incompletei3e\
             8:intervali15e\
-            12:min_intervali10e",
+            12:min intervali10e",
         );
         // insert peers field into dict
         encoded_resp.extend_from_slice(b"5:peers");
