@@ -2,6 +2,7 @@ use std::time::{Duration, Instant};
 
 use crate::{avg::SlidingDurationAvg, counter::Counter, BLOCK_LEN};
 
+/// Contains the state of both sides of the connection.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct SessionState {
     /// The current state of the connection.
@@ -16,6 +17,21 @@ pub(crate) struct SessionState {
     pub is_peer_interested: bool,
 }
 
+impl Default for SessionState {
+    /// By default, both sides of the connection start off as choked and not
+    /// interested in the other.
+    fn default() -> Self {
+        Self {
+            connection: Default::default(),
+            is_choked: true,
+            is_interested: false,
+            is_peer_choked: true,
+            is_peer_interested: false,
+        }
+    }
+}
+
+/// The various throughput stats of a single round (roughly one second).
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct RoundThroughput {
     /// Counts the downloaded block bytes since the last session summary.
@@ -124,8 +140,11 @@ impl SessionContext {
     /// downloading.
     const START_REQUEST_QUEUE_LEN: usize = 4;
 
-    /// The smallest timeout value we can give a peer. This is so that we don't
-    const MIN_TIMEOUT_S: u64 = 2;
+    /// The smallest timeout value we can give a peer. Very fast peers will have
+    /// an average round-trip-times, so a slight deviation would punish them
+    /// unnecessarily. Therefore we use a somewhat larger minimum threshold for
+    /// timeouts.
+    const MIN_TIMEOUT: Duration = Duration::from_secs(2);
 
     /// Returns the current request timeout value, based on the running average
     /// of past request round trip times.
@@ -133,7 +152,7 @@ impl SessionContext {
         // we allow up to four times the average deviation from the mean
         let t =
             self.avg_request_rtt.mean() + 4 * self.avg_request_rtt.deviation();
-        t.max(Duration::from_secs(Self::MIN_TIMEOUT_S))
+        t.max(Self::MIN_TIMEOUT)
     }
 
     /// Updates state to reflect that peer was timed out.
@@ -325,20 +344,6 @@ impl SessionContext {
         .iter_mut()
         {
             counter.reset();
-        }
-    }
-}
-
-impl Default for SessionState {
-    /// By default, both sides of the connection start off as choked and not
-    /// interested in the other.
-    fn default() -> Self {
-        Self {
-            connection: Default::default(),
-            is_choked: true,
-            is_interested: false,
-            is_peer_choked: true,
-            is_peer_interested: false,
         }
     }
 }

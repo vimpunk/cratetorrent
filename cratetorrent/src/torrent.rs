@@ -90,6 +90,9 @@ pub(crate) struct Torrent {
     /// The trackers we can announce to.
     trackers: Vec<TrackerEntry>,
 
+    /// The address on which torrent should listen for new peers.
+    listen_addr: SocketAddr,
+
     /// The time the torrent was first started.
     start_time: Option<Instant>,
     /// The total time the torrent has been running.
@@ -110,9 +113,6 @@ pub(crate) struct Torrent {
     downloaded_protocol_counter: Counter,
     /// Counts the total bytes received during protocol chatter in torrent.
     uploaded_protocol_counter: Counter,
-
-    /// The address on which torrent should listen for new peers.
-    listen_addr: SocketAddr,
 }
 
 impl Torrent {
@@ -264,6 +264,17 @@ impl Torrent {
         self.announce_to_trackers(now, event).await?;
 
         log::debug!("Info: elapsed: {} s", self.run_duration.as_secs());
+
+        for counter in [
+            &mut self.downloaded_payload_counter,
+            &mut self.uploaded_payload_counter,
+            &mut self.downloaded_protocol_counter,
+            &mut self.uploaded_protocol_counter,
+        ]
+        .iter_mut()
+        {
+            counter.reset();
+        }
 
         Ok(())
     }
