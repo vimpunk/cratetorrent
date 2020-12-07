@@ -284,6 +284,11 @@ impl Torrent {
         let connect_count = MAX_CONNECTED_PEER_COUNT
             .saturating_sub(self.peers.len())
             .min(self.available_peers.len());
+        if connect_count == 0 {
+            log::trace!("Cannot connect to peers");
+            return;
+        }
+
         log::debug!("Connecting {} peer(s)", connect_count);
         for addr in self.available_peers.drain(0..connect_count) {
             log::info!("Connecting to peer {}", addr);
@@ -308,23 +313,29 @@ impl Torrent {
         let downloaded = self.downloaded_payload_counter.total();
         let left = self.ctx.storage.download_len - downloaded;
 
-        for tracker in self.trackers.iter_mut() {
+        // skip trackers that errored too often
+        // TODO: introduce a retry timeout
+        for tracker in self
+            .trackers
+            .iter_mut()
+            .filter(|t| t.error_count < TRACKER_ERROR_THRESHOLD)
+        {
             // Check if the torrent's peer count has fallen below the minimum.
             // But don't request new peers otherwise or if we're about to stop
             // torrent.
-            let needed_peer_count = if self.peers.len()
-                >= MIN_REQUESTED_PEER_COUNT
+            let peer_count = self.peers.len() + self.available_peers.len();
+            let needed_peer_count = if peer_count >= MIN_REQUESTED_PEER_COUNT
                 || event == Some(Event::Stopped)
             {
                 None
             } else {
-                Some(MIN_REQUESTED_PEER_COUNT - self.peers.len())
+                Some(MIN_REQUESTED_PEER_COUNT - peer_count)
             };
 
             // we can override the normal annoucne interval if we need peers or
             // if we have an event to announce
             if event.is_some()
-                || (needed_peer_count.is_some() && tracker.can_announce(now))
+                || (needed_peer_count > Some(0) && tracker.can_announce(now))
                 || tracker.should_announce(now)
             {
                 let params = Announce {
@@ -351,7 +362,6 @@ impl Torrent {
                             tracker.client,
                             resp
                         );
-                        tracker.last_announce_time = Some(now);
                         if let Some(tracker_id) = resp.tracker_id {
                             tracker.id = Some(tracker_id);
                         }
@@ -411,8 +421,10 @@ impl Torrent {
                             tracker.client,
                             e
                         );
+                        tracker.error_count += 1;
                     }
                 }
+                tracker.last_announce_time = Some(now);
             }
         }
 
@@ -621,6 +633,9 @@ struct TrackerEntry {
     /// The absolute minimum interval at which we can contact tracker.
     /// This is set after the first announce request.
     min_interval: Option<Duration>,
+    /// Each time we fail to requet from tracker, this counter is incremented.
+    /// If it fails too often, we stop requesting from tracker.
+    error_count: usize,
 }
 
 impl TrackerEntry {
@@ -631,6 +646,7 @@ impl TrackerEntry {
             last_announce_time: None,
             interval: None,
             min_interval: None,
+            error_count: 0,
         }
     }
 
@@ -641,7 +657,9 @@ impl TrackerEntry {
     /// announce frequency settings.
     fn should_announce(&self, t: Instant) -> bool {
         if let Some(last_announce_time) = self.last_announce_time {
-            last_announce_time + self.interval.unwrap_or_default() > t
+            let min_next_announce_time =
+                last_announce_time + self.interval.unwrap_or_default();
+            t > min_next_announce_time
         } else {
             true
         }
@@ -654,7 +672,9 @@ impl TrackerEntry {
     /// announce time first.
     fn can_announce(&self, t: Instant) -> bool {
         if let Some(last_announce_time) = self.last_announce_time {
-            last_announce_time + self.min_interval.unwrap_or_default() >= t
+            let min_next_announce_time =
+                last_announce_time + self.min_interval.unwrap_or_default();
+            t > min_next_announce_time
         } else {
             true
         }
@@ -666,4 +686,7 @@ impl TrackerEntry {
 const MIN_REQUESTED_PEER_COUNT: usize = 10;
 /// The max number of connected peers torrent should have.
 // TODO: make this configurable
-const MAX_CONNECTED_PEER_COUNT: usize = 50;
+const MAX_CONNECTED_PEER_COUNT: usize = 1;
+
+/// After this many attempts, we stop announcing to tracker.
+const TRACKER_ERROR_THRESHOLD: usize = 10;

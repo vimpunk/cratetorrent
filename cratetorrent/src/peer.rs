@@ -576,8 +576,17 @@ impl PeerSession {
             .await
             .register_availability(&bitfield)?;
         self.peer.pieces = bitfield;
-        if self.peer.pieces.all() {
+        let have_count = self.peer.pieces.count_ones();
+        if have_count == self.torrent.storage.piece_count {
+            peer_info!(self, "Peer is a seed");
             self.peer.side = Side::Seed;
+        } else {
+            peer_info!(
+                self,
+                "Peer has {}/{} pieces",
+                have_count,
+                self.torrent.storage.piece_count
+            );
         }
 
         // we may have become interested in peer
