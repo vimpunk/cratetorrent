@@ -263,7 +263,19 @@ impl Torrent {
         let event = None;
         self.announce_to_trackers(now, event).await?;
 
-        log::debug!("Info: elapsed: {} s", self.run_duration.as_secs());
+        log::debug!(
+            "Info: \
+            elapsed {} s, \
+            download: {} b/s (peak: {} b/s, total: {} b) \
+            upload: {} b/s (peak: {} b/s, total: {} b)",
+            self.run_duration.as_secs(),
+            self.downloaded_payload_counter.avg(),
+            self.downloaded_payload_counter.peak(),
+            self.downloaded_payload_counter.total(),
+            self.uploaded_payload_counter.avg(),
+            self.uploaded_payload_counter.peak(),
+            self.uploaded_payload_counter.total(),
+        );
 
         for counter in [
             &mut self.downloaded_payload_counter,
@@ -329,7 +341,13 @@ impl Torrent {
             {
                 None
             } else {
-                Some(MIN_REQUESTED_PEER_COUNT - peer_count)
+                debug_assert!(MAX_CONNECTED_PEER_COUNT >= peer_count);
+                let needed = MAX_CONNECTED_PEER_COUNT - peer_count;
+                // Download at least this many peers, even if we don't need as
+                // much. This is because later we may be able to connect to more
+                // peers and in that case we don't want to wait till the next
+                // tracker request.
+                Some(MIN_REQUESTED_PEER_COUNT.min(needed))
             };
 
             // we can override the normal annoucne interval if we need peers or
@@ -497,8 +515,18 @@ impl Torrent {
                                 // let the user decide whether to stop the
                                 // torrent
                                 log::info!(
-                                    "Finished torrent download, exiting"
+                                    "Finished torrent download, exiting. \
+                                    Peak download rate: {} b/s",
+                                    self.downloaded_payload_counter.peak(),
                                 );
+
+                                // tell trackers we've finished
+                                self.announce_to_trackers(
+                                    Instant::now(),
+                                    Some(Event::Completed),
+                                )
+                                .await?;
+
                                 return Ok(true);
                             }
                         } else {
@@ -686,7 +714,7 @@ impl TrackerEntry {
 const MIN_REQUESTED_PEER_COUNT: usize = 10;
 /// The max number of connected peers torrent should have.
 // TODO: make this configurable
-const MAX_CONNECTED_PEER_COUNT: usize = 1;
+const MAX_CONNECTED_PEER_COUNT: usize = 50;
 
 /// After this many attempts, we stop announcing to tracker.
 const TRACKER_ERROR_THRESHOLD: usize = 10;

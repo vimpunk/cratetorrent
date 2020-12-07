@@ -501,11 +501,16 @@ impl PeerSession {
 
         peer_trace!(
             self,
-            "Info: download rate: {} b/s (peak: {} b/s, total: {} b) \
+            "Info: \
+            download: {} b/s (peak: {} b/s, total: {} b) \
+            upload: {} b/s (peak: {} b/s, total: {} b) \
             queue: {}, rtt: {} ms (~{} s)",
             self.ctx.downloaded_payload_counter.avg(),
             self.ctx.downloaded_payload_counter.peak(),
             self.ctx.downloaded_payload_counter.total(),
+            self.ctx.uploaded_payload_counter.avg(),
+            self.ctx.uploaded_payload_counter.peak(),
+            self.ctx.uploaded_payload_counter.total(),
             self.ctx.target_request_queue_len.unwrap_or(0),
             self.ctx.avg_request_rtt.mean().as_millis(),
             self.ctx.avg_request_rtt.mean().as_secs(),
@@ -568,7 +573,6 @@ impl PeerSession {
         bitfield.resize(self.torrent.storage.piece_count, false);
 
         // register peer's pieces with piece picker and determine interest in it
-        let was_interested = self.ctx.state.is_interested;
         let is_interested = self
             .torrent
             .piece_picker
@@ -576,22 +580,22 @@ impl PeerSession {
             .await
             .register_availability(&bitfield)?;
         self.peer.pieces = bitfield;
-        let have_count = self.peer.pieces.count_ones();
-        if have_count == self.torrent.storage.piece_count {
-            peer_info!(self, "Peer is a seed");
+        let peer_piece_count = self.peer.pieces.count_ones();
+        if peer_piece_count == self.torrent.storage.piece_count {
+            peer_info!(self, "Peer is a seed, interested: {}", is_interested);
             self.peer.side = Side::Seed;
         } else {
             peer_info!(
                 self,
-                "Peer has {}/{} pieces",
-                have_count,
-                self.torrent.storage.piece_count
+                "Peer has {}/{} pieces, interested: {}",
+                peer_piece_count,
+                self.torrent.storage.piece_count,
+                is_interested
             );
         }
 
         // we may have become interested in peer
-        self.update_interest(sink, was_interested, is_interested)
-            .await
+        self.update_interest(sink, is_interested).await
     }
 
     /// Handles messages from peer that are expected in the `Connected` state.
@@ -1001,7 +1005,6 @@ impl PeerSession {
         }
 
         // need to recalculate interest with each received piece
-        let was_interested = self.ctx.state.is_interested;
         let is_interested = self
             .torrent
             .piece_picker
@@ -1010,19 +1013,17 @@ impl PeerSession {
             .register_piece_availability(piece_index)?;
 
         // we may have become interested in peer
-        self.update_interest(sink, was_interested, is_interested)
-            .await
+        self.update_interest(sink, is_interested).await
     }
 
     /// Checks whether we have become or stopped being interested in the peer.
     async fn update_interest(
         &mut self,
         sink: &mut SplitSink<Framed<TcpStream, PeerCodec>, Message>,
-        was_interested: bool,
         is_interested: bool,
     ) -> Result<()> {
         // we may have become interested in peer
-        if !was_interested && is_interested {
+        if !self.ctx.state.is_interested && is_interested {
             peer_info!(self, "Became interested in peer");
             self.ctx.uploaded_protocol_counter +=
                 MessageId::Interested.header_len();
@@ -1031,7 +1032,7 @@ impl PeerSession {
             });
             // send interested message to peer
             sink.send(Message::Interested).await?;
-        } else if was_interested && !is_interested {
+        } else if self.ctx.state.is_interested && !is_interested {
             peer_info!(self, "No longer interested in peer");
             self.ctx.update_state(|state| {
                 state.is_interested = is_interested;

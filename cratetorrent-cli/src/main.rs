@@ -85,22 +85,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut client_id = [0; 20];
     client_id.copy_from_slice(CLIENT_ID.as_bytes());
 
-    if seeds.is_empty() {
-        cratetorrent::engine::seed_torrent(
-            client_id,
-            download_dir,
-            metainfo,
-            listen_addr,
-        )?;
-    } else {
-        cratetorrent::engine::download_torrent(
-            client_id,
-            download_dir,
-            metainfo,
-            listen_addr,
-            seeds,
-        )?;
-    }
+    cratetorrent::engine::download_torrent(
+        client_id,
+        download_dir,
+        metainfo,
+        listen_addr,
+        seeds,
+    )?;
 
     Ok(())
 }

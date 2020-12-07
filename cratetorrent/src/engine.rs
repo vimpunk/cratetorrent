@@ -20,11 +20,6 @@ pub fn download_torrent(
     listen_addr: SocketAddr,
     seeds: Vec<SocketAddr>,
 ) -> Result<()> {
-    if seeds.is_empty() {
-        log::warn!("List of seeds is empty, cannot download torrent");
-        return Ok(());
-    }
-
     let mut rt = Runtime::new()?;
     rt.block_on(start_engine(
         client_id,
