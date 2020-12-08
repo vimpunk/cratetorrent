@@ -542,6 +542,12 @@ impl Torrent {
                                 "Received invalid piece {}",
                                 piece.index
                             );
+                            // let peers download this piece again
+                            self.ctx
+                                .piece_picker
+                                .write()
+                                .await
+                                .dropped_piece(piece.index);
                         }
                     }
                     Err(e) => {

@@ -115,6 +115,18 @@ impl PiecePicker {
         // again)
         self.pieces[index].is_pending = false;
     }
+
+    /// Tells the piece picker that we no longer have the piece.
+    pub fn dropped_piece(&mut self, index: PieceIndex) {
+        log::trace!("Dropping piece {}", index);
+
+        // we assert here as this method is only called by internal methods on
+        // piece completion, meaning the piece must exist (we can't download an
+        // invalid piece)
+        debug_assert!(index < self.own_pieces.len());
+
+        self.own_pieces.set(index, false);
+    }
 }
 
 /// Metadata about a piece relevant for the piece picker.
