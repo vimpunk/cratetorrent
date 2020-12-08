@@ -538,8 +538,10 @@ impl Torrent {
                             // TODO(https://github.com/mandreyel/cratetorrent/issues/61):
                             // Implement parole mode for the peers that sent
                             // corrupt data.
-                            log::warn!("Received invalid piece, aborting");
-                            return Ok(true);
+                            log::warn!(
+                                "Received invalid piece {}",
+                                piece.index
+                            );
                         }
                     }
                     Err(e) => {
