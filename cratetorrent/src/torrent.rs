@@ -502,9 +502,14 @@ impl Torrent {
                             // tell all peers that we got a new piece
                             for peer in self.peers.values() {
                                 if let Some(chan) = &peer.chan {
+                                    // this message may be sent after the peer
+                                    // session had already stopped but before
+                                    // the torrent tick ran and got a chance to
+                                    // reap the dead session
                                     chan.send(peer::Command::NewPiece(
                                         piece.index,
-                                    ))?;
+                                    ))
+                                    .ok();
                                 }
                             }
 
