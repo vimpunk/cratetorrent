@@ -14,10 +14,15 @@ The following features are currently supported:
 - Peers may be specified by their address, or if the torrent's metainfo file
   contains trackers, peers are requested from these trackers.
 
-An iso of Ubuntu 20.04 LTS (around 2.8 GB) is downloaded in about
-5 minutes at an average download rate of 10 MPbs on my fairly slow internet
-connection, which indicates that performance is acceptably good right out of the
-gate. More optimizations are expected.
+On my fairly slow internet connection, Ubuntu 20.04 LTS (around 2.8 GB) is
+downloaded in about 5 minutes at an average download rate of 10 MPbs, which
+indicates that performance is acceptably good right out of the gate. More
+optimizations are expected.
+
+*Note*, however, that there are still some stability issues. E.g. sometimes some
+peers get into a request-timeout loop. Therefore in some cases downloads
+essentially get stuck. For reasons like this this library cannot be considered
+done, even if core features are supported.
 
 Features are continuously added, see the [project
 milestones](https://github.com/mandreyel/cratetorrent/issues/26).
