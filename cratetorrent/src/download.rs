@@ -1,13 +1,13 @@
 use crate::{block_count, block_len, BlockInfo, PieceIndex, BLOCK_LEN};
 
-#[derive(Clone, Copy, Debug)]
-enum Block {
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum BlockStatus {
     Free,
     Requested,
     Received,
 }
 
-impl Default for Block {
+impl Default for BlockStatus {
     fn default() -> Self {
         Self::Free
     }
@@ -15,6 +15,8 @@ impl Default for Block {
 
 /// Tracks the completion of an ongoing piece download and is used to request
 /// missing blocks in piece.
+// TODO: remove
+#[derive(Debug)]
 pub(crate) struct PieceDownload {
     /// The piece's index.
     index: PieceIndex,
@@ -22,7 +24,7 @@ pub(crate) struct PieceDownload {
     len: u32,
     /// The blocks in this piece, tracking which are downloaded, pending, or
     /// received. The vec is preallocated to the number of blocks in piece.
-    blocks: Vec<Block>,
+    blocks: Vec<BlockStatus>,
 }
 
 impl PieceDownload {
@@ -58,13 +60,13 @@ impl PieceDownload {
             }
 
             // only pick block if it's free
-            if let Block::Free = block {
+            if let BlockStatus::Free = block {
                 blocks.push(BlockInfo {
                     piece_index: self.index,
                     offset: i as u32 * BLOCK_LEN,
                     len: block_len(self.len, i),
                 });
-                *block = Block::Requested;
+                *block = BlockStatus::Requested;
                 picked += 1;
             }
 
@@ -85,7 +87,10 @@ impl PieceDownload {
     }
 
     /// Marks the given block as received so that it is not picked again.
-    pub fn received_block(&mut self, block: &BlockInfo) {
+    ///
+    /// The previous status of the block is returned. This can be used to check
+    /// whether the block has already been downloaded, for example.
+    pub fn received_block(&mut self, block: &BlockInfo) -> BlockStatus {
         log::trace!("Received piece {} block {:?}", self.index, block);
 
         // TODO(https://github.com/mandreyel/cratetorrent/issues/16): this
@@ -98,17 +103,28 @@ impl PieceDownload {
         // we should only receive blocks that we have requested before
         debug_assert!(matches!(
             self.blocks[block.index_in_piece()],
-            Block::Requested
+            BlockStatus::Requested
         ));
-
-        self.blocks[block.index_in_piece()] = Block::Received;
 
         // TODO(https://github.com/mandreyel/cratetorrent/issues/9): record
         // rount trip time for this block
+
+        let block = &mut self.blocks[block.index_in_piece()];
+        let prev_status = *block;
+        *block = BlockStatus::Received;
+        prev_status
+    }
+
+    /// Marks all blocks free to be requested again.
+    pub fn free_all_blocks(&mut self) {
+        log::trace!("Canceling all blocks in piece {}", self.index);
+        for block in self.blocks.iter_mut() {
+            *block = BlockStatus::Free;
+        }
     }
 
     /// Marks a previously requested block free to request again.
-    pub fn cancel_request(&mut self, block: &BlockInfo) {
+    pub fn free_block(&mut self, block: &BlockInfo) {
         log::trace!(
             "Canceling request for piece {} block {:?}",
             self.index,
@@ -122,23 +138,7 @@ impl PieceDownload {
         debug_assert!(block.offset < self.len);
         debug_assert!(block.len <= self.len);
 
-        self.blocks[block.index_in_piece()] = Block::Free;
-    }
-
-    /// Returns true if the piece has all blocks downloaded.
-    pub fn is_complete(&self) -> bool {
-        self.count_missing_blocks() == 0
-    }
-
-    /// Returns the number of free (pickable) blocks.
-    pub fn count_missing_blocks(&self) -> usize {
-        // TODO(https://github.com/mandreyel/cratetorrent/issues/15): we could
-        // optimize this by caching this value in a `count_missing_blocks` field
-        // in self that is updated in pick_blocks
-        self.blocks
-            .iter()
-            .filter(|b| matches!(b, Block::Free | Block::Requested))
-            .count()
+        self.blocks[block.index_in_piece()] = BlockStatus::Free;
     }
 }
 
@@ -176,7 +176,7 @@ mod tests {
         // assert that we picked all blocks
         assert_eq!(picked.len(), block_count);
         for block in download.blocks.iter() {
-            assert!(matches!(block, Block::Requested));
+            assert!(matches!(block, BlockStatus::Requested));
         }
     }
 
@@ -197,7 +197,7 @@ mod tests {
 
         // assert that we picked all blocks
         for block in download.blocks.iter() {
-            assert!(matches!(block, Block::Requested));
+            assert!(matches!(block, BlockStatus::Requested));
         }
     }
 

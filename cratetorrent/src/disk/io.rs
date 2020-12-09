@@ -130,7 +130,7 @@ impl Disk {
         block_info: BlockInfo,
         data: Vec<u8>,
     ) -> Result<()> {
-        log::trace!("Saving torrent {} {} to disk", id, block_info);
+        log::trace!("Saving torrent {} block {} to disk", id, block_info);
 
         // check torrent id
         //
@@ -157,7 +157,7 @@ impl Disk {
         block_info: BlockInfo,
         chan: peer::Sender,
     ) -> Result<()> {
-        log::trace!("Reading torrent {} {} from disk", id, block_info);
+        log::trace!("Reading torrent {} block {} from disk", id, block_info);
 
         // check torrent id
         //

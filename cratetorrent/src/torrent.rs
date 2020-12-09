@@ -260,7 +260,7 @@ impl Torrent {
         self.announce_to_trackers(now, event).await?;
 
         log::debug!(
-            "Info: \
+            "Stats: \
             elapsed {} s, \
             download: {} b/s (peak: {} b/s, total: {} b) \
             upload: {} b/s (peak: {} b/s, total: {} b)",
@@ -272,6 +272,26 @@ impl Torrent {
             self.uploaded_payload_counter.peak(),
             self.uploaded_payload_counter.total(),
         );
+
+        // TODO: consider removing this check, it's expensive, or caching it in
+        // piece picker
+        if log::log_enabled!(log::Level::Debug) {
+            let piece_picker_guard = self.ctx.piece_picker.read().await;
+            let unavailable_piece_count =
+                piece_picker_guard.pieces().iter().fold(0, |acc, piece| {
+                    if piece.frequency == 0 {
+                        acc + 1
+                    } else {
+                        acc
+                    }
+                });
+            if unavailable_piece_count > 0 {
+                log::debug!(
+                    "Torrent swarm doesn't have all pieces (missing: {})",
+                    unavailable_piece_count
+                );
+            }
+        }
 
         for counter in [
             &mut self.downloaded_payload_counter,
@@ -474,73 +494,7 @@ impl Torrent {
                 log::debug!("Disk write result {:?}", write_result);
                 match write_result {
                     Ok(piece) => {
-                        // if this write completed a piece, check torrent
-                        // completion
-                        if piece.is_valid {
-                            // note that this piece picker is set as complete by
-                            // peer sessions
-                            let missing_piece_count = self
-                                .ctx
-                                .piece_picker
-                                .read()
-                                .await
-                                .count_missing_pieces();
-                            log::info!(
-                                "Finished piece {} download, valid: {}, left: {}",
-                                piece.index,
-                                piece.is_valid, missing_piece_count
-                            );
-
-                            // tell all peers that we got a new piece
-                            for peer in self.peers.values() {
-                                if let Some(chan) = &peer.chan {
-                                    // this message may be sent after the peer
-                                    // session had already stopped but before
-                                    // the torrent tick ran and got a chance to
-                                    // reap the dead session
-                                    chan.send(peer::Command::NewPiece(
-                                        piece.index,
-                                    ))
-                                    .ok();
-                                }
-                            }
-
-                            // if the torrent is fully downloaded, stop the
-                            // download loop
-                            if missing_piece_count == 0 {
-                                // TODO: return a global alert here instead and
-                                // let the user decide whether to stop the
-                                // torrent
-                                log::info!(
-                                    "Finished torrent download, exiting. \
-                                    Peak download rate: {} b/s",
-                                    self.downloaded_payload_counter.peak(),
-                                );
-
-                                // tell trackers we've finished
-                                self.announce_to_trackers(
-                                    Instant::now(),
-                                    Some(Event::Completed),
-                                )
-                                .await?;
-
-                                return Ok(true);
-                            }
-                        } else {
-                            // TODO(https://github.com/mandreyel/cratetorrent/issues/61):
-                            // Implement parole mode for the peers that sent
-                            // corrupt data.
-                            log::warn!(
-                                "Received invalid piece {}",
-                                piece.index
-                            );
-                            // let peers download this piece again
-                            self.ctx
-                                .piece_picker
-                                .write()
-                                .await
-                                .dropped_piece(piece.index);
-                        }
+                        return self.handle_piece_completion(piece).await;
                     }
                     Err(e) => {
                         // TODO: include details in the error as to which blocks
@@ -560,6 +514,82 @@ impl Torrent {
                 // For instance, it may be that the torrent file got moved while
                 // the torrent was still seeding. In this case we'd need to stop
                 // torrent and send an alert to the API consumer.
+            }
+        }
+
+        Ok(false)
+    }
+
+    /// Does some bookkeeping to mark the piece as finished. All peer sessions
+    /// are notified of the newly downloaded piece.
+    async fn handle_piece_completion(
+        &mut self,
+        piece: PieceCompletion,
+    ) -> Result<bool> {
+        // if this write completed a piece, check torrent
+        // completion
+        if piece.is_valid {
+            // remove download entry
+            self.ctx.downloads.write().await.remove(&piece.index);
+
+            // register piece in piece picker
+            let mut piece_picker_write_guard =
+                self.ctx.piece_picker.write().await;
+            piece_picker_write_guard.received_piece(piece.index);
+            let missing_piece_count =
+                piece_picker_write_guard.count_missing_pieces();
+            // we don't need the lock anymore
+            drop(piece_picker_write_guard);
+
+            log::info!(
+                "Downloaded piece {} (left: {})",
+                piece.index,
+                missing_piece_count
+            );
+
+            // tell all sessions that we got a new piece so that they can send
+            // a "have(piece)" message to their peers
+            for peer in self.peers.values() {
+                if let Some(chan) = &peer.chan {
+                    // this may be after the peer session had already stopped
+                    // but before the torrent tick ran and got a chance to reap
+                    // the dead session
+                    chan.send(peer::Command::NewPiece(piece.index)).ok();
+                }
+            }
+
+            // if the torrent is fully downloaded, stop the
+            // download loop
+            // TODO: return a global alert here instead and
+            // let the user decide whether to stop the
+            // torrent
+            if missing_piece_count == 0 {
+                log::info!(
+                    "Finished torrent download, exiting. \
+                    Peak download rate: {} b/s",
+                    self.downloaded_payload_counter.peak(),
+                );
+
+                // tell trackers we've finished
+                self.announce_to_trackers(
+                    Instant::now(),
+                    Some(Event::Completed),
+                )
+                .await?;
+
+                // stop the torrent
+                return Ok(true);
+            }
+        } else {
+            // TODO(https://github.com/mandreyel/cratetorrent/issues/61):
+            // Implement parole mode for the peers that sent
+            // corrupt data.
+            log::warn!("Piece {} is invalid", piece.index);
+            // mark all blocks free to be requested
+            if let Some(piece) =
+                self.ctx.downloads.read().await.get(&piece.index)
+            {
+                piece.write().await.free_all_blocks();
             }
         }
 
@@ -693,8 +723,8 @@ impl TrackerEntry {
     /// announce frequency settings.
     fn should_announce(&self, t: Instant) -> bool {
         if let Some(last_announce_time) = self.last_announce_time {
-            let min_next_announce_time =
-                last_announce_time + self.interval.unwrap_or_default();
+            let min_next_announce_time = last_announce_time
+                + self.interval.unwrap_or(DEFAULT_ANNOUNCE_INTERVAL);
             t > min_next_announce_time
         } else {
             true
@@ -708,8 +738,11 @@ impl TrackerEntry {
     /// announce time first.
     fn can_announce(&self, t: Instant) -> bool {
         if let Some(last_announce_time) = self.last_announce_time {
-            let min_next_announce_time =
-                last_announce_time + self.min_interval.unwrap_or_default();
+            let min_next_announce_time = last_announce_time
+                + self
+                    .min_interval
+                    .or(self.min_interval)
+                    .unwrap_or(DEFAULT_ANNOUNCE_INTERVAL);
             t > min_next_announce_time
         } else {
             true
@@ -723,6 +756,10 @@ const MIN_REQUESTED_PEER_COUNT: usize = 10;
 /// The max number of connected peers torrent should have.
 // TODO: make this configurable
 const MAX_CONNECTED_PEER_COUNT: usize = 50;
+
+/// If the tracker doesn't provide a minimum announce interval, we default to
+/// announcing every 30 seconds.
+const DEFAULT_ANNOUNCE_INTERVAL: Duration = Duration::from_secs(30 * 60);
 
 /// After this many attempts, we stop announcing to tracker.
 const TRACKER_ERROR_THRESHOLD: usize = 10;

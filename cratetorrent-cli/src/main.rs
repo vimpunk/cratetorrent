@@ -4,7 +4,8 @@ use clap::{App, Arg};
 use cratetorrent::metainfo::*;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    env_logger::init();
+    log4rs::init_file("cratetorrent-cli/log4rs.yml", Default::default())
+        .expect("error configuring logger");
 
     // set up cli args
     let matches = App::new("Cratetorrent CLI")

@@ -207,7 +207,7 @@ impl Torrent {
         info: BlockInfo,
         data: Vec<u8>,
     ) -> Result<()> {
-        log::trace!("Saving {} to disk", info);
+        log::trace!("Saving block {} to disk", info);
 
         let piece_index = info.piece_index;
         if !self.write_buf.contains_key(&piece_index) {

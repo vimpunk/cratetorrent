@@ -102,7 +102,7 @@ impl fmt::Display for BlockInfo {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "block (piece: {} offs: {} len: {})",
+            "(piece: {} offset: {} len: {})",
             self.piece_index, self.offset, self.len
         )
     }

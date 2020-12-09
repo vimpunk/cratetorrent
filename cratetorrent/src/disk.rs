@@ -253,7 +253,7 @@ mod tests {
                 let block_end = block.offset + block.len;
                 let data = &piece[block.offset as usize..block_end as usize];
                 debug_assert_eq!(data.len(), block.len as usize);
-                println!("Writing piece {} block {:?}", index, block);
+                println!("Writing piece {} block {}", index, block);
                 disk_handle.write_block(id, block, data.to_vec()).unwrap();
             });
 
@@ -314,7 +314,7 @@ mod tests {
             let data =
                 &invalid_piece[block.offset as usize..block_end as usize];
             debug_assert_eq!(data.len(), block.len as usize);
-            println!("Writing invalid piece {} block {:?}", index, block);
+            println!("Writing invalid piece {} block {}", index, block);
             disk_handle.write_block(id, block, data.to_vec()).unwrap();
         });
 
@@ -363,7 +363,7 @@ mod tests {
             let block_end = block.offset + block.len;
             let data = &piece[block.offset as usize..block_end as usize];
             debug_assert_eq!(data.len(), block.len as usize);
-            println!("Writing piece {} block {:?}", index, block);
+            println!("Writing piece {} block {}", index, block);
             disk_handle.write_block(id, block, data.to_vec()).unwrap();
         });
 

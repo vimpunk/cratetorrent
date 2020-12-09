@@ -1,0 +1,23 @@
+refresh_rate: 3000 seconds
+
+appenders:
+  # An appender named "stdout" that writes to stdout
+  stdout:
+    kind: console
+
+  # An appender named "requests" that writes to a file with a custom pattern encoder
+  file:
+    kind: file
+    path: "/tmp/cratetorrent.log"
+
+# Set the default logging level to "warn" and attach the "stdout" appender to the root
+root:
+  level: warn
+  appenders:
+    - stdout
+    - file
+
+loggers:
+  # Raise the maximum log level for cratetorrent events
+  cratetorrent:
+    level: debug

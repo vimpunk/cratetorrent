@@ -14,15 +14,10 @@ The following features are currently supported:
 - Peers may be specified by their address, or if the torrent's metainfo file
   contains trackers, peers are requested from these trackers.
 
-On my fairly slow internet connection, Ubuntu 20.04 LTS (around 2.8 GB) is
+On my fairly slow internet connection, Ubuntu 20.04 LTS (~2.8 GB) is
 downloaded in about 5 minutes at an average download rate of 10 MPbs, which
 indicates that performance is acceptably good right out of the gate. More
 optimizations are expected.
-
-*Note*, however, that there are still some stability issues. E.g. sometimes some
-peers get into a request-timeout loop. Therefore in some cases downloads
-essentially get stuck. For reasons like this this library cannot be considered
-done, even if core features are supported.
 
 Features are continuously added, see the [project
 milestones](https://github.com/mandreyel/cratetorrent/issues/26).
@@ -38,7 +33,9 @@ cratetorrent in the future.
 
 The project is split up in two:
 - the `cratetorrent` library, that defines most of the functionality,
-- and a `cratetortent-cli` binary for downloading torrents via the CLI.
+- and a `cratetorrent-cli` binary for downloading torrents via the CLI. Note,
+  however, that this is extremely simple at present, currently only used for
+  integration testing.
 
 
 ## How to run

@@ -127,6 +127,9 @@ pub(super) struct SessionContext {
     /// The time the BitTorrent connection was established (i.e. after
     /// handshaking)
     pub connected_time: Option<Instant>,
+
+    /// The log header to use for logging.
+    pub log_target: String,
 }
 
 impl SessionContext {
@@ -238,10 +241,6 @@ impl SessionContext {
                 &mut self.target_request_queue_len
             {
                 *target_request_queue_len += 1;
-                log::info!(
-                    "Request queue incremented in slow-start to {}",
-                    *target_request_queue_len
-                );
             }
         }
 

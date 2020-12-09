@@ -12,6 +12,23 @@ pub(crate) struct PiecePicker {
     pieces: Vec<Piece>,
 }
 
+/// Metadata about a piece relevant for the piece picker.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct Piece {
+    /// The frequency of this piece in the torrent swarm.
+    pub frequency: usize,
+    /// Whether we have already picked this piece and are currently downloading
+    /// it. This flag is set to true when the piece is picked.
+    ///
+    /// This is to prevent picking the same piece we are already downloading in
+    /// the scenario in which we want to pick a new piece before the already
+    /// downloadng piece finishes. Not having this check would lead us to always
+    /// pick this piece until we tell the piece picker that we have it and thus
+    /// wouldn't be able to download multiple pieces simultaneously (an
+    /// important optimizaiton step).
+    pub is_pending: bool,
+}
+
 impl PiecePicker {
     /// Creates a new piece picker with the given own_pieces we already have.
     pub fn new(own_pieces: Bitfield) -> Self {
@@ -116,34 +133,9 @@ impl PiecePicker {
         self.pieces[index].is_pending = false;
     }
 
-    /// Tells the piece picker that we no longer have the piece.
-    pub fn dropped_piece(&mut self, index: PieceIndex) {
-        log::trace!("Dropping piece {}", index);
-
-        // we assert here as this method is only called by internal methods on
-        // piece completion, meaning the piece must exist (we can't download an
-        // invalid piece)
-        debug_assert!(index < self.own_pieces.len());
-
-        self.own_pieces.set(index, false);
+    pub fn pieces(&self) -> &[Piece] {
+        &self.pieces
     }
-}
-
-/// Metadata about a piece relevant for the piece picker.
-#[derive(Clone, Copy, Default)]
-struct Piece {
-    /// The frequency of this piece in the torrent swarm.
-    frequency: usize,
-    /// Whether we have already picked this piece and are currently downloading
-    /// it. This flag is set to true when the piece is picked.
-    ///
-    /// This is to prevent picking the same piece we are already downloading in
-    /// the scenario in which we want to pick a new piece before the already
-    /// downloadng piece finishes. Not having this check would lead us to always
-    /// pick this piece until we tell the piece picker that we have it and thus
-    /// wouldn't be able to download multiple pieces simultaneously (an
-    /// important optimizaiton step).
-    is_pending: bool,
 }
 
 #[cfg(test)]
