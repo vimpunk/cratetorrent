@@ -78,9 +78,6 @@ pub(crate) struct Torrent {
     available_peers: Vec<SocketAddr>,
     /// Information that is shared with peer sessions.
     ctx: Arc<TorrentContext>,
-    /// The handle to the disk IO task, used to issue commands on it. A copy of
-    /// this handle is passed down to each peer session.
-    disk: DiskHandle,
     /// The port on which other entities in the engine send this torrent
     /// messages.
     ///
@@ -142,7 +139,6 @@ impl Torrent {
         Self {
             peers: HashMap::new(),
             available_peers: Vec::new(),
-            disk,
             ctx: Arc::new(TorrentContext {
                 id,
                 chan,
@@ -150,6 +146,7 @@ impl Torrent {
                 downloads: RwLock::new(HashMap::new()),
                 info_hash,
                 client_id,
+                disk,
                 storage: storage_info,
             }),
             start_time: None,
@@ -213,7 +210,6 @@ impl Torrent {
                     // start inbound session
                     let (session, chan) = PeerSession::new(
                         Arc::clone(&self.ctx),
-                        self.disk.clone(),
                         addr,
                     );
                     self.peers.insert(addr, Peer::start_inbound(socket, session, chan));
@@ -304,11 +300,7 @@ impl Torrent {
         log::debug!("Connecting {} peer(s)", connect_count);
         for addr in self.available_peers.drain(0..connect_count) {
             log::info!("Connecting to peer {}", addr);
-            let (session, chan) = PeerSession::new(
-                Arc::clone(&self.ctx),
-                self.disk.clone(),
-                addr,
-            );
+            let (session, chan) = PeerSession::new(Arc::clone(&self.ctx), addr);
             self.peers.insert(addr, Peer::start_outbound(session, chan));
         }
     }
@@ -655,6 +647,9 @@ pub(crate) struct TorrentContext {
     // For mvp it should do.
     pub downloads: RwLock<HashMap<PieceIndex, RwLock<PieceDownload>>>,
 
+    /// The handle to the disk IO task, used to issue commands on it. A copy of
+    /// this handle is passed down to each peer session.
+    pub disk: DiskHandle,
     /// Info about the torrent's storage (piece length, download length, etc).
     pub storage: StorageInfo,
 }

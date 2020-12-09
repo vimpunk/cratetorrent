@@ -21,7 +21,6 @@ use tokio::{
 use tokio_util::codec::{Framed, FramedParts};
 
 use crate::{
-    disk::DiskHandle,
     download::PieceDownload,
     error::*,
     torrent::{self, TorrentContext},
@@ -91,8 +90,6 @@ pub(crate) struct PeerSession {
     /// Shared information of the torrent.
     torrent: Arc<TorrentContext>,
 
-    /// The entity used to save downloaded file blocks to disk.
-    disk: DiskHandle,
     /// The command channel on which peer session is being sent messages.
     ///
     /// A copy of this is kept within peer session as disk block reads are
@@ -159,7 +156,6 @@ impl PeerSession {
     /// actually start it. See [`Self::start`].
     pub fn new(
         torrent: Arc<TorrentContext>,
-        disk: DiskHandle,
         addr: SocketAddr,
     ) -> (Self, Sender) {
         let (cmd_chan, cmd_port) = mpsc::unbounded_channel();
@@ -167,7 +163,6 @@ impl PeerSession {
         (
             Self {
                 torrent,
-                disk,
                 cmd_chan: cmd_chan.clone(),
                 cmd_port: cmd_port.fuse(),
                 peer: PeerInfo {
@@ -852,7 +847,9 @@ impl PeerSession {
 
         // validate and save the block to disk by sending a write command to the
         // disk task
-        self.disk.write_block(self.torrent.id, block_info, data)?;
+        self.torrent
+            .disk
+            .write_block(self.torrent.id, block_info, data)?;
 
         Ok(())
     }
@@ -929,7 +926,7 @@ impl PeerSession {
 
         // validate and save the block to disk by sending a write command to the
         // disk task
-        self.disk.read_block(
+        self.torrent.disk.read_block(
             self.torrent.id,
             block_info,
             self.cmd_chan.clone(),
