@@ -15,8 +15,6 @@ impl Default for BlockStatus {
 
 /// Tracks the completion of an ongoing piece download and is used to request
 /// missing blocks in piece.
-// TODO: remove
-#[derive(Debug)]
 pub(crate) struct PieceDownload {
     /// The piece's index.
     index: PieceIndex,

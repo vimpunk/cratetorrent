@@ -33,11 +33,13 @@ impl Default for SessionState {
 
 /// The various throughput stats of a single round (roughly one second).
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct RoundThroughput {
+pub(crate) struct RoundStats {
     /// Counts the downloaded block bytes since the last session summary.
     pub downloaded_payload_count: u64,
     /// Counts the uploaded block bytes since the last session summary.
     pub uploaded_payload_count: u64,
+    /// The number of downloaded payload bytes that were wasted this round.
+    pub wasted_payload_count: u64,
     /// Counts the bytes received during protocol chatter since the last session
     /// summary.
     pub downloaded_protocol_count: u64,
@@ -56,6 +58,9 @@ pub(super) struct SessionContext {
     pub downloaded_payload_counter: Counter,
     /// Counts the uploaded block bytes.
     pub uploaded_payload_counter: Counter,
+    /// Counts the (downloaded) payload bytes that were wasted (i.e. duplicate
+    /// blocks that had to be discarded).
+    pub wasted_payload_counter: Counter,
 
     /// Counts the bytes sent during protocol chatter.
     pub downloaded_protocol_counter: Counter,
@@ -71,6 +76,7 @@ pub(super) struct SessionContext {
     /// before this field, that is:
     /// - [`Self::state`]
     /// - [`Self::downloaded_payload_counter`]
+    /// - [`Self::wasted_payload_counter`]
     /// - [`Self::uploaded_payload_counter`]
     /// - [`Self::downloaded_protocol_counter`]
     /// - [`Self::uploaded_protocol_counter`]
@@ -247,6 +253,11 @@ impl SessionContext {
         self.changed = true;
     }
 
+    pub fn record_waste(&mut self, block_len: u32) {
+        self.wasted_payload_counter += block_len as u64;
+        self.changed = true;
+    }
+
     pub fn update_upload_stats(&mut self, block_len: u32) {
         self.last_outgoing_block_time = Some(Instant::now());
         self.uploaded_payload_counter += block_len as u64;
@@ -337,6 +348,8 @@ impl SessionContext {
     fn reset_per_tick_counters(&mut self) {
         for counter in [
             &mut self.downloaded_payload_counter,
+            &mut self.uploaded_payload_counter,
+            &mut self.wasted_payload_counter,
             &mut self.uploaded_protocol_counter,
             &mut self.downloaded_protocol_counter,
         ]

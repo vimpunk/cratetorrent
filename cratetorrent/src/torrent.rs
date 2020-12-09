@@ -105,6 +105,9 @@ pub(crate) struct Torrent {
     downloaded_payload_counter: Counter,
     /// Counts the total uploaded block bytes in torrent.
     uploaded_payload_counter: Counter,
+    /// Counts the total (downloaded) payload bytes that were wasted (i.e.
+    /// duplicate blocks that had to be discarded).
+    wasted_payload_counter: Counter,
 
     /// Counts the total bytes sent during protocol chatter in torrent.
     downloaded_protocol_counter: Counter,
@@ -156,6 +159,7 @@ impl Torrent {
 
             downloaded_payload_counter: Default::default(),
             uploaded_payload_counter: Default::default(),
+            wasted_payload_counter: Default::default(),
             downloaded_protocol_counter: Default::default(),
             uploaded_protocol_counter: Default::default(),
 
@@ -262,12 +266,13 @@ impl Torrent {
         log::debug!(
             "Stats: \
             elapsed {} s, \
-            download: {} b/s (peak: {} b/s, total: {} b) \
+            download: {} b/s (peak: {} b/s, total: {} b) wasted: {} b \
             upload: {} b/s (peak: {} b/s, total: {} b)",
             self.run_duration.as_secs(),
             self.downloaded_payload_counter.avg(),
             self.downloaded_payload_counter.peak(),
             self.downloaded_payload_counter.total(),
+            self.wasted_payload_counter.total(),
             self.uploaded_payload_counter.avg(),
             self.uploaded_payload_counter.peak(),
             self.uploaded_payload_counter.total(),
@@ -296,6 +301,7 @@ impl Torrent {
         for counter in [
             &mut self.downloaded_payload_counter,
             &mut self.uploaded_payload_counter,
+            &mut self.wasted_payload_counter,
             &mut self.downloaded_protocol_counter,
             &mut self.uploaded_protocol_counter,
         ]
@@ -474,13 +480,15 @@ impl Torrent {
                     peer.state = info.state;
                     peer.state = info.state;
                     self.downloaded_payload_counter +=
-                        info.throughput.downloaded_payload_count;
+                        info.stats.downloaded_payload_count;
                     self.uploaded_payload_counter +=
-                        info.throughput.uploaded_payload_count;
+                        info.stats.uploaded_payload_count;
+                    self.wasted_payload_counter +=
+                        info.stats.wasted_payload_count;
                     self.downloaded_protocol_counter +=
-                        info.throughput.downloaded_protocol_count;
+                        info.stats.downloaded_protocol_count;
                     self.uploaded_protocol_counter +=
-                        info.throughput.uploaded_protocol_count;
+                        info.stats.uploaded_protocol_count;
 
                     // if we disconnected peer, remove it
                     if peer.state.connection == ConnectionState::Disconnected {
@@ -497,9 +505,7 @@ impl Torrent {
                         return self.handle_piece_completion(piece).await;
                     }
                     Err(e) => {
-                        // TODO: include details in the error as to which blocks
-                        // failed to write
-                        log::error!("Failed to write batch to disk: {}", e);
+                        log::error!("Failed to write piece to disk: {}", e);
                     }
                 }
             }
@@ -566,8 +572,9 @@ impl Torrent {
             if missing_piece_count == 0 {
                 log::info!(
                     "Finished torrent download, exiting. \
-                    Peak download rate: {} b/s",
+                    Peak download rate: {} b/s, wasted: {} b",
                     self.downloaded_payload_counter.peak(),
+                    self.wasted_payload_counter.total()
                 );
 
                 // tell trackers we've finished

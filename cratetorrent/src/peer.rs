@@ -41,7 +41,7 @@ mod state;
 pub(crate) struct SessionInfo {
     pub state: SessionState,
     pub peer_side: Side,
-    pub throughput: RoundThroughput,
+    pub stats: RoundStats,
 }
 
 /// The channel on which torrent can send a command to the peer session task.
@@ -532,19 +532,21 @@ impl PeerSession {
             "Stats: \
             download: {dl_rate} b/s (peak: {dl_peak} b/s, total: {dl_total} b), \
             pending: {out_req}, queue: {queue}, rtt: {rtt_ms} ms (~{rtt_s} s), \
+            waste: {waste},
             upload: {ul_rate} b/s (peak: {ul_peak} b/s, total: {ul_total} b), \
             pending: {in_req}",
-            dl_rate=self.ctx.downloaded_payload_counter.avg(),
-            dl_peak=self.ctx.downloaded_payload_counter.peak(),
-            dl_total=self.ctx.downloaded_payload_counter.total(),
-            out_req=self.outgoing_requests.len(),
-            ul_rate=self.ctx.uploaded_payload_counter.avg(),
-            ul_peak=self.ctx.uploaded_payload_counter.peak(),
-            ul_total=self.ctx.uploaded_payload_counter.total(),
-            in_req=self.incoming_requests.len(),
-            queue=self.ctx.target_request_queue_len.unwrap_or_default(),
-            rtt_ms=self.ctx.avg_request_rtt.mean().as_millis(),
-            rtt_s=self.ctx.avg_request_rtt.mean().as_secs(),
+            dl_rate = self.ctx.downloaded_payload_counter.avg(),
+            dl_peak = self.ctx.downloaded_payload_counter.peak(),
+            dl_total = self.ctx.downloaded_payload_counter.total(),
+            out_req = self.outgoing_requests.len(),
+            queue = self.ctx.target_request_queue_len.unwrap_or_default(),
+            rtt_ms = self.ctx.avg_request_rtt.mean().as_millis(),
+            rtt_s = self.ctx.avg_request_rtt.mean().as_secs(),
+            waste = self.ctx.wasted_payload_counter.total(),
+            ul_rate = self.ctx.uploaded_payload_counter.avg(),
+            ul_peak = self.ctx.uploaded_payload_counter.peak(),
+            ul_total = self.ctx.uploaded_payload_counter.total(),
+            in_req = self.incoming_requests.len(),
         );
 
         Ok(())
@@ -619,7 +621,7 @@ impl PeerSession {
         SessionInfo {
             state: self.ctx.state,
             peer_side: self.peer.side,
-            throughput: RoundThroughput {
+            stats: RoundStats {
                 uploaded_payload_count: self
                     .ctx
                     .uploaded_payload_counter
@@ -628,6 +630,7 @@ impl PeerSession {
                     .ctx
                     .downloaded_payload_counter
                     .round(),
+                wasted_payload_count: self.ctx.wasted_payload_counter.round(),
                 uploaded_protocol_count: self
                     .ctx
                     .uploaded_protocol_counter
@@ -772,7 +775,6 @@ impl PeerSession {
                 // arrived
                 self.make_requests(sink).await?;
             }
-            // TODO: implement these
             Message::Request(block_info) => {
                 self.handle_request_msg(block_info).await?;
             }
@@ -811,7 +813,7 @@ impl PeerSession {
             return Ok(());
         }
 
-        // TODO: optimize this by preallocating the vector in self
+        // TODO: optimize this by using the preallocated hashset in self
         let mut requests = Vec::new();
         let target_request_queue_len =
             self.ctx.target_request_queue_len.unwrap_or_default();
@@ -829,9 +831,6 @@ impl PeerSession {
             }
             let to_request_count =
                 target_request_queue_len - outgoing_request_count;
-
-            // TODO: should we check first that we aren't already downloading
-            // all of the piece's blocks? requires read then write
 
             let mut download_write_guard = download.write().await;
             log::trace!(
@@ -934,19 +933,18 @@ impl PeerSession {
                 download.write().await.received_block(&block_info)
             }
             None => {
-                log::warn!(
-                    target: &self.ctx.log_target,
-                    "Discarding block {} with no piece download",
-                    block_info
-                );
                 // silently ignore this block if we didn't expected it
                 //
                 // TODO(https://github.com/mandreyel/cratetorrent/issues/10): In
                 // the future we could add logic that only accepts blocks within
                 // a window after the last request. If not done, peer could DoS
                 // us by sending unwanted blocks repeatedly.
-                //
-                // TODO: record waste stats
+                log::warn!(
+                    target: &self.ctx.log_target,
+                    "Discarding block {} with no piece download",
+                    block_info
+                );
+                self.ctx.record_waste(block_info.len);
                 return Ok(());
             }
         };
