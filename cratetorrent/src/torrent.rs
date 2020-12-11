@@ -101,6 +101,15 @@ pub(crate) struct Torrent {
     // in expectation of that feature
     run_duration: Duration,
 
+    /// In the last part of the download the torrent may be in what's called
+    /// the end-game. This is the stage when all pieces have been picked but not
+    /// all have been received. There is a tendency for a piece to
+    /// be mostly downloaded by one peer but in the last part of the download
+    /// this makes download slower because the last pieces may end up with
+    /// slower peerse. So when end-game is active, we let all peers finish the
+    /// remaining pieces and cancel pending requests from the slower peers.
+    in_end_game: bool,
+
     /// Counts the total downloaded block bytes in torrent.
     downloaded_payload_counter: Counter,
     /// Counts the total uploaded block bytes in torrent.
@@ -156,13 +165,12 @@ impl Torrent {
             run_duration: Duration::default(),
             port,
             trackers,
-
+            in_end_game: false,
             downloaded_payload_counter: Default::default(),
             uploaded_payload_counter: Default::default(),
             wasted_payload_counter: Default::default(),
             downloaded_protocol_counter: Default::default(),
             uploaded_protocol_counter: Default::default(),
-
             listen_addr,
         }
     }
@@ -544,6 +552,18 @@ impl Torrent {
             piece_picker_write_guard.received_piece(piece.index);
             let missing_piece_count =
                 piece_picker_write_guard.count_missing_pieces();
+
+            // Even if we don't have all pieces, they may all have already
+            // been picked. In this case we need to enter end-game mode, it not
+            // already in it.
+            if !self.in_end_game
+                && missing_piece_count > 0
+                && piece_picker_write_guard.all_pieces_picked()
+            {
+                log::info!("Torrent entering end-game");
+                self.in_end_game = true;
+            }
+
             // we don't need the lock anymore
             drop(piece_picker_write_guard);
 
@@ -561,7 +581,11 @@ impl Torrent {
                     // this may be after the peer session had already stopped
                     // but before the torrent tick ran and got a chance to reap
                     // the dead session
-                    chan.send(peer::Command::NewPiece(piece.index)).ok();
+                    chan.send(peer::Command::PieceCompletion {
+                        index: piece.index,
+                        in_end_game: self.in_end_game,
+                    })
+                    .ok();
                 }
             }
 

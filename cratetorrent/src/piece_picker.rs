@@ -45,7 +45,26 @@ impl PiecePicker {
     /// Returns the number of missing pieces that are needed to complete the
     /// download.
     pub fn count_missing_pieces(&self) -> usize {
+        // TODO: optimize this by caching the count in self
         self.own_pieces.count_zeros()
+    }
+
+    /// Returns true if all pieces have been picked (whether pending or
+    /// recieved).
+    pub fn all_pieces_picked(&self) -> bool {
+        self.count_free_pieces() == 0
+    }
+
+    /// Counts the pieces that we can still request.
+    pub fn count_free_pieces(&self) -> usize {
+        // TODO: optimize this by caching the count in self
+        let mut acc = 0;
+        for index in 0..self.pieces.len() {
+            if !self.own_pieces[index] && !self.pieces[index].is_pending {
+                acc += 1;
+            }
+        }
+        acc
     }
 
     /// Returns the first piece that we don't yet have and isn't already being
@@ -53,12 +72,15 @@ impl PiecePicker {
     pub fn pick_piece(&mut self) -> Option<PieceIndex> {
         log::trace!("Picking next piece");
 
-        for (index, have_piece) in self.own_pieces.iter().enumerate() {
+        for index in 0..self.own_pieces.len() {
             // only consider this piece if we don't have it and if we are not
             // already downloading it (whether it's not pending)
             debug_assert!(index < self.pieces.len());
             let piece = &mut self.pieces[index];
-            if !have_piece && piece.frequency > 0 && !piece.is_pending {
+            if !self.own_pieces[index]
+                && piece.frequency > 0
+                && !piece.is_pending
+            {
                 // set pending flag on piece so that this piece is not picked
                 // again (see note on field)
                 piece.is_pending = true;
@@ -144,10 +166,10 @@ mod tests {
 
     use super::*;
 
-    // Tests that repeatedly requesting as many pieces as are in the piece
-    // picker returns all pieces, none of them previously picked.
+    /// Tests that repeatedly requesting as many pieces as are in the piece
+    /// picker returns all pieces, none of them previously picked.
     #[test]
-    fn test_pick_all_pieces() {
+    fn should_pick_all_pieces() {
         let piece_count = 15;
         let mut piece_picker = PiecePicker::empty(piece_count);
         let available_pieces = Bitfield::repeat(true, piece_count);
@@ -175,10 +197,10 @@ mod tests {
         assert_eq!(picked.len(), piece_count);
     }
 
-    // Tests registering a received piece causes the piece picker to not pick
-    // that piece again.
+    /// Tests registering a received piece causes the piece picker to not pick
+    /// that piece again.
     #[test]
-    fn test_received_piece() {
+    fn should_mark_piece_as_received() {
         let piece_count = 15;
         let mut piece_picker = PiecePicker::empty(piece_count);
         let available_pieces = Bitfield::repeat(true, piece_count);
@@ -204,10 +226,76 @@ mod tests {
         }
     }
 
-    // Tests that the piece picker correctly determines whether we are
-    // interested in a variety of piece sets.
     #[test]
-    fn test_is_interested() {
+    fn should_count_missing_pieces() {
+        // empty piece picker
+        let piece_count = 15;
+        let mut piece_picker = PiecePicker::empty(piece_count);
+
+        assert_eq!(piece_picker.count_missing_pieces(), piece_count);
+
+        // set 2 pieces
+        let have_count = 2;
+        for i in 0..have_count {
+            piece_picker.own_pieces.set(i, true);
+        }
+        assert_eq!(
+            piece_picker.count_missing_pieces(),
+            piece_count - have_count
+        );
+
+        // set all pieces
+        for mut piece in piece_picker.own_pieces.iter_mut() {
+            *piece = true;
+        }
+        assert_eq!(piece_picker.count_missing_pieces(), 0);
+    }
+
+    /// Tests that the piece picker correctly reports pieces that were not
+    /// picked or received.
+    #[test]
+    fn should_count_free_pieces() {
+        // empty piece picker
+        let piece_count = 15;
+        let mut piece_picker = PiecePicker::empty(piece_count);
+
+        assert_eq!(piece_picker.count_free_pieces(), piece_count);
+
+        // received 2 pieces
+        piece_picker.received_piece(0);
+        piece_picker.received_piece(1);
+        assert_eq!(piece_picker.count_free_pieces(), 13);
+
+        // pick 3 pieces
+        // NOTE: need to register frequency before we do
+        piece_picker
+            .register_availability(&Bitfield::repeat(true, piece_count))
+            .unwrap();
+        let p = piece_picker.pick_piece();
+        assert!(p.is_some());
+        let p = piece_picker.pick_piece();
+        assert!(p.is_some());
+        let p = piece_picker.pick_piece();
+        assert!(p.is_some());
+        assert_eq!(piece_picker.count_free_pieces(), 10);
+
+        // received 1 more piece from the picked ones, shouldn't change
+        // outcome
+        piece_picker.received_piece(2);
+        assert_eq!(piece_picker.count_free_pieces(), 10);
+
+        // pick rest of the pieces
+        for _ in 0..10 {
+            piece_picker.pick_piece();
+        }
+        assert!(piece_picker.all_pieces_picked());
+    }
+
+    /// Tests that the piece picker correctly determines whether we are
+    /// interested in a variety of piece sets.
+    // TODO: break this up into smaller tests
+    #[test]
+    fn should_determine_interest() {
         // empty piece picker
         let piece_count = 15;
         let mut piece_picker = PiecePicker::empty(piece_count);
