@@ -34,7 +34,7 @@ pub(crate) use state::{ConnectionState, SessionState};
 mod codec;
 mod state;
 
-/// The most essential information of a peer session, dervied from
+/// The most essential information of a peer session, derived from
 /// [`crate::peer::state::SessionContext`]. It is sent with each tick to the
 /// torrent via its sender.
 #[derive(Debug)]

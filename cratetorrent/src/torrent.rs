@@ -554,7 +554,8 @@ impl Torrent {
             );
 
             // tell all sessions that we got a new piece so that they can send
-            // a "have(piece)" message to their peers
+            // a "have(piece)" message to their peers or cancel potential
+            // duplicate requests for the same piece
             for peer in self.peers.values() {
                 if let Some(chan) = &peer.chan {
                     // this may be after the peer session had already stopped
@@ -564,11 +565,9 @@ impl Torrent {
                 }
             }
 
-            // if the torrent is fully downloaded, stop the
-            // download loop
-            // TODO: return a global alert here instead and
-            // let the user decide whether to stop the
-            // torrent
+            // if the torrent is fully downloaded, stop the download loop
+            // TODO: return a global alert here instead and let the user decide
+            // whether to stop the torrent
             if missing_piece_count == 0 {
                 log::info!(
                     "Finished torrent download, exiting. \
@@ -589,10 +588,9 @@ impl Torrent {
             }
         } else {
             // TODO(https://github.com/mandreyel/cratetorrent/issues/61):
-            // Implement parole mode for the peers that sent
-            // corrupt data.
+            // implement parole mode for the peers that sent corrupt data
             log::warn!("Piece {} is invalid", piece.index);
-            // mark all blocks free to be requested
+            // mark all blocks free to be requested in piece
             if let Some(piece) =
                 self.ctx.downloads.read().await.get(&piece.index)
             {

@@ -48,7 +48,7 @@ impl DiskHandle {
         id: TorrentId,
         storage_info: StorageInfo,
         piece_hashes: Vec<u8>,
-        sender: torrent::Sender,
+        torrent_chan: torrent::Sender,
     ) -> Result<()> {
         log::trace!("Allocating new torrent {}", id);
         self.0
@@ -56,7 +56,7 @@ impl DiskHandle {
                 id,
                 storage_info,
                 piece_hashes,
-                sender,
+                torrent_chan,
             })
             .map_err(Error::from)
     }
@@ -120,7 +120,7 @@ enum Command {
         id: TorrentId,
         storage_info: StorageInfo,
         piece_hashes: Vec<u8>,
-        sender: torrent::Sender,
+        torrent_chan: torrent::Sender,
     },
     /// Request to eventually write a block to disk.
     WriteBlock {

@@ -51,8 +51,10 @@ moment there is no capacity to do this.
 
 ### Binary
 
-The CLI binary is currently very basic, but you can connect to a seed by
-running the following from the repo root:
+The CLI binary is currently very basic, but you can perform downloads either by
+directly connecting to seeds or if the torrent is backed by a HTTP tracker.
+
+Run the following from the repo root:
 ```
 cargo run --release -p cratetorrent-cli \
     --listen 0.0.0.0:50051 \

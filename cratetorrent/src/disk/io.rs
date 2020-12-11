@@ -55,7 +55,7 @@ impl Disk {
                     id,
                     storage_info,
                     piece_hashes,
-                    sender,
+                    torrent_chan,
                 } => {
                     log::trace!(
                         "Disk received NewTorrent command: id={}, info={:?}",
@@ -74,7 +74,7 @@ impl Disk {
                     // the disk task due to potential disk IO errors: we just
                     // want to log it and notify engine of it.
                     let torrent_res =
-                        Torrent::new(storage_info, piece_hashes, sender);
+                        Torrent::new(storage_info, piece_hashes, torrent_chan);
                     match torrent_res {
                         Ok(torrent) => {
                             log::info!("Torrent {} successfully allocated", id);

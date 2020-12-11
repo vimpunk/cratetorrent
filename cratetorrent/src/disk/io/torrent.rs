@@ -57,7 +57,7 @@ pub(super) struct Torrent {
 struct ThreadContext {
     /// The channel used to alert a torrent that a block has been written to
     /// disk and/or a piece was completed.
-    alert_chan: torrent::Sender,
+    chan: torrent::Sender,
 
     /// The read cache that caches entire pieces.
     ///
@@ -122,7 +122,7 @@ impl Torrent {
     pub fn new(
         info: StorageInfo,
         piece_hashes: Vec<u8>,
-        sender: torrent::Sender,
+        torrent_chan: torrent::Sender,
     ) -> Result<Self, NewTorrentError> {
         // TODO: since this is done as part of a tokio::task, should we use
         // tokio_fs here?
@@ -193,7 +193,7 @@ impl Torrent {
             info,
             write_buf: HashMap::new(),
             thread_ctx: Arc::new(ThreadContext {
-                alert_chan: sender,
+                chan: torrent_chan,
                 read_cache: CHashMap::new(),
                 files,
                 stats: Stats::default(),
@@ -213,7 +213,7 @@ impl Torrent {
         if !self.write_buf.contains_key(&piece_index) {
             if let Err(e) = self.start_new_piece(info.piece_index) {
                 self.thread_ctx
-                    .alert_chan
+                    .chan
                     .send(torrent::Message::PieceCompletion(Err(e)))?;
                 // return with ok as the disk task itself shouldn't be aborted
                 // due to invalid input
@@ -271,7 +271,7 @@ impl Torrent {
                             .write_failure_count
                             .fetch_add(1, Ordering::Relaxed);
                         // alert torrent of block write failure
-                        ctx.alert_chan
+                        ctx.chan
                             .send(torrent::Message::PieceCompletion(Err(e)))
                             .map_err(|e| {
                                 log::error!(
@@ -293,7 +293,7 @@ impl Torrent {
                 }
 
                 // alert torrent of piece completion and hash result
-                ctx.alert_chan
+                ctx.chan
                     .send(torrent::Message::PieceCompletion(Ok(
                         PieceCompletion {
                             index: piece_index,
@@ -399,12 +399,10 @@ impl Torrent {
                     piece_index,
                     block_info.offset
                 );
-                self.thread_ctx.alert_chan.send(
-                    torrent::Message::ReadError {
-                        block_info,
-                        error: ReadError::InvalidBlockOffset,
-                    },
-                )?;
+                self.thread_ctx.chan.send(torrent::Message::ReadError {
+                    block_info,
+                    error: ReadError::InvalidBlockOffset,
+                })?;
                 // the disk task itself mustn't be aborted due to invalid input
                 return Ok(());
             }
@@ -420,22 +418,22 @@ impl Torrent {
                 piece_index
             );
 
-            let file_range =
-                match self.info.files_intersecting_piece(piece_index) {
-                    Ok(file_range) => file_range,
-                    Err(_) => {
-                        log::error!("Piece {} not in file", piece_index);
-                        self.thread_ctx.alert_chan.send(
-                            torrent::Message::ReadError {
-                                block_info,
-                                error: ReadError::InvalidPieceIndex,
-                            },
-                        )?;
-                        // return with ok as the disk task itself shouldn't be aborted
-                        // due to invalid input
-                        return Ok(());
-                    }
-                };
+            let file_range = match self
+                .info
+                .files_intersecting_piece(piece_index)
+            {
+                Ok(file_range) => file_range,
+                Err(_) => {
+                    log::error!("Piece {} not in file", piece_index);
+                    self.thread_ctx.chan.send(torrent::Message::ReadError {
+                        block_info,
+                        error: ReadError::InvalidPieceIndex,
+                    })?;
+                    // return with ok as the disk task itself shouldn't be aborted
+                    // due to invalid input
+                    return Ok(());
+                }
+            };
 
             // Checking if the file pointed to by info has been downloaded yet
             // is done implicitly as part of the read operation below: if we
@@ -491,7 +489,7 @@ impl Torrent {
                         ctx.stats
                             .read_failure_count
                             .fetch_add(1, Ordering::Relaxed);
-                        ctx.alert_chan
+                        ctx.chan
                             .send(torrent::Message::ReadError {
                                 block_info,
                                 error: e,
