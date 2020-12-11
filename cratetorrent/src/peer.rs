@@ -583,16 +583,16 @@ impl PeerSession {
     async fn free_pending_blocks(&mut self) {
         let downloads_guard = self.torrent.downloads.read().await;
         for block in self.outgoing_requests.drain() {
-            log::debug!(
-                target: &self.ctx.log_target,
-                "Freeing block {} for download",
-                block
-            );
             // The piece may no longer be present if it was compoleted by
             // another peer in the meantime and torrent removed it from the
             // shared download store. This is fine, in this case we don't have
             // anything to do.
             if let Some(download) = downloads_guard.get(&block.piece_index) {
+                log::debug!(
+                    target: &self.ctx.log_target,
+                    "Freeing block {} for download",
+                    block
+                );
                 download.write().await.free_block(&block);
             }
         }
@@ -935,8 +935,13 @@ impl PeerSession {
                 // us by sending unwanted blocks repeatedly.
                 log::warn!(
                     target: &self.ctx.log_target,
-                    "Discarding block {} with no piece download",
-                    block_info
+                    "Discarding block {} with no piece download{}",
+                    block_info,
+                    if self.ctx.in_end_game {
+                        " in end-game"
+                    } else {
+                        ""
+                    }
                 );
                 self.ctx.record_waste(block_info.len);
                 return Ok(());
@@ -945,7 +950,7 @@ impl PeerSession {
 
         // don't process the block if already downloaded
         if prev_status == BlockStatus::Received {
-            // TODO: record waste stats
+            self.ctx.record_waste(block_info.len);
             log::info!(
                 target: &self.ctx.log_target,
                 "Already downloaded block {}",

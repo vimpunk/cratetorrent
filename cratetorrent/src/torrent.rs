@@ -101,13 +101,14 @@ pub(crate) struct Torrent {
     // in expectation of that feature
     run_duration: Duration,
 
-    /// In the last part of the download the torrent may be in what's called
-    /// the end-game. This is the stage when all pieces have been picked but not
-    /// all have been received. There is a tendency for a piece to
-    /// be mostly downloaded by one peer but in the last part of the download
-    /// this makes download slower because the last pieces may end up with
-    /// slower peerse. So when end-game is active, we let all peers finish the
-    /// remaining pieces and cancel pending requests from the slower peers.
+    /// In the last part of the download the torrent is in what's called the
+    /// end-game. This is the stage when all pieces have been picked but not all
+    /// have been received. There is a tendency for a piece to be mostly
+    /// downloaded by one peer, but when only a few pieces are left to complete
+    /// the torrent this could defer completion because some of these last
+    /// pieces may end up with slower peers.  So when end-game is active, we let
+    /// all peers finish the remaining pieces and cancel pending requests from
+    /// the slower peers.
     in_end_game: bool,
 
     /// Counts the total downloaded block bytes in torrent.
@@ -549,12 +550,13 @@ impl Torrent {
             // register piece in piece picker
             let mut piece_picker_write_guard =
                 self.ctx.piece_picker.write().await;
+
             piece_picker_write_guard.received_piece(piece.index);
             let missing_piece_count =
-                piece_picker_write_guard.count_missing_pieces();
+                piece_picker_write_guard.missing_piece_count();
 
             // Even if we don't have all pieces, they may all have already
-            // been picked. In this case we need to enter end-game mode, it not
+            // been picked. In this case we need to enter end-game mode, if not
             // already in it.
             if !self.in_end_game
                 && missing_piece_count > 0

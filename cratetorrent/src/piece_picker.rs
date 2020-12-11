@@ -10,6 +10,11 @@ pub(crate) struct PiecePicker {
     ///
     /// The vector is pre-allocated to the number of pieces in the torrent.
     pieces: Vec<Piece>,
+    /// A cache for the number of pieces we haven't received yet (but may have
+    /// picked).
+    missing_count: usize,
+    /// A cache for the number of pieces that can be picked.
+    free_count: usize,
 }
 
 /// Metadata about a piece relevant for the piece picker.
@@ -34,7 +39,13 @@ impl PiecePicker {
     pub fn new(own_pieces: Bitfield) -> Self {
         let mut pieces = Vec::new();
         pieces.resize_with(own_pieces.len(), Piece::default);
-        Self { own_pieces, pieces }
+        let missing_count = own_pieces.count_zeros();
+        Self {
+            own_pieces,
+            pieces,
+            missing_count,
+            free_count: missing_count,
+        }
     }
 
     /// Returns an immutable reference to a bitfield of the pieces we own.
@@ -44,27 +55,14 @@ impl PiecePicker {
 
     /// Returns the number of missing pieces that are needed to complete the
     /// download.
-    pub fn count_missing_pieces(&self) -> usize {
-        // TODO: optimize this by caching the count in self
-        self.own_pieces.count_zeros()
+    pub fn missing_piece_count(&self) -> usize {
+        self.missing_count
     }
 
     /// Returns true if all pieces have been picked (whether pending or
     /// recieved).
     pub fn all_pieces_picked(&self) -> bool {
-        self.count_free_pieces() == 0
-    }
-
-    /// Counts the pieces that we can still request.
-    pub fn count_free_pieces(&self) -> usize {
-        // TODO: optimize this by caching the count in self
-        let mut acc = 0;
-        for index in 0..self.pieces.len() {
-            if !self.own_pieces[index] && !self.pieces[index].is_pending {
-                acc += 1;
-            }
-        }
-        acc
+        self.free_count == 0
     }
 
     /// Returns the first piece that we don't yet have and isn't already being
@@ -84,6 +82,7 @@ impl PiecePicker {
                 // set pending flag on piece so that this piece is not picked
                 // again (see note on field)
                 piece.is_pending = true;
+                self.free_count -= 1;
                 log::trace!("Picked piece {}", index);
                 return Some(index);
             }
@@ -137,22 +136,42 @@ impl PiecePicker {
     }
 
     /// Tells the piece picker that we have downloaded the piece at the given
-    /// index.
+    /// index that we had picked before.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the piece was already received.
     pub fn received_piece(&mut self, index: PieceIndex) {
         log::trace!("Registering received piece {}", index);
 
         // we assert here as this method is only called by internal methods on
         // piece completion, meaning the piece must exist (we can't download an
         // invalid piece)
-        debug_assert!(index < self.own_pieces.len());
+        let mut have_piece =
+            self.own_pieces.get_mut(index).expect("invalid piece index");
+        // we must not already have this piece as otherwise the free/missing
+        // count logic is thrown off
+        assert!(!*have_piece);
 
         // register owned piece
-        self.own_pieces.set(index, true);
-        // also set that this piece is no longer pending (even though we won't
-        // be downloading it anymore, later we may re-download a piece in which
-        // case not resetting the flag would cause us to never pick that piece
-        // again)
-        self.pieces[index].is_pending = false;
+        *have_piece = true;
+        self.missing_count -= 1;
+
+        // This is an edge-case and shouldn't normally happen, but we guard
+        // against it anyway in case there are changes in other parts of the
+        // code.
+        // If the piece was received without it having previously been picked,
+        // we need to decrease the free piece count here, as it is normally done
+        // in the `pick_piece` method.
+        let piece = &mut self.pieces[index];
+        if !piece.is_pending {
+            self.free_count -= 1;
+            // also set that this piece is no longer pending (even though we
+            // won't be downloading it anymore, later we may re-download a piece
+            // in which case not resetting the flag would cause us to never pick
+            // the piece again)
+            piece.is_pending = false;
+        }
     }
 
     pub fn pieces(&self) -> &[Piece] {
@@ -232,23 +251,23 @@ mod tests {
         let piece_count = 15;
         let mut piece_picker = PiecePicker::empty(piece_count);
 
-        assert_eq!(piece_picker.count_missing_pieces(), piece_count);
+        assert_eq!(piece_picker.missing_piece_count(), piece_count);
 
         // set 2 pieces
         let have_count = 2;
-        for i in 0..have_count {
-            piece_picker.own_pieces.set(i, true);
+        for index in 0..have_count {
+            piece_picker.received_piece(index);
         }
         assert_eq!(
-            piece_picker.count_missing_pieces(),
+            piece_picker.missing_piece_count(),
             piece_count - have_count
         );
 
         // set all pieces
-        for mut piece in piece_picker.own_pieces.iter_mut() {
-            *piece = true;
+        for index in have_count..piece_count {
+            piece_picker.received_piece(index);
         }
-        assert_eq!(piece_picker.count_missing_pieces(), 0);
+        assert_eq!(piece_picker.missing_piece_count(), 0);
     }
 
     /// Tests that the piece picker correctly reports pieces that were not
@@ -258,35 +277,33 @@ mod tests {
         // empty piece picker
         let piece_count = 15;
         let mut piece_picker = PiecePicker::empty(piece_count);
-
-        assert_eq!(piece_picker.count_free_pieces(), piece_count);
-
-        // received 2 pieces
-        piece_picker.received_piece(0);
-        piece_picker.received_piece(1);
-        assert_eq!(piece_picker.count_free_pieces(), 13);
-
-        // pick 3 pieces
-        // NOTE: need to register frequency before we do
+        // NOTE: need to register frequency before we pick any pieces
         piece_picker
             .register_availability(&Bitfield::repeat(true, piece_count))
             .unwrap();
-        let p = piece_picker.pick_piece();
-        assert!(p.is_some());
-        let p = piece_picker.pick_piece();
-        assert!(p.is_some());
-        let p = piece_picker.pick_piece();
-        assert!(p.is_some());
-        assert_eq!(piece_picker.count_free_pieces(), 10);
 
-        // received 1 more piece from the picked ones, shouldn't change
-        // outcome
+        assert_eq!(piece_picker.free_count, piece_count);
+
+        // picked and received 2 pieces
+        for i in 0..2 {
+            assert!(piece_picker.pick_piece().is_some());
+            piece_picker.received_piece(i);
+        }
+        assert_eq!(piece_picker.free_count, 13);
+
+        // pick 3 pieces
+        for _ in 0..3 {
+            assert!(piece_picker.pick_piece().is_some());
+        }
+        assert_eq!(piece_picker.free_count, 10);
+
+        // received 1 of the above picked pieces: shouldn't change outcome
         piece_picker.received_piece(2);
-        assert_eq!(piece_picker.count_free_pieces(), 10);
+        assert_eq!(piece_picker.free_count, 10);
 
         // pick rest of the pieces
         for _ in 0..10 {
-            piece_picker.pick_piece();
+            assert!(piece_picker.pick_piece().is_some());
         }
         assert!(piece_picker.all_pieces_picked());
     }
