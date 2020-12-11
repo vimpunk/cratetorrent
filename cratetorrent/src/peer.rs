@@ -53,7 +53,12 @@ pub(crate) enum Command {
     /// The result of reading a block from disk.
     Block(Block),
     /// Notifies this peer session that a new piece is available.
-    NewPiece(PieceIndex),
+    PieceCompletion {
+        /// The piece that was completed.
+        index: PieceIndex,
+        /// Tell the session to enter end-game mode.
+        in_end_game: bool,
+    },
     /// Eventually shut down the peer session.
     Shutdown,
 }
@@ -435,31 +440,9 @@ impl PeerSession {
                         Command::Block(block)=> {
                             self.send_block(&mut sink, block).await?;
                         }
-                        Command::NewPiece(piece_index) => {
-                            // if peer doesn't have the piece, announce it
-                            if !self.peer.pieces[piece_index]  {
-                                log::debug!(
-                                    target: &self.ctx.log_target,
-                                    "Announcing piece {}",
-                                    piece_index
-                                );
-                                sink.send(Message::Have{ piece_index }).await?;
-                            } else {
-                                // Otherwise peer has it and we may have
-                                // requested it. Check if there are any pending
-                                // requests for blocks in this piece, and if so,
-                                // cancel them.
-                                for block in self.outgoing_requests.iter() {
-                                    if block.piece_index == piece_index {
-                                        log::info!(
-                                            target: &self.ctx.log_target,
-                                            "Already have block {}, cancelling",
-                                            block
-                                        );
-                                        sink.send(Message::Cancel(*block)).await?;
-                                    }
-                                }
-                            }
+                        Command::PieceCompletion { index, in_end_game } => {
+                            self.ctx.in_end_game = in_end_game;
+                            self.handle_piece_completion(&mut sink, index).await?;
                         }
                         Command::Shutdown => {
                             log::info!(
@@ -600,17 +583,18 @@ impl PeerSession {
     async fn free_pending_blocks(&mut self) {
         let downloads_guard = self.torrent.downloads.read().await;
         for block in self.outgoing_requests.drain() {
-            log::debug!(
-                target: &self.ctx.log_target,
-                "Freeing block {} for download",
-                block
-            );
-            downloads_guard
-                .get(&block.piece_index)
-                .expect("no corresponding PieceDownload for request")
-                .write()
-                .await
-                .free_block(&block);
+            // The piece may no longer be present if it was compoleted by
+            // another peer in the meantime and torrent removed it from the
+            // shared download store. This is fine, in this case we don't have
+            // anything to do.
+            if let Some(download) = downloads_guard.get(&block.piece_index) {
+                log::debug!(
+                    target: &self.ctx.log_target,
+                    "Freeing block {} for download",
+                    block
+                );
+                download.write().await.free_block(&block);
+            }
         }
     }
 
@@ -838,7 +822,12 @@ impl PeerSession {
                 "Trying to continue download {}",
                 download_write_guard.piece_index()
             );
-            download_write_guard.pick_blocks(to_request_count, &mut requests);
+            download_write_guard.pick_blocks(
+                to_request_count,
+                &mut requests,
+                self.ctx.in_end_game,
+                &self.outgoing_requests,
+            );
         }
 
         // while we can make more requests we start new download(s)
@@ -865,7 +854,12 @@ impl PeerSession {
                     self.torrent.storage.piece_len(index)?,
                 );
 
-                download.pick_blocks(to_request_count, &mut requests);
+                download.pick_blocks(
+                    to_request_count,
+                    &mut requests,
+                    self.ctx.in_end_game,
+                    &self.outgoing_requests,
+                );
                 // save download
                 self.torrent
                     .downloads
@@ -941,8 +935,13 @@ impl PeerSession {
                 // us by sending unwanted blocks repeatedly.
                 log::warn!(
                     target: &self.ctx.log_target,
-                    "Discarding block {} with no piece download",
-                    block_info
+                    "Discarding block {} with no piece download{}",
+                    block_info,
+                    if self.ctx.in_end_game {
+                        " in end-game"
+                    } else {
+                        ""
+                    }
                 );
                 self.ctx.record_waste(block_info.len);
                 return Ok(());
@@ -951,7 +950,7 @@ impl PeerSession {
 
         // don't process the block if already downloaded
         if prev_status == BlockStatus::Received {
-            // TODO: record waste stats
+            self.ctx.record_waste(block_info.len);
             log::info!(
                 target: &self.ctx.log_target,
                 "Already downloaded block {}",
@@ -963,7 +962,9 @@ impl PeerSession {
                 "Got block {}{}",
                 block_info,
                 if self.ctx.in_slow_start {
-                    " in slow start"
+                    " in slow-start"
+                } else if self.ctx.in_end_game {
+                    " in end-game"
                 } else {
                     ""
                 }
@@ -1152,6 +1153,49 @@ impl PeerSession {
             log::warn!(target: &self.ctx.log_target, "Peer sent invalid {}", info);
             Err(Error::InvalidBlockInfo)
         }
+    }
+
+    /// When the torrent completes a new piece, peer sessions are notified of
+    /// it.
+    ///
+    /// If peer has the piece, we check if we had any requests for blocks in it
+    /// that we need to cancel. If peer doesn't have the piece, we announce it.
+    async fn handle_piece_completion(
+        &mut self,
+        sink: &mut SplitSink<Framed<TcpStream, PeerCodec>, Message>,
+        piece_index: PieceIndex,
+    ) -> Result<()> {
+        // if peer doesn't have the piece, announce it
+        if !self.peer.pieces[piece_index] {
+            log::debug!(
+                target: &self.ctx.log_target,
+                "Announcing piece {}",
+                piece_index
+            );
+            sink.send(Message::Have { piece_index }).await?;
+        } else {
+            // Otherwise peer has it and we may have requested it. Check if
+            // there are any pending requests for blocks in this piece, and if
+            // so, cancel them.
+            // TODO: We could actually send the cancel messages much sooner,
+            // when we first receive the block (rather then waiting for the
+            // piece completion). However, it would require an mpsc roundtrip to
+            // torrent and all other peers, for each of these blocks received in
+            // end-game, so it is questionable whether it's worth it at the cost
+            // of slowing down the engine.
+            for block in self.outgoing_requests.iter() {
+                if block.piece_index == piece_index {
+                    log::info!(
+                        target: &self.ctx.log_target,
+                        "Already have block {}, cancelling",
+                        block
+                    );
+                    sink.send(Message::Cancel(*block)).await?;
+                }
+            }
+        }
+
+        Ok(())
     }
 }
 

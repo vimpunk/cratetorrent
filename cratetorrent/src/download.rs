@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use crate::{block_count, block_len, BlockInfo, PieceIndex, BLOCK_LEN};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -40,7 +42,14 @@ impl PieceDownload {
     }
 
     /// Picks the requested number of blocks or fewer, if fewer are remaining.
-    pub fn pick_blocks(&mut self, count: usize, blocks: &mut Vec<BlockInfo>) {
+    /// If we're in end game mode, we ignore blocks requested by other peers.
+    pub fn pick_blocks(
+        &mut self,
+        count: usize,
+        pick_buf: &mut Vec<BlockInfo>,
+        in_end_game: bool,
+        prev_picked: &HashSet<BlockInfo>,
+    ) {
         log::trace!(
             "Trying to pick {} block(s) in piece {} (length: {}, blocks: {})",
             count,
@@ -58,14 +67,30 @@ impl PieceDownload {
             }
 
             // only pick block if it's free
-            if let BlockStatus::Free = block {
-                blocks.push(BlockInfo {
+            if *block == BlockStatus::Free {
+                pick_buf.push(BlockInfo {
                     piece_index: self.index,
                     offset: i as u32 * BLOCK_LEN,
                     len: block_len(self.len, i),
                 });
                 *block = BlockStatus::Requested;
                 picked += 1;
+            } else if in_end_game && *block == BlockStatus::Requested {
+                // in end-game it's fair to pick blocks already requested but
+                // don't pick the same block twice from the same peer
+                let block_info = BlockInfo {
+                    piece_index: self.index,
+                    offset: i as u32 * BLOCK_LEN,
+                    len: block_len(self.len, i),
+                };
+                // TODO: we could probably optimize this by saving some cheap
+                // peer id in the block metadata and check if peer is present
+                // (we'll need something like this for parole downloads at some
+                // point anyway)
+                if !prev_picked.contains(&block_info) {
+                    pick_buf.push(block_info);
+                    picked += 1;
+                }
             }
 
             // TODO(https://github.com/mandreyel/cratetorrent/issues/18): if we
@@ -77,7 +102,7 @@ impl PieceDownload {
                 "Picked {} block(s) for piece {}: {:?}",
                 picked,
                 self.index,
-                &blocks[blocks.len() - picked..]
+                &pick_buf[pick_buf.len() - picked..]
             );
         } else {
             log::trace!("Cannot pick any blocks in piece {}", self.index);
@@ -146,25 +171,25 @@ mod tests {
 
     use super::*;
 
-    // Tests that repeatedly requesting as many blocks as are in the piece
-    // returns all blocks, none of them previously picked.
+    /// Tests that repeatedly requesting as many blocks as are in the piece
+    /// returns all blocks, none of them previously picked.
     #[test]
-    fn test_pick_all_blocks_one_by_one() {
+    fn should_pick_all_blocks_one_by_one() {
         let index = 0;
         let piece_len = 6 * BLOCK_LEN;
+        let block_count = block_count(piece_len);
+        let in_end_game = false;
 
         let mut download = PieceDownload::new(index, piece_len);
-
         // save picked blocks
-        let block_count = block_count(piece_len);
         let mut picked = HashSet::with_capacity(block_count);
 
         // pick all blocks one by one
         for _ in 0..block_count {
-            let mut blocks = Vec::new();
-            download.pick_blocks(1, &mut blocks);
-            assert_eq!(blocks.len(), 1);
-            let block = *blocks.first().unwrap();
+            let mut picked_blocks = Vec::new();
+            download.pick_blocks(1, &mut picked_blocks, in_end_game, &picked);
+            assert_eq!(picked_blocks.len(), 1);
+            let block = *picked_blocks.first().unwrap();
             // assert that this block hasn't been picked before
             assert!(!picked.contains(&block));
             // mark block as picked
@@ -178,20 +203,26 @@ mod tests {
         }
     }
 
-    // Tests that requesting as many blocks as are in the piece in one go
-    // returns all blocks.
+    /// Tests that requesting as many blocks as are in the piece in one go
+    /// returns all blocks.
     #[test]
-    fn test_pick_all_blocks() {
+    fn should_pick_all_blocks_in_new_download() {
         let piece_index = 0;
         let piece_len = 6 * BLOCK_LEN;
+        let in_end_game = false;
 
         let mut download = PieceDownload::new(piece_index, piece_len);
 
         // pick all blocks
         let block_count = block_count(piece_len);
-        let mut blocks = Vec::new();
-        download.pick_blocks(block_count, &mut blocks);
-        assert_eq!(blocks.len(), block_count);
+        let mut picked_blocks = Vec::new();
+        download.pick_blocks(
+            block_count,
+            &mut picked_blocks,
+            in_end_game,
+            &HashSet::new(),
+        );
+        assert_eq!(picked_blocks.len(), block_count);
 
         // assert that we picked all blocks
         for block in download.blocks.iter() {
@@ -199,48 +230,65 @@ mod tests {
         }
     }
 
-    // Tests that repeatedly requesting as many blocks as are in the piece
-    // returns all blocks, none of them previously picked.
+    /// Tests that after marking a block as received we don't pick those blocks
+    /// again.
     #[test]
-    fn test_receive_all_blocks() {
+    fn should_not_pick_received_blocks() {
         let piece_index = 0;
         let piece_len = 6 * BLOCK_LEN;
+        let block_count = block_count(piece_len);
+        let in_end_game = false;
 
         let mut download = PieceDownload::new(piece_index, piece_len);
 
-        let block_count = block_count(piece_len);
-        let mut blocks = Vec::new();
-        download.pick_blocks(block_count, &mut blocks);
-        assert_eq!(blocks.len(), block_count);
+        let mut picked_blocks = Vec::new();
+        download.pick_blocks(
+            block_count,
+            &mut picked_blocks,
+            in_end_game,
+            &HashSet::new(),
+        );
+        assert_eq!(picked_blocks.len(), block_count);
 
         // mark all blocks as requested
-        for block in blocks.iter() {
+        for block in picked_blocks.iter() {
             download.received_block(block);
         }
 
-        let mut blocks = Vec::new();
-        download.pick_blocks(block_count, &mut blocks);
-        assert!(blocks.is_empty());
+        let mut picked_blocks = Vec::new();
+        download.pick_blocks(
+            block_count,
+            &mut picked_blocks,
+            in_end_game,
+            &HashSet::new(),
+        );
+        assert!(picked_blocks.is_empty());
     }
 
-    // Tests that requesting as many blocks as are in the piece in one go
-    // returns only blocks not already requested or received.
+    /// Tests that requesting as many blocks as are in the piece in one go
+    /// returns only blocks not already requested or received.
     #[test]
-    fn test_pick_free_blocks() {
+    fn should_pick_only_free_blocks_from_all() {
         let piece_index = 0;
         let piece_len = 6 * BLOCK_LEN;
+        let in_end_game = false;
 
         let mut download = PieceDownload::new(piece_index, piece_len);
 
         // pick 4 blocks
         let picked_block_indices = [0, 1, 2, 3];
-        let mut blocks = Vec::new();
-        download.pick_blocks(picked_block_indices.len(), &mut blocks);
-        assert_eq!(blocks.len(), picked_block_indices.len());
+        let mut picked_blocks = Vec::new();
+        download.pick_blocks(
+            picked_block_indices.len(),
+            &mut picked_blocks,
+            in_end_game,
+            &HashSet::new(),
+        );
+        assert_eq!(picked_blocks.len(), picked_block_indices.len());
 
         // mark 3 of them as received
         let received_block_count = 3;
-        for block in blocks.iter().take(received_block_count) {
+        for block in picked_blocks.iter().take(received_block_count) {
             download.received_block(block);
         }
 
@@ -258,8 +306,66 @@ mod tests {
         );
 
         // pick all remaining free blocks
-        let mut blocks = Vec::new();
-        download.pick_blocks(block_count, &mut blocks);
-        assert_eq!(blocks.len(), block_count - picked_block_indices.len());
+        let mut picked_blocks = Vec::new();
+        download.pick_blocks(
+            block_count,
+            &mut picked_blocks,
+            in_end_game,
+            &HashSet::new(),
+        );
+        assert_eq!(
+            picked_blocks.len(),
+            block_count - picked_block_indices.len()
+        );
+    }
+
+    /// Tests that in end-game mode blocks that were already picked by other
+    /// peers can be picked by other peers again.
+    #[test]
+    fn should_pick_requested_blocks_again_in_end_game() {
+        let piece_index = 0;
+        let piece_len = 6 * BLOCK_LEN;
+        let block_count = block_count(piece_len);
+        let in_end_game = true;
+
+        let mut download = PieceDownload::new(piece_index, piece_len);
+
+        // pick all blocks multiple times
+        for _ in 0..2 {
+            let mut picked_blocks = Vec::new();
+            download.pick_blocks(
+                block_count,
+                &mut picked_blocks,
+                in_end_game,
+                &HashSet::new(),
+            );
+            assert_eq!(picked_blocks.len(), block_count);
+        }
+    }
+
+    /// Tests that blocks that were already picked by a peer are not picked
+    /// again for the same peer (only relevant in end-game mode).
+    #[test]
+    fn should_not_pick_already_picked_blocks_in_end_game() {
+        let piece_index = 0;
+        let piece_len = 6 * BLOCK_LEN;
+        let block_count = block_count(piece_len);
+        let in_end_game = true;
+
+        let mut download = PieceDownload::new(piece_index, piece_len);
+        // save picked blocks
+        let mut picked = HashSet::with_capacity(block_count);
+
+        // pick all blocks one by one
+        for _ in 0..block_count {
+            let mut picked_blocks = Vec::new();
+            download.pick_blocks(1, &mut picked_blocks, in_end_game, &picked);
+            assert_eq!(picked_blocks.len(), 1);
+            let block = *picked_blocks.first().unwrap();
+            // assert that this block hasn't been picked before
+            assert!(!picked.contains(&block));
+            // mark block as picked
+            picked.insert(block);
+        }
     }
 }
