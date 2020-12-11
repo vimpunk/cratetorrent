@@ -397,8 +397,8 @@ mod tests {
     fn should_prepare_for_download() {
         let mut s = SessionContext::default();
 
-        s.is_interested = true;
-        s.is_choked = false;
+        s.state.is_interested = true;
+        s.state.is_choked = false;
 
         s.prepare_for_download();
 
@@ -410,8 +410,8 @@ mod tests {
     fn should_exit_slow_start() {
         let mut s = SessionContext::default();
 
-        s.is_interested = true;
-        s.is_choked = false;
+        s.state.is_interested = true;
+        s.state.is_choked = false;
         s.in_slow_start = true;
         s.target_request_queue_len = Some(1);
 
@@ -449,8 +449,8 @@ mod tests {
     fn should_not_update_target_request_queue_in_slow_start() {
         let mut s = SessionContext::default();
 
-        s.is_interested = true;
-        s.is_choked = false;
+        s.state.is_interested = true;
+        s.state.is_choked = false;
         s.in_slow_start = true;
         s.target_request_queue_len = Some(1);
 
@@ -469,8 +469,8 @@ mod tests {
     fn should_update_target_request_queue() {
         let mut s = SessionContext::default();
 
-        s.is_interested = true;
-        s.is_choked = false;
+        s.state.is_interested = true;
+        s.state.is_choked = false;
         s.in_slow_start = false;
         s.target_request_queue_len = Some(1);
 
@@ -493,8 +493,8 @@ mod tests {
     fn should_update_download_stats_in_slow_start() {
         let mut s = SessionContext::default();
 
-        s.is_interested = true;
-        s.is_choked = false;
+        s.state.is_interested = true;
+        s.state.is_choked = false;
         s.in_slow_start = true;
         s.target_request_queue_len = Some(1);
 

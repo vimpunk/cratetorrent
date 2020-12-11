@@ -14,8 +14,9 @@ The following features are currently supported:
 - Peers may be specified by their address, or if the torrent's metainfo file
   contains trackers, peers are requested from these trackers.
 
-On my fairly slow internet connection, Ubuntu 20.04 LTS (~2.8 GB) is
-downloaded in about 5 minutes at an average download rate of 10 MPbs, which
+On my fairly slow internet connection with peak download rates of about 9 MBps,
+Ubuntu 20.04 LTS (~2.8 GB) is downloaded in about 5 minutes at a download rate
+of 8-9 MPbs (with fast seeds), that is, almost fully utilizing the link. This
 indicates that performance is acceptably good right out of the gate. More
 optimizations are expected.
 

@@ -145,6 +145,7 @@ time docker run \
     -ti \
     --rm \
     --env LISTEN="${listen_addr}" \
+    --env MODE=download \
     --env SEEDS="${seeds_addrs}" \
     --env METAINFO_PATH="${metainfo_cont_path}" \
     --env DOWNLOAD_DIR="${download_dir}" \

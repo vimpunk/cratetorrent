@@ -1,11 +1,10 @@
 use std::{fs, net::SocketAddr, path::PathBuf};
 
 use clap::{App, Arg};
-use cratetorrent::metainfo::*;
+use cratetorrent::{engine::Mode, metainfo::*};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    log4rs::init_file("cratetorrent-cli/log4rs.yml", Default::default())
-        .expect("error configuring logger");
+    env_logger::init();
 
     // set up cli args
     let matches = App::new("Cratetorrent CLI")
@@ -18,6 +17,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .help(
                     "The socket address on which to listen for new connections",
                 )
+                .takes_value(true),
+        )
+        .arg(
+            Arg::with_name("mode")
+                .short("m")
+                .long("mode")
+                .value_name("MODE")
+                .help("Whether to 'seed' or 'download' the torrent.")
                 .takes_value(true),
         )
         .arg(
@@ -71,6 +78,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .split(',')
         .filter_map(|s| s.parse().ok())
         .collect();
+    println!("seeds: {:?}", seeds);
+
+    let mode = matches.value_of("mode").unwrap_or_default();
+    let mode = match mode {
+        "seed" => Mode::Seed,
+        _ => Mode::Download { seeds },
+    };
 
     // read in torrent metainfo
     let metainfo = fs::read(metainfo_path)?;
@@ -79,19 +93,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("metainfo: {:?}", metainfo);
     println!("piece count: {}", metainfo.piece_count());
     println!("info hash: {}", hex::encode(&metainfo.info_hash));
-    println!("seeds: {:?}", seeds);
 
     // arbitrary client id for now
     const CLIENT_ID: &str = "cbt-2020-03-03-00000";
     let mut client_id = [0; 20];
     client_id.copy_from_slice(CLIENT_ID.as_bytes());
 
-    cratetorrent::engine::download_torrent(
+    cratetorrent::engine::run(
         client_id,
         download_dir,
         metainfo,
         listen_addr,
-        seeds,
+        mode,
     )?;
 
     Ok(())

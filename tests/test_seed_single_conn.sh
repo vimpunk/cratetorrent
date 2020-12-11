@@ -69,6 +69,7 @@ time docker run \
     --rm \
     --name "${seed_cont_name}" \
     --env LISTEN="${seed_listen_addr}" \
+    --env MODE=seed \
     --env METAINFO_PATH="${metainfo_cont_path}" \
     --env DOWNLOAD_DIR="${src_cont_dir}" \
     --env RUST_LOG="${rust_log}" \

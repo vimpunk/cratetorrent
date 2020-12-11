@@ -27,7 +27,7 @@ use crate::{
     piece_picker::PiecePicker,
     storage_info::StorageInfo,
     tracker::{Announce, Event, Tracker},
-    Bitfield, BlockInfo, PeerId, PieceIndex, Sha1Hash, Side, TorrentId,
+    Bitfield, BlockInfo, PeerId, PieceIndex, Sha1Hash, TorrentId,
 };
 
 /// The channel for communicating with torrent.
@@ -614,8 +614,6 @@ struct Peer {
     /// Cached information about the session state. Updated every time peer
     /// updates us.
     state: SessionState,
-    /// Whether the peer is a seed or a leech.
-    side: Side,
 }
 
 impl Peer {
@@ -627,7 +625,6 @@ impl Peer {
                 connection: ConnectionState::Connecting,
                 ..Default::default()
             },
-            side: Default::default(),
         }
     }
 
@@ -643,7 +640,6 @@ impl Peer {
                 connection: ConnectionState::Handshaking,
                 ..Default::default()
             },
-            side: Default::default(),
         }
     }
 }

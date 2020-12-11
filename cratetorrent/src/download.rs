@@ -247,7 +247,13 @@ mod tests {
         let block_count = block_count(piece_len);
 
         assert_eq!(
-            download.count_missing_blocks(),
+            download.blocks.iter().fold(0, |acc, block| {
+                if !matches!(block, BlockStatus::Received) {
+                    acc + 1
+                } else {
+                    acc
+                }
+            }),
             block_count - received_block_count
         );
 

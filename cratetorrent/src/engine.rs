@@ -12,60 +12,26 @@ use crate::{
     Bitfield, PeerId,
 };
 
-/// Connects to seed peers and downloads the torrent.
-pub fn download_torrent(
-    client_id: PeerId,
-    download_dir: PathBuf,
-    metainfo: Metainfo,
-    listen_addr: SocketAddr,
-    seeds: Vec<SocketAddr>,
-) -> Result<()> {
-    let mut rt = Runtime::new()?;
-    rt.block_on(start_engine(
-        client_id,
-        download_dir,
-        metainfo,
-        listen_addr,
-        Mode::Download { seeds },
-    ))
-}
-
-/// Seeds a torrent until an error occurs.
-pub fn seed_torrent(
-    client_id: PeerId,
-    download_dir: PathBuf,
-    metainfo: Metainfo,
-    listen_addr: SocketAddr,
-) -> Result<()> {
-    let mut rt = Runtime::new()?;
-    rt.block_on(start_engine(
-        client_id,
-        download_dir,
-        metainfo,
-        listen_addr,
-        Mode::Seed,
-    ))
-}
-
-enum Mode {
+pub enum Mode {
     Download { seeds: Vec<SocketAddr> },
     Seed,
 }
 
-impl Mode {
-    fn own_pieces(&self, piece_count: usize) -> Bitfield {
-        match self {
-            Self::Download { .. } => Bitfield::repeat(false, piece_count),
-            Self::Seed => Bitfield::repeat(true, piece_count),
-        }
-    }
-
-    fn seeds(self) -> Vec<SocketAddr> {
-        match self {
-            Self::Download { seeds } => seeds,
-            _ => Vec::new(),
-        }
-    }
+pub fn run(
+    client_id: PeerId,
+    download_dir: PathBuf,
+    metainfo: Metainfo,
+    listen_addr: SocketAddr,
+    mode: Mode,
+) -> Result<()> {
+    let mut rt = Runtime::new()?;
+    rt.block_on(start_engine(
+        client_id,
+        download_dir,
+        metainfo,
+        listen_addr,
+        mode,
+    ))
 }
 
 async fn start_engine(
@@ -146,4 +112,20 @@ async fn start_engine(
         .map_err(Error::from)?;
 
     Ok(())
+}
+
+impl Mode {
+    fn own_pieces(&self, piece_count: usize) -> Bitfield {
+        match self {
+            Self::Download { .. } => Bitfield::repeat(false, piece_count),
+            Self::Seed => Bitfield::repeat(true, piece_count),
+        }
+    }
+
+    fn seeds(self) -> Vec<SocketAddr> {
+        match self {
+            Self::Download { seeds } => seeds,
+            _ => Vec::new(),
+        }
+    }
 }
