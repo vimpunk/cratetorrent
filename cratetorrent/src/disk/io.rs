@@ -4,7 +4,7 @@ use tokio::sync::{mpsc, RwLock};
 
 use super::{
     error::*, Alert, AlertReceiver, AlertSender, Command, CommandReceiver,
-    CommandSender, TorrentAllocation,
+    CommandSender,
 };
 use crate::{error::Error, peer, BlockInfo, TorrentId};
 use file::TorrentFile;
@@ -55,6 +55,7 @@ impl Disk {
                     id,
                     storage_info,
                     piece_hashes,
+                    torrent_chan,
                 } => {
                     log::trace!(
                         "Disk received NewTorrent command: id={}, info={:?}",
@@ -72,15 +73,15 @@ impl Disk {
                     // NOTE: Do _NOT_ return on failure, we don't want to kill
                     // the disk task due to potential disk IO errors: we just
                     // want to log it and notify engine of it.
-                    let torrent_res = Torrent::new(storage_info, piece_hashes);
+                    let torrent_res =
+                        Torrent::new(storage_info, piece_hashes, torrent_chan);
                     match torrent_res {
-                        Ok((torrent, alert_port)) => {
+                        Ok(torrent) => {
                             log::info!("Torrent {} successfully allocated", id);
                             self.torrents.insert(id, RwLock::new(torrent));
                             // send notificaiton of allocation success
-                            self.alert_chan.send(Alert::TorrentAllocation(
-                                Ok(TorrentAllocation { id, alert_port }),
-                            ))?;
+                            self.alert_chan
+                                .send(Alert::TorrentAllocation(Ok(id)))?;
                         }
                         Err(e) => {
                             log::error!(
@@ -129,7 +130,7 @@ impl Disk {
         block_info: BlockInfo,
         data: Vec<u8>,
     ) -> Result<()> {
-        log::trace!("Saving torrent {} {} to disk", id, block_info);
+        log::trace!("Saving torrent {} block {} to disk", id, block_info);
 
         // check torrent id
         //
@@ -156,7 +157,7 @@ impl Disk {
         block_info: BlockInfo,
         chan: peer::Sender,
     ) -> Result<()> {
-        log::trace!("Reading torrent {} {} from disk", id, block_info);
+        log::trace!("Reading torrent {} block {} from disk", id, block_info);
 
         // check torrent id
         //

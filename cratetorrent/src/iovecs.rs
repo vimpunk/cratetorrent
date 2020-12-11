@@ -98,7 +98,7 @@
 //!             iovecs.as_slice(),
 //!             offset,
 //!         )
-//!         .expect("Failed to write to file");
+//!         .expect("cannot write to file");
 //!         iovecs.advance(write_count);
 //!         total_write_count += write_count;
 //!         offset += write_count as i64;

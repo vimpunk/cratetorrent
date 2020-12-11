@@ -4,7 +4,7 @@ use tokio::{
 };
 
 use crate::{
-    error::Error, peer, storage_info::StorageInfo, BlockInfo, PieceIndex,
+    error::Error, peer, storage_info::StorageInfo, torrent, BlockInfo,
     TorrentId,
 };
 use io::Disk;
@@ -48,6 +48,7 @@ impl DiskHandle {
         id: TorrentId,
         storage_info: StorageInfo,
         piece_hashes: Vec<u8>,
+        torrent_chan: torrent::Sender,
     ) -> Result<()> {
         log::trace!("Allocating new torrent {}", id);
         self.0
@@ -55,6 +56,7 @@ impl DiskHandle {
                 id,
                 storage_info,
                 piece_hashes,
+                torrent_chan,
             })
             .map_err(Error::from)
     }
@@ -118,6 +120,7 @@ enum Command {
         id: TorrentId,
         storage_info: StorageInfo,
         piece_hashes: Vec<u8>,
+        torrent_chan: torrent::Sender,
     },
     /// Request to eventually write a block to disk.
     WriteBlock {
@@ -148,47 +151,7 @@ pub(crate) enum Alert {
     /// Torrent allocation result. If successful, the id of the allocated
     /// torrent is returned for identification, if not, the reason of the error
     /// is included.
-    TorrentAllocation(Result<TorrentAllocation, NewTorrentError>),
-}
-
-/// The result of successfully allocating a torrent.
-#[derive(Debug)]
-pub(crate) struct TorrentAllocation {
-    /// The id of the torrent that has been allocated.
-    pub id: TorrentId,
-    /// The port on which torrent may receive alerts.
-    pub alert_port: TorrentAlertReceiver,
-}
-
-/// The type of channel used to alert a torrent about torrent specific events.
-type TorrentAlertSender = UnboundedSender<TorrentAlert>;
-/// The type of channel on which a torrent can listen for block write
-/// completions.
-pub(crate) type TorrentAlertReceiver = UnboundedReceiver<TorrentAlert>;
-
-/// The alerts that the disk task may send about events related to a specific
-/// torrent.
-#[derive(Debug)]
-pub(crate) enum TorrentAlert {
-    /// Sent when some blocks were written to disk or an error ocurred while
-    /// writing.
-    PieceCompletion(Result<PieceCompletion, WriteError>),
-    /// There was an error reading a block.
-    ReadError {
-        block_info: BlockInfo,
-        error: ReadError,
-    },
-}
-
-/// The type returned on completing a piece.
-#[derive(Debug)]
-pub(crate) struct PieceCompletion {
-    /// The index of the piece.
-    pub index: PieceIndex,
-    /// Whether the piece is valid.
-    ///
-    /// If the piece is invalid, it is not written to disk.
-    pub is_valid: bool,
+    TorrentAllocation(Result<TorrentId, NewTorrentError>),
 }
 
 #[cfg(test)]
@@ -214,20 +177,25 @@ mod tests {
             id,
             piece_hashes,
             info,
+            torrent_chan,
             ..
         } = Env::new("allocate_new_torrent");
 
         // allocate torrent via channel
         disk_handle
-            .allocate_new_torrent(id, info.clone(), piece_hashes.clone())
+            .allocate_new_torrent(
+                id,
+                info.clone(),
+                piece_hashes.clone(),
+                torrent_chan.clone(),
+            )
             .unwrap();
-
         // wait for result on alert port
         let alert = alert_port.recv().await.unwrap();
         match alert {
             Alert::TorrentAllocation(res) => {
                 assert!(res.is_ok());
-                assert_eq!(res.unwrap().id, id);
+                assert_eq!(res.unwrap(), id);
             }
         }
 
@@ -240,7 +208,7 @@ mod tests {
 
         // try to allocate the same torrent a second time
         disk_handle
-            .allocate_new_torrent(id, info, piece_hashes)
+            .allocate_new_torrent(id, info, piece_hashes, torrent_chan.clone())
             .unwrap();
 
         // we should get an already exists error
@@ -262,23 +230,21 @@ mod tests {
             pieces,
             piece_hashes,
             info,
+            torrent_chan,
+            mut torrent_port,
         } = Env::new("write_all_pieces");
 
         // allocate torrent via channel
         disk_handle
-            .allocate_new_torrent(id, info.clone(), piece_hashes)
+            .allocate_new_torrent(
+                id,
+                info.clone(),
+                piece_hashes,
+                torrent_chan.clone(),
+            )
             .unwrap();
-
         // wait for result on alert port
-        let mut torrent_disk_alert_port =
-            if let Some(Alert::TorrentAllocation(Ok(allocation))) =
-                alert_port.recv().await
-            {
-                allocation.alert_port
-            } else {
-                assert!(false, "torrent could not be allocated");
-                return;
-            };
+        alert_port.recv().await.expect("cannot allocate torrent");
 
         // write all pieces to disk
         for index in 0..pieces.len() {
@@ -287,13 +253,13 @@ mod tests {
                 let block_end = block.offset + block.len;
                 let data = &piece[block.offset as usize..block_end as usize];
                 debug_assert_eq!(data.len(), block.len as usize);
-                println!("Writing piece {} block {:?}", index, block);
+                println!("Writing piece {} block {}", index, block);
                 disk_handle.write_block(id, block, data.to_vec()).unwrap();
             });
 
             // wait for disk write result
-            if let Some(TorrentAlert::PieceCompletion(Ok(piece))) =
-                torrent_disk_alert_port.recv().await
+            if let Some(torrent::Message::PieceCompletion(Ok(piece))) =
+                torrent_port.recv().await
             {
                 // piece is complete so it should be hashed and valid
                 assert_eq!(piece.index, index);
@@ -309,7 +275,7 @@ mod tests {
             _ => unreachable!(),
         };
         fs::remove_file(info.download_dir.join(&file.path))
-            .expect("Failed to clean up disk test torrent file");
+            .expect("cannot clean up disk test torrent file");
     }
 
     /// Tests writing of an invalid piece and verifying that an alert of it
@@ -323,23 +289,21 @@ mod tests {
             pieces,
             piece_hashes,
             info,
+            torrent_chan,
+            mut torrent_port,
         } = Env::new("write_invalid_piece");
 
         // allocate torrent via channel
         disk_handle
-            .allocate_new_torrent(id, info.clone(), piece_hashes)
+            .allocate_new_torrent(
+                id,
+                info.clone(),
+                piece_hashes,
+                torrent_chan.clone(),
+            )
             .unwrap();
-
         // wait for result on alert port
-        let mut torrent_disk_alert_port =
-            if let Some(Alert::TorrentAllocation(Ok(allocation))) =
-                alert_port.recv().await
-            {
-                allocation.alert_port
-            } else {
-                assert!(false, "torrent could not be allocated");
-                return;
-            };
+        alert_port.recv().await.expect("cannot allocate torrent");
 
         // write an invalid piece to disk
         let index = 0;
@@ -350,13 +314,13 @@ mod tests {
             let data =
                 &invalid_piece[block.offset as usize..block_end as usize];
             debug_assert_eq!(data.len(), block.len as usize);
-            println!("Writing invalid piece {} block {:?}", index, block);
+            println!("Writing invalid piece {} block {}", index, block);
             disk_handle.write_block(id, block, data.to_vec()).unwrap();
         });
 
         // wait for disk write result
-        if let Some(TorrentAlert::PieceCompletion(Ok(piece))) =
-            torrent_disk_alert_port.recv().await
+        if let Some(torrent::Message::PieceCompletion(Ok(piece))) =
+            torrent_port.recv().await
         {
             assert_eq!(piece.index, index);
             assert_eq!(piece.is_valid, false);
@@ -376,37 +340,35 @@ mod tests {
             pieces,
             piece_hashes,
             info,
+            torrent_chan,
+            mut torrent_port,
         } = Env::new("read_piece_blocks");
 
         // allocate torrent via channel
         disk_handle
-            .allocate_new_torrent(id, info.clone(), piece_hashes)
+            .allocate_new_torrent(
+                id,
+                info.clone(),
+                piece_hashes,
+                torrent_chan.clone(),
+            )
             .unwrap();
-
         // wait for result on alert port
-        let mut torrent_disk_alert_port =
-            if let Some(Alert::TorrentAllocation(Ok(allocation))) =
-                alert_port.recv().await
-            {
-                allocation.alert_port
-            } else {
-                assert!(false, "torrent could not be allocated");
-                return;
-            };
+        alert_port.recv().await.expect("cannot allocate torrent");
 
-        // write second piece to disk
+        // write piece to disk
         let index = 1;
         let piece = &pieces[index];
         for_each_block(index, piece.len() as u32, |block| {
             let block_end = block.offset + block.len;
             let data = &piece[block.offset as usize..block_end as usize];
             debug_assert_eq!(data.len(), block.len as usize);
-            println!("Writing piece {} block {:?}", index, block);
+            println!("Writing piece {} block {}", index, block);
             disk_handle.write_block(id, block, data.to_vec()).unwrap();
         });
 
         // wait for disk write result
-        assert!(torrent_disk_alert_port.recv().await.is_some());
+        assert!(torrent_port.recv().await.is_some());
 
         // set up channels to communicate disk read results
         let (chan, mut port) = mpsc::unbounded_channel();
@@ -445,7 +407,7 @@ mod tests {
             _ => unreachable!(),
         };
         fs::remove_file(info.download_dir.join(&file.path))
-            .expect("Failed to clean up disk test torrent file");
+            .expect("cannot clean up disk test torrent file");
     }
 
     /// Calls the provided function for each block in piece, passing it the
@@ -484,6 +446,8 @@ mod tests {
         pieces: Vec<Vec<u8>>,
         piece_hashes: Vec<u8>,
         info: StorageInfo,
+        torrent_chan: torrent::Sender,
+        torrent_port: torrent::Receiver,
     }
 
     impl Env {
@@ -529,11 +493,11 @@ mod tests {
                 let download_path = download_dir.join(&download_rel_path);
                 if download_path.is_file() {
                     fs::remove_file(&download_path).expect(
-                        "Failed to clean up previous disk test torrent file",
+                        "cannot clean up previous disk test torrent file",
                     );
                 } else if download_path.is_dir() {
                     fs::remove_dir_all(&download_path).expect(
-                        "Failed to clean up previous disk test torrent dir",
+                        "cannot clean up previous disk test torrent dir",
                     );
                 }
             }
@@ -555,11 +519,15 @@ mod tests {
                 }),
             };
 
+            let (torrent_chan, torrent_port) = mpsc::unbounded_channel();
+
             Self {
                 id,
                 pieces,
                 piece_hashes,
                 info,
+                torrent_chan,
+                torrent_port,
             }
         }
     }

@@ -13,8 +13,12 @@ The following features are currently supported:
 - an arbitrary number of peer connections.
 - Peers may be specified by their address, or if the torrent's metainfo file
   contains trackers, peers are requested from these trackers.
-- Note, however, that the torrent state management is not up to par currently,
-  so downloads only really work when the seeds are specified.
+
+On my fairly slow internet connection with peak download rates of about 9 MBps,
+Ubuntu 20.04 LTS (~2.8 GB) is downloaded in about 5 minutes at a download rate
+of 8-9 MPbs (with fast seeds), that is, almost fully utilizing the link. This
+indicates that performance is acceptably good right out of the gate. More
+optimizations are expected.
 
 Features are continuously added, see the [project
 milestones](https://github.com/mandreyel/cratetorrent/issues/26).
@@ -30,17 +34,27 @@ cratetorrent in the future.
 
 The project is split up in two:
 - the `cratetorrent` library, that defines most of the functionality,
-- and a `cratetortent-cli` binary for downloading torrents via the CLI.
+- and a `cratetorrent-cli` binary for downloading torrents via the CLI. Note,
+  however, that this is extremely simple at present, currently only used for
+  integration testing.
 
 
 ## How to run
 
-Tested on stable Rust (1.43).
+Tested on stable Rust 1.48.
+
+**NOTE**: requires Linux! This is because file IO is done using the
+[`pwritev(2)`](https://linux.die.net/man/2/pwritev) and
+[`preadv(2)`](https://linux.die.net/man/2/preadv) APIs for optimal performance.
+In the future, API shims for Windows and Darwin may be supported, but at the
+moment there is no capacity to do this.
 
 ### Binary
 
-The CLI binary is currently very basic, but you can connect to a seed by
-running the following from the repo root:
+The CLI binary is currently very basic, but you can perform downloads either by
+directly connecting to seeds or if the torrent is backed by a HTTP tracker.
+
+Run the following from the repo root:
 ```
 cargo run --release -p cratetorrent-cli \
     --listen 0.0.0.0:50051 \

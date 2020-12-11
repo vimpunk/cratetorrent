@@ -129,14 +129,15 @@ a public method to start a torrent until completion.
   the torrent.
 - Also contains other metadata relevant to the torrent, such as its info hash,
   the files it needs to download, the destination directory, and others.
-- Torrent tick: periodically loops through all its peer connections and performs
-  actions like stats collections, later choking/unchoking, resume state saving,
-  requesting peers from tracker(s) if needed, and others.
+- Torrent tick: periodically (currently set to 1 second) loops through all its
+  peer connections and performs actions like stats collections, later
+  choking/unchoking, resume state saving, requesting peers from tracker(s) if
+  needed, and others.
 
 ### Trackers
 
-Currently HTTP trackers are supported. These are used to request peers to
-download from, as well as to announce our download or upload statistics.
+Only HTTP trackers are supported. These are used to request peers to download
+from, as well as to announce our download or upload statistics.
 
 This is handled in torrent's event loop. The tracker has an interval in which we
 are allowed to request peers to not overwhelm the tracker, which may only be
@@ -155,8 +156,8 @@ A peer session is spawned on a new
 session communicate with each other via async `mpsc` channels. This is
 necessary as a peer connection is spawned on another task, which from the
 point of view of the borrow checker is as though it were spawned on another
-thread, so we can't just call methods of peer session without further
-synchronization.
+thread (which it may well be), so we can't just call methods of peer session
+without synchronization.
 
 It would be possible to spawn the peer task
 [locally](https://docs.rs/tokio/0.2.20/tokio/task/fn.spawn_local.html), but we'd
@@ -169,6 +170,22 @@ As to whether running all peer sessions and torrent on the same local task
 (since a peer session doesn't do much other than IO) would be more performant
 over running each on a separate task is an open question and more research is
 needed.
+
+### Stats collection
+
+Torrent aggregates stats from its peer sessions as well as itself. This
+information is mostly session metadata: whether the session is running or
+stopped, whether a peer is a seed or a leech, its throughput rates, piece
+availability, etc. These are needed either simply for stats reporting, but
+crucially to make informed decisions about the management of the torrent: such
+as which peers to unchoke, which connections to close, etc.
+
+These need to happen frequently, about once a second. As mentioned above, `mpsc` channels are
+used to communicate these state changes. Each peer session, when its
+[tick](#session-tick) routine runs, sends a "state change" message to its
+torrent from which torrent calculates its own state and performs various
+bookkeeping. See more info [below](#sending-stats-changes).
+
 
 ## Piece picker
 
@@ -417,13 +434,53 @@ updates.
 
 Each round the current download and upload rates are collected, and the session
 tick collects each rounds value, calculates a running average, and resets the
-per round counter.
-
-Using this counter, it is also checked whether the session needs to escape slow
-start.
+per round counter. Using this counter, it is also checked whether the session
+needs to escape slow start.
 
 Since the minimum timeout granularity is measured in seconds, the timeout
 procedure is also part of the session tick.
+
+#### Sending stats changes
+
+Further, state change updates are sent to the torrent in the session tick. For
+more info, see [above](#stats-collection).
+
+It is not known whether using mostly `mpsc` channels for most inter-task control
+flow is too heavy. Let's do some napkin math:
+- assume this is a fully utilized engine, say 20 torrents, half of them seeds,
+  half of them leeches;
+- each torrent has about 50 connected peers;
+- we only seed to about 10 peers in total;
+- the leech torrents download from 10 peers each;
+- average piece size is 128 KiB (8 16 KiB blocks).
+- We also assume ideal but realistic throughput rates:
+  - each seed uploads at 5 MBps
+  - and each leech downloads at 10 MBps.
+
+Then, based on this, the following rough metrics hold:
+- each leech receives 640 16 KiB blocks a second, or 64 per peer session (10 MiB
+  throughput / 16 KiB),
+- which corresponds to 640 block write messages and 80 piece completion messages
+  a second, per downloader.
+- Thus 10 * (640 + 80) = 7200 disk write related `mpsc` messages per second for
+  all downloaders;
+- Then, we also have 4 uploaders: each seed uploads 320 blocks to its peer per
+  second;
+- so 4 * 320 = 1280 `mpsc` round-trips (so twice that many messages) are made by
+  all uploaders.
+- For disk IO only, we have roughly 7200 + 2 * 1280 = 9760 such messages across
+  all torrents.
+
+To these come the periodic stats reporting functions, once a second for each
+peer: 20 * 50 = 1000 messages. We can probably slightly optimize this for a peer
+session to only send a message if there has been some change. In that case, we
+need only send 10 * 10 + 5 = 105 messages (100 downloader peer sessions and 5
+uploader ones). The former is about 10% of all internal messages sent, while the
+latter would be about 1%.
+
+Assuming the overall number of messages have a measurable overhead, the
+unoptimized variant is perhaps not acceptable, but the latter is within
+calculation error.
 
 ### Seeding
 
@@ -494,6 +551,7 @@ the torrent allocation command result via the global alert channel, so engine
 can hand it down to the new torrent. A step by step example follows.
 
 #### Example workflow
+
 1. `Engine` creates a new torrent, and part of this routine allocates the torrent
    on disk via the disk command channel.
 2. `Disk` creates a `Torrent` in-memory entry and allocates torrent and creates a
@@ -532,6 +590,7 @@ Late we will want to pre-allocate sparse files truncated to the download length.
 ### Saving to disk
 
 #### Buffering
+
 The primary purpose of `Disk` right now is to buffer downloaded blocks in memory
 until the piece is complete, hash the piece, notify torrent of the result, and,
 if the resulting hash matches the expected one, save to disk.
@@ -562,6 +621,7 @@ twofold:
   piece.)
 
 #### Mapping pieces to files
+
 When writing a piece to disk, we need to determine which file(s) the piece
 belongs to. Further, a piece may span several files. This way, every time we
 wish to save a piece, we need to look for its file boundaries and thus
@@ -608,6 +668,7 @@ piece. For each file to be written to, we query the slice of the file that
 overlaps with the piece, and write to file at that position.
 
 ##### Example
+
 Let's illustrate with an example. The first row contains 3 pieces, each 16 units
 long (the precise unit doesn't matter now), and indicates their indices and
 offsets within the whole torrent. The second row contains the files in the
@@ -639,6 +700,7 @@ Another example:
 Here, `files_intersecting_piece(1)` should yield the files: `b`, `c`.
 
 #### Vectored IO
+
 A peer downloads pieces in 16 KiB blocks and to save overhead of concatenating
 these buffers these blocks are stored in the disk write buffer as is, i.e the
 write buffer is a vector of byte vectors.
@@ -663,6 +725,7 @@ make a separate [`seek`](https://linux.die.net/man/2/lseek) syscall. This means
 that we do not need to write to the file in sequential order.
 
 ##### Writing blocks spanning multiple files
+
 There is an additional complication to this: a block in a piece may span
 multiple files. Therefore, we can't just pass all blocks in a piece to
 `pwritev`, as that could write more than is supposed to be in the file (the
@@ -708,6 +771,7 @@ data (otherwise we'd be writing out-of-order, i.e. wrong data to the file). This
 is also taken care of by `IoVecs`.
 
 #### Anatomy of a piece write
+
 1. Create a new in-progress piece entry and calculate which files it spans, as
    per [the above step](#mapping-pieces-to-files).
 2. Buffer all downloaded blocks in piece's write buffer.
@@ -736,6 +800,7 @@ the same `mpsc` infrastructure to communicate results. Therefore this is going
 to be an overview of the differences.
 
 #### Communicating results
+
 The major difference is how results are communicated: while for block writes the
 piece result is communicated to the torrent, the result of a disk read is
 communicated directly to a peer. This is for two reasons:
@@ -758,6 +823,7 @@ handles such errors, but there is currently no real engine so this is kept in
 torrent for now.
 
 #### Read cache
+
 The read cache is brutally simple at this step of the alpha version. For each
 block request, we read in the _entire_ piece from disk, and then store it in a
 hashmap in memory. That's it. Subsequent reads to blocks in the same piece will

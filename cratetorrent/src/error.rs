@@ -30,6 +30,9 @@ pub enum Error {
     /// protocol, it should only be accepted after the handshake and when
     /// received at any other time, connection is severed.
     BitfieldNotAfterHandshake,
+    /// A peer session timed out because neither side of the connection became
+    /// interested in each other.
+    InactivityTimeout,
     /// Holds IO related errors.
     Io(IoError),
 }

@@ -55,6 +55,19 @@ pub type Sha1Hash = [u8; 20];
 /// value means it doesn't have the piece.
 pub type Bitfield = BitVec<Msb0, u8>;
 
+/// Whether a torrent or peer connection is a seed or a leech.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Side {
+    Leech,
+    Seed,
+}
+
+impl Default for Side {
+    fn default() -> Self {
+        Self::Leech
+    }
+}
+
 /// This is the only block length we're dealing with (except for possibly the
 /// last block).  It is the widely used and accepted 16 KiB.
 pub(crate) const BLOCK_LEN: u32 = 0x4000;
@@ -89,7 +102,7 @@ impl fmt::Display for BlockInfo {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "block (piece: {} offs: {} len: {})",
+            "(piece: {} offset: {} len: {})",
             self.piece_index, self.offset, self.len
         )
     }

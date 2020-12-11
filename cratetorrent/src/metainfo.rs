@@ -242,6 +242,7 @@ mod raw {
     pub struct Metainfo {
         pub info: Info,
         pub announce: Option<String>,
+        #[serde(default)]
         #[serde(rename = "announce-list")]
         pub announce_list: Vec<Vec<String>>,
     }
