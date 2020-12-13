@@ -314,7 +314,7 @@ impl PeerSession {
                     e
                 );
                 self.ctx.set_connection_state(ConnectionState::Disconnected);
-                self.torrent.chan.send(torrent::Message::PeerState {
+                self.torrent.chan.send(torrent::Command::PeerState {
                     addr: self.peer.addr,
                     info: self.session_info(),
                 })?;
@@ -322,7 +322,7 @@ impl PeerSession {
         } else {
             log::error!(target: &self.ctx.log_target, "No handshake received");
             self.ctx.set_connection_state(ConnectionState::Disconnected);
-            self.torrent.chan.send(torrent::Message::PeerState {
+            self.torrent.chan.send(torrent::Command::PeerState {
                 addr: self.peer.addr,
                 info: self.session_info(),
             })?;
@@ -345,7 +345,7 @@ impl PeerSession {
         // send a state update message to torrent to actualize possible download
         // stats changes
         self.ctx.set_connection_state(ConnectionState::Disconnected);
-        self.torrent.chan.send(torrent::Message::PeerState {
+        self.torrent.chan.send(torrent::Command::PeerState {
             addr: self.peer.addr,
             info: self.session_info(),
         })?;
@@ -382,13 +382,13 @@ impl PeerSession {
         }
 
         // used for collecting session stats every second
-        let mut loop_timer = time::interval(Duration::from_secs(1)).fuse();
+        let mut tick_timer = time::interval(Duration::from_secs(1)).fuse();
 
         // start the loop for receiving messages from peer and commands from
         // other parts of the engine
         loop {
             select! {
-                now = loop_timer.select_next_some() => {
+                now = tick_timer.select_next_some() => {
                     self.tick(&mut sink, now.into_std()).await?;
                 }
                 msg = stream.select_next_some() => {
@@ -488,7 +488,7 @@ impl PeerSession {
         // if there was any state change, notify torrent
         if self.ctx.changed {
             log::debug!(target: &self.ctx.log_target, "State changed, updating torrent");
-            self.torrent.chan.send(torrent::Message::PeerState {
+            self.torrent.chan.send(torrent::Command::PeerState {
                 addr: self.peer.addr,
                 info: self.session_info(),
             })?;

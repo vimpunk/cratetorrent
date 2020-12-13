@@ -12,7 +12,7 @@ use futures::{
 use tokio::{
     net::{TcpListener, TcpStream},
     sync::{
-        mpsc::{UnboundedReceiver, UnboundedSender},
+        mpsc::{self, UnboundedReceiver, UnboundedSender},
         RwLock,
     },
     task, time,
@@ -20,7 +20,10 @@ use tokio::{
 
 use crate::{
     counter::Counter,
-    disk::{DiskHandle, ReadError, WriteError},
+    disk::{
+        error::{ReadError, WriteError},
+        DiskHandle,
+    },
     download::PieceDownload,
     error::*,
     peer::{self, ConnectionState, PeerSession, SessionInfo, SessionState},
@@ -31,16 +34,16 @@ use crate::{
 };
 
 /// The channel for communicating with torrent.
-pub(crate) type Sender = UnboundedSender<Message>;
+pub(crate) type Sender = UnboundedSender<Command>;
 
 /// The type of channel on which a torrent can listen for block write
 /// completions.
-pub(crate) type Receiver = UnboundedReceiver<Message>;
+pub(crate) type Receiver = UnboundedReceiver<Command>;
 
 /// The types of messages that the torrent can receive from other parts of the
 /// engine.
 #[derive(Debug)]
-pub(crate) enum Message {
+pub(crate) enum Command {
     /// Sent when some blocks were written to disk or an error ocurred while
     /// writing.
     PieceCompletion(Result<PieceCompletion, WriteError>),
@@ -52,6 +55,11 @@ pub(crate) enum Message {
     /// Peer sessions periodically send this message when they have a state
     /// change.
     PeerState { addr: SocketAddr, info: SessionInfo },
+    /// Gracefully shut down the torrent.
+    ///
+    /// This command tells all active peer sessions of torrent to do the same,
+    /// waits for them and announces to trackers our exit.
+    Shutdown,
 }
 
 /// The type returned on completing a piece.
@@ -73,7 +81,7 @@ pub(crate) struct PieceCompletion {
 /// about the torrent.
 pub(crate) struct Torrent {
     /// The peers in this torrent.
-    peers: HashMap<SocketAddr, Peer>,
+    peers: HashMap<SocketAddr, PeerSessionEntry>,
     /// The peers returned by tracker to which we can connect.
     available_peers: Vec<SocketAddr>,
     /// Information that is shared with peer sessions.
@@ -135,45 +143,47 @@ impl Torrent {
     pub fn new(
         id: TorrentId,
         disk: DiskHandle,
-        chan: Sender,
-        port: Receiver,
         info_hash: Sha1Hash,
         storage_info: StorageInfo,
         have_pieces: Bitfield,
         trackers: Vec<Tracker>,
         client_id: PeerId,
         listen_addr: SocketAddr,
-    ) -> Self {
+    ) -> (Self, Sender) {
+        let (chan, port) = mpsc::unbounded_channel();
         let piece_picker = PiecePicker::new(have_pieces);
         let port = port.fuse();
         let trackers =
             trackers.into_iter().map(|t| TrackerEntry::new(t)).collect();
 
-        Self {
-            peers: HashMap::new(),
-            available_peers: Vec::new(),
-            ctx: Arc::new(TorrentContext {
-                id,
-                chan,
-                piece_picker: Arc::new(RwLock::new(piece_picker)),
-                downloads: RwLock::new(HashMap::new()),
-                info_hash,
-                client_id,
-                disk,
-                storage: storage_info,
-            }),
-            start_time: None,
-            run_duration: Duration::default(),
-            port,
-            trackers,
-            in_endgame: false,
-            downloaded_payload_counter: Default::default(),
-            uploaded_payload_counter: Default::default(),
-            wasted_payload_counter: Default::default(),
-            downloaded_protocol_counter: Default::default(),
-            uploaded_protocol_counter: Default::default(),
-            listen_addr,
-        }
+        (
+            Self {
+                peers: HashMap::new(),
+                available_peers: Vec::new(),
+                ctx: Arc::new(TorrentContext {
+                    id,
+                    chan: chan.clone(),
+                    piece_picker: Arc::new(RwLock::new(piece_picker)),
+                    downloads: RwLock::new(HashMap::new()),
+                    info_hash,
+                    client_id,
+                    disk,
+                    storage: storage_info,
+                }),
+                start_time: None,
+                run_duration: Duration::default(),
+                port,
+                trackers,
+                in_endgame: false,
+                downloaded_payload_counter: Default::default(),
+                uploaded_payload_counter: Default::default(),
+                wasted_payload_counter: Default::default(),
+                downloaded_protocol_counter: Default::default(),
+                uploaded_protocol_counter: Default::default(),
+                listen_addr,
+            },
+            chan,
+        )
     }
 
     /// Starts the torrent and runs until an error is encountered.
@@ -190,8 +200,8 @@ impl Torrent {
         self.announce_to_trackers(Instant::now(), Some(Event::Started))
             .await?;
 
-        let mut loop_timer = time::interval(Duration::from_secs(1)).fuse();
-        let mut prev_instant = None;
+        let mut tick_timer = time::interval(Duration::from_secs(1)).fuse();
+        let mut last_tick_time = None;
 
         let mut listener = TcpListener::bind(&self.listen_addr).await?;
         let mut incoming = listener.incoming().fuse();
@@ -200,8 +210,8 @@ impl Torrent {
         // disk IO events
         loop {
             select! {
-                instant = loop_timer.select_next_some() => {
-                    self.tick(&mut prev_instant, instant.into_std()).await?;
+                tick_time = tick_timer.select_next_some() => {
+                    self.tick(&mut last_tick_time, tick_time.into_std()).await?;
                 }
                 peer_conn_result = incoming.select_next_some() => {
                     let socket = match peer_conn_result {
@@ -225,24 +235,48 @@ impl Torrent {
                         Arc::clone(&self.ctx),
                         addr,
                     );
-                    self.peers.insert(addr, Peer::start_inbound(socket, session, chan));
+                    self.peers.insert(addr, PeerSessionEntry::start_inbound(socket, session, chan));
                 }
-                msg = self.port.select_next_some() => {
-                    let should_stop = self.handle_msg(msg).await?;
-                    if should_stop {
-                        // send shutdown command to all connected peers
-                        for peer in self.peers.values() {
-                            if let Some(chan) = &peer.chan {
-                                // we don't particularly care if we weren't successful
-                                // in sending the command (for now)
-                                chan.send(peer::Command::Shutdown).ok();
+                cmd = self.port.select_next_some() => {
+                    let mut should_stop = false;
+                    match cmd {
+                        Command::PeerState { addr, info } => {
+                            self.handle_peer_state_change(addr, info);
+                        }
+                        Command::PieceCompletion(write_result) => {
+                            log::debug!("Disk write result {:?}", write_result);
+                            match write_result {
+                                Ok(piece) => {
+                                    should_stop = self
+                                        .handle_piece_completion(piece)
+                                        .await?;
+                                }
+                                Err(e) => {
+                                    log::error!("Failed to write piece to disk: {}", e);
+                                }
                             }
                         }
+                        Command::ReadError { block_info, error } => {
+                            log::error!(
+                                "Failed to read from disk {}: {}",
+                                block_info,
+                                error
+                            );
+                            // TODO: For now we just log for simplicity's sake, but in the
+                            // future we'll need error recovery mechanisms here.
+                            // For instance, it may be that the torrent file got moved while
+                            // the torrent was still seeding. In this case we'd need to stop
+                            // torrent and send an alert to the API consumer.
+                        }
+                        Command::Shutdown => {
+                            should_stop = true;
+                        }
+                    }
 
-                        // tell trackers we're leaving
-                        self.announce_to_trackers(Instant::now(), Some(Event::Stopped)).await?;
-
-                        return Ok(());
+                    if should_stop {
+                        // TODO: move this into shutdown match arm once todo in
+                        // handle_piece_completion is resolved
+                        self.shutdown().await?;
                     }
                 }
             }
@@ -251,17 +285,17 @@ impl Torrent {
 
     async fn tick(
         &mut self,
-        prev_tick_time: &mut Option<Instant>,
+        last_tick_time: &mut Option<Instant>,
         now: Instant,
     ) -> Result<()> {
         // calculate how long torrent has been running
 
-        let elapsed_since_last_tick = prev_tick_time
+        let elapsed_since_last_tick = last_tick_time
             .or(self.start_time)
             .map(|t| now.saturating_duration_since(t))
             .unwrap_or_default();
         self.run_duration += elapsed_since_last_tick;
-        *prev_tick_time = Some(now);
+        *last_tick_time = Some(now);
 
         // check if we can connect some peers
         // NOTE: do this before announcing as we don't want to block new
@@ -336,7 +370,8 @@ impl Torrent {
         for addr in self.available_peers.drain(0..connect_count) {
             log::info!("Connecting to peer {}", addr);
             let (session, chan) = PeerSession::new(Arc::clone(&self.ctx), addr);
-            self.peers.insert(addr, Peer::start_outbound(session, chan));
+            self.peers
+                .insert(addr, PeerSessionEntry::start_outbound(session, chan));
         }
     }
 
@@ -476,63 +511,31 @@ impl Torrent {
         Ok(())
     }
 
-    /// Handles a message from another task in the engine.
-    ///
-    /// The message may result in the torrent scheduled to be shut down. This
-    /// is indicated by the result value: if it's true, the torrent event loop
-    /// exits.
-    async fn handle_msg(&mut self, msg: Message) -> Result<bool> {
-        match msg {
-            Message::PeerState { addr, info } => {
-                if let Some(peer) = self.peers.get_mut(&addr) {
-                    log::debug!("Updating peer {} state", addr);
-                    peer.state = info.state;
-                    peer.state = info.state;
-                    self.downloaded_payload_counter +=
-                        info.stats.downloaded_payload_count;
-                    self.uploaded_payload_counter +=
-                        info.stats.uploaded_payload_count;
-                    self.wasted_payload_counter +=
-                        info.stats.wasted_payload_count;
-                    self.downloaded_protocol_counter +=
-                        info.stats.downloaded_protocol_count;
-                    self.uploaded_protocol_counter +=
-                        info.stats.uploaded_protocol_count;
+    fn handle_peer_state_change(
+        &mut self,
+        addr: SocketAddr,
+        info: SessionInfo,
+    ) {
+        if let Some(peer) = self.peers.get_mut(&addr) {
+            log::debug!("Updating peer {} state", addr);
+            peer.state = info.state;
+            peer.state = info.state;
+            self.downloaded_payload_counter +=
+                info.stats.downloaded_payload_count;
+            self.uploaded_payload_counter += info.stats.uploaded_payload_count;
+            self.wasted_payload_counter += info.stats.wasted_payload_count;
+            self.downloaded_protocol_counter +=
+                info.stats.downloaded_protocol_count;
+            self.uploaded_protocol_counter +=
+                info.stats.uploaded_protocol_count;
 
-                    // if we disconnected peer, remove it
-                    if peer.state.connection == ConnectionState::Disconnected {
-                        self.peers.remove(&addr);
-                    }
-                } else {
-                    log::debug!("Tried updating non-existent peer {}", addr);
-                }
+            // if we disconnected peer, remove it
+            if peer.state.connection == ConnectionState::Disconnected {
+                self.peers.remove(&addr);
             }
-            Message::PieceCompletion(write_result) => {
-                log::debug!("Disk write result {:?}", write_result);
-                match write_result {
-                    Ok(piece) => {
-                        return self.handle_piece_completion(piece).await;
-                    }
-                    Err(e) => {
-                        log::error!("Failed to write piece to disk: {}", e);
-                    }
-                }
-            }
-            Message::ReadError { block_info, error } => {
-                log::error!(
-                    "Failed to read from disk {}: {}",
-                    block_info,
-                    error
-                );
-                // TODO: For now we just log for simplicity's sake, but in the
-                // future we'll need error recovery mechanisms here.
-                // For instance, it may be that the torrent file got moved while
-                // the torrent was still seeding. In this case we'd need to stop
-                // torrent and send an alert to the API consumer.
-            }
+        } else {
+            log::debug!("Tried updating non-existent peer {}", addr);
         }
-
-        Ok(false)
     }
 
     /// Does some bookkeeping to mark the piece as finished. All peer sessions
@@ -592,9 +595,9 @@ impl Torrent {
             }
 
             // if the torrent is fully downloaded, stop the download loop
-            // TODO: return a global alert here instead and let the user decide
-            // whether to stop the torrent
             if missing_piece_count == 0 {
+                // TODO: return a global alert here instead and let the user decide
+                // whether to stop the torrent
                 log::info!(
                     "Finished torrent download, exiting. \
                     Peak download rate: {} b/s, wasted: {} b",
@@ -626,11 +629,42 @@ impl Torrent {
 
         Ok(false)
     }
+
+    /// Shuts down torrent and all peer sessions, and also announces torrent's
+    /// exit to tracker.
+    async fn shutdown(&mut self) -> Result<()> {
+        // send shutdown command to all connected peers
+        for peer in self.peers.values() {
+            if let Some(chan) = &peer.chan {
+                // we don't particularly care if we weren't successful
+                // in sending the command (for now)
+                chan.send(peer::Command::Shutdown).ok();
+            }
+        }
+
+        for peer in self.peers.values_mut() {
+            if let Err(e) = peer
+                .join_handle
+                .take()
+                .expect("peer join handle missing")
+                .await
+                .expect("task error")
+            {
+                log::error!("Peer session error: {}", e);
+            }
+        }
+
+        // tell trackers we're leaving
+        self.announce_to_trackers(Instant::now(), Some(Event::Stopped))
+            .await?;
+
+        return Ok(());
+    }
 }
 
 /// A peer in the torrent. Contains additional metadata needed by torrent to
 /// manage the peer.
-struct Peer {
+struct PeerSessionEntry {
     /// The channel on which to communicate with the peer session.
     ///
     /// This is set when the session is started.
@@ -638,17 +672,21 @@ struct Peer {
     /// Cached information about the session state. Updated every time peer
     /// updates us.
     state: SessionState,
+    /// The peer session task's join handle, used during shutdown.
+    join_handle: Option<task::JoinHandle<Result<()>>>,
 }
 
-impl Peer {
+impl PeerSessionEntry {
     fn start_outbound(mut session: PeerSession, chan: peer::Sender) -> Self {
-        task::spawn(async move { session.start_outbound().await });
+        let join_handle =
+            task::spawn(async move { session.start_outbound().await });
         Self {
             chan: Some(chan),
             state: SessionState {
                 connection: ConnectionState::Connecting,
                 ..Default::default()
             },
+            join_handle: Some(join_handle),
         }
     }
 
@@ -657,13 +695,15 @@ impl Peer {
         mut session: PeerSession,
         chan: peer::Sender,
     ) -> Self {
-        task::spawn(async move { session.start_inbound(socket).await });
+        let join_handle =
+            task::spawn(async move { session.start_inbound(socket).await });
         Self {
             chan: Some(chan),
             state: SessionState {
                 connection: ConnectionState::Handshaking,
                 ..Default::default()
             },
+            join_handle: Some(join_handle),
         }
     }
 }

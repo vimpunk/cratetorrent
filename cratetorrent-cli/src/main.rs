@@ -1,9 +1,14 @@
 use std::{fs, net::SocketAddr, path::PathBuf};
 
 use clap::{App, Arg};
-use cratetorrent::{engine::Mode, metainfo::*};
+use cratetorrent::{
+    conf::{Conf, EngineConf, TorrentConf},
+    engine::{Mode, TorrentParams},
+    metainfo::*,
+};
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
 
     // set up cli args
@@ -60,9 +65,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // mandatory
     let listen_addr = matches.value_of("listen");
     println!("{:?}", listen_addr);
-    let listen_addr = listen_addr
-        .ok_or_else(|| "--listen must be specified")?
-        .parse()?;
+    let listen_addr = listen_addr.and_then(|l| l.parse().ok());
     let metainfo_path = matches
         .value_of("metainfo")
         .ok_or_else(|| "--seed must be set")?;
@@ -80,32 +83,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .collect();
     println!("seeds: {:?}", seeds);
 
-    let mode = matches.value_of("mode").unwrap_or_default();
-    let mode = match mode {
-        "seed" => Mode::Seed,
-        _ => Mode::Download { seeds },
-    };
-
-    // read in torrent metainfo
-    let metainfo = fs::read(metainfo_path)?;
-    let metainfo = Metainfo::from_bytes(&metainfo)?;
-
-    println!("metainfo: {:?}", metainfo);
-    println!("piece count: {}", metainfo.piece_count());
-    println!("info hash: {}", hex::encode(&metainfo.info_hash));
-
     // arbitrary client id for now
     const CLIENT_ID: &str = "cbt-2020-03-03-00000";
     let mut client_id = [0; 20];
     client_id.copy_from_slice(CLIENT_ID.as_bytes());
 
-    cratetorrent::engine::run(
-        client_id,
-        download_dir,
+    let handle = cratetorrent::engine::spawn(Conf {
+        engine: EngineConf { client_id },
+        torrent: TorrentConf { download_dir },
+    })?;
+
+    // read in torrent metainfo
+    let metainfo = fs::read(metainfo_path)?;
+    let metainfo = Metainfo::from_bytes(&metainfo)?;
+
+    let mode = matches.value_of("mode").unwrap_or_default();
+    let mode = match mode {
+        "seed" => Mode::Seed,
+        _ => Mode::Download { seeds },
+    };
+    println!("metainfo: {:?}", metainfo);
+    println!("piece count: {}", metainfo.piece_count());
+    println!("info hash: {}", hex::encode(&metainfo.info_hash));
+
+    let torrent_id = handle.create_torrent(TorrentParams {
         metainfo,
         listen_addr,
         mode,
-    )?;
+        conf: None,
+    })?;
+
+    // TODO: listen to alerts from the engine
 
     Ok(())
 }

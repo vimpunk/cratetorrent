@@ -4,13 +4,19 @@
 #[macro_use]
 extern crate serde_derive;
 
-use std::{fmt, ops::Deref, sync::Arc};
+use std::{
+    fmt,
+    ops::Deref,
+    sync::atomic::{AtomicU32, Ordering},
+    sync::Arc,
+};
 
 use bitvec::prelude::{BitVec, Msb0};
 
 pub use storage_info::FileInfo;
 
 mod avg;
+pub mod conf;
 mod counter;
 mod disk;
 mod download;
@@ -35,7 +41,27 @@ pub type FileIndex = usize;
 
 /// Each torrent gets a randomyl assigned ID that is unique within the
 /// application.
-pub type TorrentId = u32;
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Ord, PartialOrd, Hash)]
+pub struct TorrentId(u32);
+
+impl TorrentId {
+    pub(crate) fn new() -> Self {
+        lazy_static::lazy_static! {
+            static ref TORRENT_ID: AtomicU32 = AtomicU32::new(0);
+        }
+
+        // the atomic is not used to synchronize data access around it so
+        // relaxed ordering is fine for our purposes
+        let id = TORRENT_ID.fetch_add(1, Ordering::Relaxed);
+        Self(id)
+    }
+}
+
+impl fmt::Display for TorrentId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "t#{}", self.0)
+    }
+}
 
 /// The peer ID is an arbitrary 20 byte string.
 ///

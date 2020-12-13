@@ -219,7 +219,7 @@ impl Torrent {
             if let Err(e) = self.start_new_piece(info.piece_index) {
                 self.thread_ctx
                     .chan
-                    .send(torrent::Message::PieceCompletion(Err(e)))?;
+                    .send(torrent::Command::PieceCompletion(Err(e)))?;
                 // return with ok as the disk task itself shouldn't be aborted
                 // due to invalid input
                 return Ok(());
@@ -277,7 +277,7 @@ impl Torrent {
                             .fetch_add(1, Ordering::Relaxed);
                         // alert torrent of block write failure
                         ctx.chan
-                            .send(torrent::Message::PieceCompletion(Err(e)))
+                            .send(torrent::Command::PieceCompletion(Err(e)))
                             .map_err(|e| {
                                 log::error!(
                                     "Error sending piece result: {}",
@@ -299,7 +299,7 @@ impl Torrent {
 
                 // alert torrent of piece completion and hash result
                 ctx.chan
-                    .send(torrent::Message::PieceCompletion(Ok(
+                    .send(torrent::Command::PieceCompletion(Ok(
                         PieceCompletion {
                             index: piece_index,
                             is_valid: is_piece_valid,
@@ -404,7 +404,7 @@ impl Torrent {
                     piece_index,
                     block_info.offset
                 );
-                self.thread_ctx.chan.send(torrent::Message::ReadError {
+                self.thread_ctx.chan.send(torrent::Command::ReadError {
                     block_info,
                     error: ReadError::InvalidBlockOffset,
                 })?;
@@ -430,7 +430,7 @@ impl Torrent {
                 Ok(file_range) => file_range,
                 Err(_) => {
                     log::error!("Piece {} not in file", piece_index);
-                    self.thread_ctx.chan.send(torrent::Message::ReadError {
+                    self.thread_ctx.chan.send(torrent::Command::ReadError {
                         block_info,
                         error: ReadError::InvalidPieceIndex,
                     })?;
@@ -495,7 +495,7 @@ impl Torrent {
                             .read_failure_count
                             .fetch_add(1, Ordering::Relaxed);
                         ctx.chan
-                            .send(torrent::Message::ReadError {
+                            .send(torrent::Command::ReadError {
                                 block_info,
                                 error: e,
                             })
