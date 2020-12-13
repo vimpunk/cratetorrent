@@ -56,8 +56,8 @@ pub(crate) enum Command {
     PieceCompletion {
         /// The piece that was completed.
         index: PieceIndex,
-        /// Tell the session to enter end-game mode.
-        in_end_game: bool,
+        /// Tell the session to enter endgame mode.
+        in_endgame: bool,
     },
     /// Eventually shut down the peer session.
     Shutdown,
@@ -440,8 +440,8 @@ impl PeerSession {
                         Command::Block(block)=> {
                             self.send_block(&mut sink, block).await?;
                         }
-                        Command::PieceCompletion { index, in_end_game } => {
-                            self.ctx.in_end_game = in_end_game;
+                        Command::PieceCompletion { index, in_endgame } => {
+                            self.ctx.in_endgame = in_endgame;
                             self.handle_piece_completion(&mut sink, index).await?;
                         }
                         Command::Shutdown => {
@@ -825,7 +825,7 @@ impl PeerSession {
             download_write_guard.pick_blocks(
                 to_request_count,
                 &mut requests,
-                self.ctx.in_end_game,
+                self.ctx.in_endgame,
                 &self.outgoing_requests,
             );
         }
@@ -857,7 +857,7 @@ impl PeerSession {
                 download.pick_blocks(
                     to_request_count,
                     &mut requests,
-                    self.ctx.in_end_game,
+                    self.ctx.in_endgame,
                     &self.outgoing_requests,
                 );
                 // save download
@@ -937,8 +937,8 @@ impl PeerSession {
                     target: &self.ctx.log_target,
                     "Discarding block {} with no piece download{}",
                     block_info,
-                    if self.ctx.in_end_game {
-                        " in end-game"
+                    if self.ctx.in_endgame {
+                        " in endgame"
                     } else {
                         ""
                     }
@@ -963,8 +963,8 @@ impl PeerSession {
                 block_info,
                 if self.ctx.in_slow_start {
                     " in slow-start"
-                } else if self.ctx.in_end_game {
-                    " in end-game"
+                } else if self.ctx.in_endgame {
+                    " in endgame"
                 } else {
                     ""
                 }
@@ -1181,7 +1181,7 @@ impl PeerSession {
             // when we first receive the block (rather then waiting for the
             // piece completion). However, it would require an mpsc roundtrip to
             // torrent and all other peers, for each of these blocks received in
-            // end-game, so it is questionable whether it's worth it at the cost
+            // endgame, so it is questionable whether it's worth it at the cost
             // of slowing down the engine.
             for block in self.outgoing_requests.iter() {
                 if block.piece_index == piece_index {

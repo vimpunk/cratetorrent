@@ -91,13 +91,13 @@ pub(super) struct SessionContext {
     /// queue size with each round trip.
     pub in_slow_start: bool,
 
-    /// Whether we're in end-game mode. See
+    /// Whether we're in endgame mode. See
     /// [`crate::torrent::TorrentContext::in_end_game`].
     ///
     /// This field is a cache for the one in torrent context, as it's accessed
     /// very frequently and we wouldn't want to incur synchronization costs on
     /// the hot path.
-    pub in_end_game: bool,
+    pub in_endgame: bool,
 
     /// The target request queue size is the number of block requests we keep
     /// outstanding to fully saturate the link.

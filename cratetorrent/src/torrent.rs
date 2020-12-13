@@ -102,14 +102,14 @@ pub(crate) struct Torrent {
     run_duration: Duration,
 
     /// In the last part of the download the torrent is in what's called the
-    /// end-game. This is the stage when all pieces have been picked but not all
+    /// endgame. This is the stage when all pieces have been picked but not all
     /// have been received. There is a tendency for a piece to be mostly
     /// downloaded by one peer, but when only a few pieces are left to complete
     /// the torrent this could defer completion because some of these last
-    /// pieces may end up with slower peers.  So when end-game is active, we let
+    /// pieces may end up with slower peers.  So when endgame is active, we let
     /// all peers finish the remaining pieces and cancel pending requests from
     /// the slower peers.
-    in_end_game: bool,
+    in_endgame: bool,
 
     /// Counts the total downloaded block bytes in torrent.
     downloaded_payload_counter: Counter,
@@ -166,7 +166,7 @@ impl Torrent {
             run_duration: Duration::default(),
             port,
             trackers,
-            in_end_game: false,
+            in_endgame: false,
             downloaded_payload_counter: Default::default(),
             uploaded_payload_counter: Default::default(),
             wasted_payload_counter: Default::default(),
@@ -556,14 +556,14 @@ impl Torrent {
                 piece_picker_write_guard.missing_piece_count();
 
             // Even if we don't have all pieces, they may all have already
-            // been picked. In this case we need to enter end-game mode, if not
+            // been picked. In this case we need to enter endgame mode, if not
             // already in it.
-            if !self.in_end_game
+            if !self.in_endgame
                 && missing_piece_count > 0
                 && piece_picker_write_guard.all_pieces_picked()
             {
-                log::info!("Torrent entering end-game");
-                self.in_end_game = true;
+                log::info!("Torrent entering endgame");
+                self.in_endgame = true;
             }
 
             // we don't need the lock anymore
@@ -585,7 +585,7 @@ impl Torrent {
                     // the dead session
                     chan.send(peer::Command::PieceCompletion {
                         index: piece.index,
-                        in_end_game: self.in_end_game,
+                        in_endgame: self.in_endgame,
                     })
                     .ok();
                 }
