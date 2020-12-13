@@ -14,7 +14,7 @@ use crate::{
     FileInfo,
 };
 
-pub(super) struct TorrentFile {
+pub(crate) struct TorrentFile {
     pub info: FileInfo,
     pub handle: File,
 }

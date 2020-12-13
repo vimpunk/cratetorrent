@@ -11,9 +11,14 @@ use std::{
 use chashmap::CHashMap;
 use tokio::task;
 
-use super::{piece, Piece, TorrentFile};
 use crate::{
-    disk::error::*,
+    disk::{
+        error::*,
+        io::{
+            file::TorrentFile,
+            piece::{self, Piece},
+        },
+    },
     peer,
     storage_info::{FsStructure, StorageInfo},
     torrent::{self, PieceCompletion},
@@ -24,7 +29,7 @@ use crate::{
 ///
 /// Contains the in-progress pieces (i.e. the write buffer), metadata about
 /// torrent's download and piece sizes, etc.
-pub(super) struct Torrent {
+pub(crate) struct Torrent {
     /// All information concerning this torrent's storage.
     info: StorageInfo,
 

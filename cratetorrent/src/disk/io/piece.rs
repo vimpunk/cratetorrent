@@ -15,7 +15,7 @@ use crate::{
 
 /// An in-progress piece download that keeps in memory the so far downloaded
 /// blocks and the expected hash of the piece.
-pub(super) struct Piece {
+pub(crate) struct Piece {
     /// The expected hash of the whole piece.
     pub expected_hash: Sha1Hash,
     /// The length of the piece, in bytes.

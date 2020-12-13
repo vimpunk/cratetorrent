@@ -1,13 +1,18 @@
+use std::collections::HashMap;
+
 use tokio::{
-    sync::mpsc::{UnboundedReceiver, UnboundedSender},
+    sync::{
+        mpsc::{self, UnboundedReceiver, UnboundedSender},
+        RwLock,
+    },
     task,
 };
 
 use crate::{
-    error::Error, peer, storage_info::StorageInfo, torrent, BlockInfo,
-    TorrentId,
+    error::Error, peer, storage_info::StorageInfo,
+    torrent::Sender as TorrentSender, BlockInfo, TorrentId,
 };
-use io::Disk;
+use io::torrent::Torrent;
 
 pub(crate) use error::*;
 
@@ -48,7 +53,7 @@ impl DiskHandle {
         id: TorrentId,
         storage_info: StorageInfo,
         piece_hashes: Vec<u8>,
-        torrent_chan: torrent::Sender,
+        torrent_chan: TorrentSender,
     ) -> Result<()> {
         log::trace!("Allocating new torrent {}", id);
         self.0
@@ -120,7 +125,7 @@ enum Command {
         id: TorrentId,
         storage_info: StorageInfo,
         piece_hashes: Vec<u8>,
-        torrent_chan: torrent::Sender,
+        torrent_chan: TorrentSender,
     },
     /// Request to eventually write a block to disk.
     WriteBlock {
@@ -154,6 +159,163 @@ pub(crate) enum Alert {
     TorrentAllocation(Result<TorrentId, NewTorrentError>),
 }
 
+/// The entity responsible for saving downloaded file blocks to disk and
+/// verifying whether downloaded pieces are valid.
+struct Disk {
+    /// Each torrent in engine has a corresponding entry in this hashmap, which
+    /// includes various metadata about torrent and the torrent specific alert
+    /// channel.
+    torrents: HashMap<TorrentId, RwLock<Torrent>>,
+    /// Port on which disk IO commands are received.
+    cmd_port: CommandReceiver,
+    /// Channel on which `Disk` sends alerts to the torrent engine.
+    alert_chan: AlertSender,
+}
+
+impl Disk {
+    /// Creates a new `Disk` instance and returns a command sender and an alert
+    /// receiver.
+    fn new() -> Result<(Self, CommandSender, AlertReceiver)> {
+        let (alert_chan, alert_port) = mpsc::unbounded_channel();
+        let (cmd_chan, cmd_port) = mpsc::unbounded_channel();
+        Ok((
+            Self {
+                torrents: HashMap::new(),
+                cmd_port,
+                alert_chan,
+            },
+            cmd_chan,
+            alert_port,
+        ))
+    }
+
+    /// Starts the disk event loop which is run until shutdown or an
+    /// unrecoverable error occurs (e.g. mpsc channel failure).
+    async fn start(&mut self) -> Result<()> {
+        log::info!("Starting disk IO event loop");
+        while let Some(cmd) = self.cmd_port.recv().await {
+            match cmd {
+                Command::NewTorrent {
+                    id,
+                    storage_info,
+                    piece_hashes,
+                    torrent_chan,
+                } => {
+                    log::trace!(
+                        "Disk received NewTorrent command: id={}, info={:?}",
+                        id,
+                        storage_info
+                    );
+                    if self.torrents.contains_key(&id) {
+                        log::warn!("Torrent {} already allocated", id);
+                        self.alert_chan.send(Alert::TorrentAllocation(Err(
+                            NewTorrentError::AlreadyExists,
+                        )))?;
+                        continue;
+                    }
+
+                    // NOTE: Do _NOT_ return on failure, we don't want to kill
+                    // the disk task due to potential disk IO errors: we just
+                    // want to log it and notify engine of it.
+                    let torrent_res =
+                        Torrent::new(storage_info, piece_hashes, torrent_chan);
+                    match torrent_res {
+                        Ok(torrent) => {
+                            log::info!("Torrent {} successfully allocated", id);
+                            self.torrents.insert(id, RwLock::new(torrent));
+                            // send notificaiton of allocation success
+                            self.alert_chan
+                                .send(Alert::TorrentAllocation(Ok(id)))?;
+                        }
+                        Err(e) => {
+                            log::error!(
+                                "Torrent {} allocation failure: {}",
+                                id,
+                                e
+                            );
+                            // send notificaiton of allocation failure
+                            self.alert_chan
+                                .send(Alert::TorrentAllocation(Err(e)))?;
+                        }
+                    }
+                }
+                Command::WriteBlock {
+                    id,
+                    block_info,
+                    data,
+                } => {
+                    self.write_block(id, block_info, data).await?;
+                }
+                Command::ReadBlock {
+                    id,
+                    block_info,
+                    result_chan,
+                } => {
+                    self.read_block(id, block_info, result_chan).await?;
+                }
+                Command::Shutdown => {
+                    log::info!("Shutting down disk event loop");
+                    break;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Queues a block for writing.
+    ///
+    /// Returns an error if the torrent id is invalid.
+    ///
+    /// If the block could not be written due to IO failure, the torrent is
+    /// notified of it.
+    async fn write_block(
+        &self,
+        id: TorrentId,
+        block_info: BlockInfo,
+        data: Vec<u8>,
+    ) -> Result<()> {
+        log::trace!("Saving torrent {} block {} to disk", id, block_info);
+
+        // check torrent id
+        //
+        // TODO: maybe we don't want to crash the disk task due to an invalid
+        // torrent id: could it be that disk requests for a torrent arrive after
+        // a torrent has been removed?
+        let torrent = self.torrents.get(&id).ok_or_else(|| {
+            log::error!("Torrent {} not found", id);
+            Error::InvalidTorrentId
+        })?;
+        torrent.write().await.write_block(block_info, data).await
+    }
+
+    /// Attempts to read a block from disk and return the result via the given
+    /// sender.
+    ///
+    /// Returns an error if the torrent id is invalid.
+    ///
+    /// If the block could not be read due to IO failure, the torrent is
+    /// notified of it.
+    async fn read_block(
+        &self,
+        id: TorrentId,
+        block_info: BlockInfo,
+        chan: peer::Sender,
+    ) -> Result<()> {
+        log::trace!("Reading torrent {} block {} from disk", id, block_info);
+
+        // check torrent id
+        //
+        // TODO: maybe we don't want to crash the disk task due to an invalid
+        // torrent id: could it be that disk requests for a torrent arrive after
+        // a torrent has been removed?
+        let torrent = self.torrents.get(&id).ok_or_else(|| {
+            log::error!("Torrent {} not found", id);
+            Error::InvalidTorrentId
+        })?;
+        torrent.read().await.read_block(block_info, chan).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -165,7 +327,12 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::*;
-    use crate::{block_count, storage_info::FsStructure, FileInfo, BLOCK_LEN};
+    use crate::{
+        block_count,
+        storage_info::FsStructure,
+        torrent::{Message as TorrentMsg, Receiver as TorrentReceiver},
+        FileInfo, BLOCK_LEN,
+    };
 
     /// Tests the allocation of a torrent, and then the allocation of the same
     /// torrent returning an error.
@@ -258,7 +425,7 @@ mod tests {
             });
 
             // wait for disk write result
-            if let Some(torrent::Message::PieceCompletion(Ok(piece))) =
+            if let Some(TorrentMsg::PieceCompletion(Ok(piece))) =
                 torrent_port.recv().await
             {
                 // piece is complete so it should be hashed and valid
@@ -319,7 +486,7 @@ mod tests {
         });
 
         // wait for disk write result
-        if let Some(torrent::Message::PieceCompletion(Ok(piece))) =
+        if let Some(TorrentMsg::PieceCompletion(Ok(piece))) =
             torrent_port.recv().await
         {
             assert_eq!(piece.index, index);
@@ -446,8 +613,8 @@ mod tests {
         pieces: Vec<Vec<u8>>,
         piece_hashes: Vec<u8>,
         info: StorageInfo,
-        torrent_chan: torrent::Sender,
-        torrent_port: torrent::Receiver,
+        torrent_chan: TorrentSender,
+        torrent_port: TorrentReceiver,
     }
 
     impl Env {

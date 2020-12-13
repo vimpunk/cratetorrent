@@ -76,7 +76,7 @@ impl PieceDownload {
                 *block = BlockStatus::Requested;
                 picked += 1;
             } else if in_end_game && *block == BlockStatus::Requested {
-                // in end-game it's fair to pick blocks already requested but
+                // in endgame it's fair to pick blocks already requested but
                 // don't pick the same block twice from the same peer
                 let block_info = BlockInfo {
                     piece_index: self.index,
@@ -319,7 +319,7 @@ mod tests {
         );
     }
 
-    /// Tests that in end-game mode blocks that were already picked by other
+    /// Tests that in endgame mode blocks that were already picked by other
     /// peers can be picked by other peers again.
     #[test]
     fn should_pick_requested_blocks_again_in_end_game() {
@@ -344,7 +344,7 @@ mod tests {
     }
 
     /// Tests that blocks that were already picked by a peer are not picked
-    /// again for the same peer (only relevant in end-game mode).
+    /// again for the same peer (only relevant in endgame mode).
     #[test]
     fn should_not_pick_already_picked_blocks_in_end_game() {
         let piece_index = 0;
