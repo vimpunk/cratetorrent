@@ -21,6 +21,7 @@ use tokio::{
 };
 
 use crate::{
+    alert::{AlertReceiver, AlertSender},
     conf::{Conf, TorrentConf},
     disk::{self, error::NewTorrentError, DiskHandle},
     error::*,
@@ -39,18 +40,23 @@ use crate::{
 /// The return value is a tuple of an [`EngineHandle`], which may be used to
 /// send the engine commands, and an [`crate::alert::AlertReceiver`], to which
 /// various components in the engine will send alerts of events.
-pub fn spawn(conf: Conf) -> Result<EngineHandle> {
+pub fn spawn(conf: Conf) -> Result<(EngineHandle, AlertReceiver)> {
     log::info!("Spawning engine task");
-    let (mut engine, chan) = Engine::new(conf)?;
+
+    // create alert channels and return alert port to user
+    let (alert_chan, alert_port) = mpsc::unbounded_channel();
+    let (mut engine, chan) = Engine::new(conf, alert_chan)?;
+
     let join_handle = task::spawn(async move { engine.run().await });
     log::info!("Spawned engine task");
 
-    // TODO: create alert channels and return alert port
-
-    Ok(EngineHandle {
-        chan,
-        join_handle: Some(join_handle),
-    })
+    Ok((
+        EngineHandle {
+            chan,
+            join_handle: Some(join_handle),
+        },
+        alert_port,
+    ))
 }
 
 type JoinHandle = task::JoinHandle<Result<()>>;
@@ -148,11 +154,20 @@ pub(crate) enum Command {
 struct Engine {
     /// All currently running torrents in engine.
     torrents: HashMap<TorrentId, TorrentEntry>,
+
     /// The port on which other entities in the engine, or the API consumer
     /// sends the engine commands.
     port: Receiver,
+
+    /// The disk channel.
     disk: DiskHandle,
     disk_join_handle: Option<disk::JoinHandle>,
+
+    /// The channel on which tasks in the engine post alerts to user.
+    alert_chan: AlertSender,
+
+    /// The global engine configuration that includes defaults for torrents
+    /// whose config is not overridden.
     conf: Conf,
 }
 
@@ -166,7 +181,7 @@ struct TorrentEntry {
 
 impl Engine {
     /// Creates a new engine, spawning the disk task.
-    fn new(conf: Conf) -> Result<(Self, Sender)> {
+    fn new(conf: Conf, alert_chan: AlertSender) -> Result<(Self, Sender)> {
         let (chan, port) = mpsc::unbounded_channel();
         let (disk_join_handle, disk) = disk::spawn(chan.clone())?;
 
@@ -176,6 +191,7 @@ impl Engine {
                 port,
                 disk,
                 disk_join_handle: Some(disk_join_handle),
+                alert_chan,
                 conf,
             },
             chan,
@@ -206,6 +222,7 @@ impl Engine {
                 },
                 Command::Shutdown => {
                     self.shutdown().await?;
+                    break;
                 }
             }
         }
@@ -221,7 +238,7 @@ impl Engine {
     ) -> Result<()> {
         let conf = params.conf.unwrap_or_else(|| self.conf.torrent.clone());
         let storage_info =
-            StorageInfo::new(&params.metainfo, conf.download_dir);
+            StorageInfo::new(&params.metainfo, conf.download_dir.clone());
         // TODO: don't duplicate trackers if multiple torrents use the same
         // ones (common in practice)
         let trackers = params
@@ -250,6 +267,8 @@ impl Engine {
                 // dynamic range
                 SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), 0)
             }),
+            conf,
+            self.alert_chan.clone(),
         );
 
         // Allocate torrent on disk. This is an asynchronous process and we can

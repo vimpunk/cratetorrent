@@ -15,6 +15,7 @@ use bitvec::prelude::{BitVec, Msb0};
 
 pub use storage_info::FileInfo;
 
+pub mod alert;
 mod avg;
 pub mod conf;
 mod counter;

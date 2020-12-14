@@ -459,6 +459,13 @@ impl PeerSession {
         Ok(())
     }
 
+    /// The session tick, as in "the tick of a clock", which runs every second
+    /// to perform periodic updates.
+    ///
+    /// This is when we update statistics and report them to torrent (and later
+    /// perhaps to the user directly, if requested), when the session leaves
+    /// slow-start, when it checks various timeouts, and when it updates the
+    /// target request queue size.
     async fn tick(
         &mut self,
         sink: &mut SplitSink<Framed<TcpStream, PeerCodec>, Message>,
@@ -487,7 +494,10 @@ impl PeerSession {
 
         // if there was any state change, notify torrent
         if self.ctx.changed {
-            log::debug!(target: &self.ctx.log_target, "State changed, updating torrent");
+            log::debug!(
+                target: &self.ctx.log_target,
+                "State changed, updating torrent",
+            );
             self.torrent.chan.send(torrent::Command::PeerState {
                 addr: self.peer.addr,
                 info: self.session_info(),
@@ -535,6 +545,7 @@ impl PeerSession {
         Ok(())
     }
 
+    /// Times out the peer if it hasn't sent a request in too long.
     async fn check_request_timeout(
         &mut self,
         sink: &mut SplitSink<Framed<TcpStream, PeerCodec>, Message>,

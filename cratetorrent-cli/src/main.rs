@@ -2,10 +2,12 @@ use std::{fs, net::SocketAddr, path::PathBuf};
 
 use clap::{App, Arg};
 use cratetorrent::{
-    conf::{Conf, EngineConf, TorrentConf},
+    alert::Alert,
+    conf::Conf,
     engine::{Mode, TorrentParams},
     metainfo::*,
 };
+use futures::stream::StreamExt;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -83,15 +85,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .collect();
     println!("seeds: {:?}", seeds);
 
-    // arbitrary client id for now
-    const CLIENT_ID: &str = "cbt-2020-03-03-00000";
-    let mut client_id = [0; 20];
-    client_id.copy_from_slice(CLIENT_ID.as_bytes());
-
-    let handle = cratetorrent::engine::spawn(Conf {
-        engine: EngineConf { client_id },
-        torrent: TorrentConf { download_dir },
-    })?;
+    let conf = Conf::new(download_dir);
+    let (handle, mut alert_port) = cratetorrent::engine::spawn(conf)?;
 
     // read in torrent metainfo
     let metainfo = fs::read(metainfo_path)?;
@@ -106,14 +101,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("piece count: {}", metainfo.piece_count());
     println!("info hash: {}", hex::encode(&metainfo.info_hash));
 
-    let torrent_id = handle.create_torrent(TorrentParams {
+    let _torrent_id = handle.create_torrent(TorrentParams {
         metainfo,
         listen_addr,
         mode,
         conf: None,
     })?;
 
-    // TODO: listen to alerts from the engine
+    // listen to alerts from the engine
+    while let Some(alert) = alert_port.next().await {
+        match alert {
+            Alert::TorrentStats { id, stats } => {
+                println!("t#{}: {:#?}", id, stats);
+            }
+            Alert::TorrentComplete(id) => {
+                println!("t#{} complete, shutting down", id);
+                break;
+            }
+        }
+    }
+
+    handle.shutdown().await?;
 
     Ok(())
 }

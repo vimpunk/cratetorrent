@@ -19,6 +19,8 @@ use tokio::{
 };
 
 use crate::{
+    alert::{Alert, AlertSender},
+    conf::TorrentConf,
     counter::Counter,
     disk::{
         error::{ReadError, WriteError},
@@ -32,6 +34,10 @@ use crate::{
     tracker::{Announce, Event, Tracker},
     Bitfield, BlockInfo, PeerId, PieceIndex, Sha1Hash, TorrentId,
 };
+
+pub use stats::*;
+
+mod stats;
 
 /// The channel for communicating with torrent.
 pub(crate) type Sender = UnboundedSender<Command>;
@@ -125,12 +131,18 @@ pub(crate) struct Torrent {
     uploaded_payload_counter: Counter,
     /// Counts the total (downloaded) payload bytes that were wasted (i.e.
     /// duplicate blocks that had to be discarded).
-    wasted_payload_counter: Counter,
+    wasted_payload_count: u64,
 
     /// Counts the total bytes sent during protocol chatter in torrent.
     downloaded_protocol_counter: Counter,
     /// Counts the total bytes received during protocol chatter in torrent.
     uploaded_protocol_counter: Counter,
+
+    /// The channel on which to post alerts to user.
+    alert_chan: AlertSender,
+
+    /// The configuration of this particular torrent.
+    conf: TorrentConf,
 }
 
 impl Torrent {
@@ -149,6 +161,8 @@ impl Torrent {
         trackers: Vec<Tracker>,
         client_id: PeerId,
         listen_addr: SocketAddr,
+        conf: TorrentConf,
+        alert_chan: AlertSender,
     ) -> (Self, Sender) {
         let (chan, port) = mpsc::unbounded_channel();
         let piece_picker = PiecePicker::new(have_pieces);
@@ -177,10 +191,12 @@ impl Torrent {
                 in_endgame: false,
                 downloaded_payload_counter: Default::default(),
                 uploaded_payload_counter: Default::default(),
-                wasted_payload_counter: Default::default(),
+                wasted_payload_count: Default::default(),
                 downloaded_protocol_counter: Default::default(),
                 uploaded_protocol_counter: Default::default(),
                 listen_addr,
+                alert_chan,
+                conf,
             },
             chan,
         )
@@ -238,7 +254,6 @@ impl Torrent {
                     self.peers.insert(addr, PeerSessionEntry::start_inbound(socket, session, chan));
                 }
                 cmd = self.port.select_next_some() => {
-                    let mut should_stop = false;
                     match cmd {
                         Command::PeerState { addr, info } => {
                             self.handle_peer_state_change(addr, info);
@@ -247,12 +262,13 @@ impl Torrent {
                             log::debug!("Disk write result {:?}", write_result);
                             match write_result {
                                 Ok(piece) => {
-                                    should_stop = self
-                                        .handle_piece_completion(piece)
-                                        .await?;
+                                    self.handle_piece_completion(piece).await?;
                                 }
                                 Err(e) => {
-                                    log::error!("Failed to write piece to disk: {}", e);
+                                    log::error!(
+                                        "Failed to write piece to disk: {}",
+                                        e
+                                    );
                                 }
                             }
                         }
@@ -269,20 +285,22 @@ impl Torrent {
                             // torrent and send an alert to the API consumer.
                         }
                         Command::Shutdown => {
-                            should_stop = true;
+                            self.shutdown().await?;
+                            break;
                         }
-                    }
-
-                    if should_stop {
-                        // TODO: move this into shutdown match arm once todo in
-                        // handle_piece_completion is resolved
-                        self.shutdown().await?;
                     }
                 }
             }
         }
+
+        Ok(())
     }
 
+    /// The torrent tick, as in "the tick of a clock", which runs every second
+    /// to perform periodic updates.
+    ///
+    /// This is when we update statistics and report them to the user, when new
+    /// peers are connected, and when perioric announces are made.
     async fn tick(
         &mut self,
         last_tick_time: &mut Option<Instant>,
@@ -315,7 +333,7 @@ impl Torrent {
             self.downloaded_payload_counter.avg(),
             self.downloaded_payload_counter.peak(),
             self.downloaded_payload_counter.total(),
-            self.wasted_payload_counter.total(),
+            self.wasted_payload_count,
             self.uploaded_payload_counter.avg(),
             self.uploaded_payload_counter.peak(),
             self.uploaded_payload_counter.total(),
@@ -341,10 +359,17 @@ impl Torrent {
             }
         }
 
+        // send periodic stats update to api user
+        self.alert_chan
+            .send(Alert::TorrentStats {
+                id: self.ctx.id,
+                stats: self.stats().await,
+            })
+            .ok();
+
         for counter in [
             &mut self.downloaded_payload_counter,
             &mut self.uploaded_payload_counter,
-            &mut self.wasted_payload_counter,
             &mut self.downloaded_protocol_counter,
             &mut self.uploaded_protocol_counter,
         ]
@@ -358,7 +383,9 @@ impl Torrent {
 
     /// Attempts to connect available peers, if we have any.
     fn connect_peers(&mut self) {
-        let connect_count = MAX_CONNECTED_PEER_COUNT
+        let connect_count = self
+            .conf
+            .max_connected_peer_count
             .saturating_sub(self.peers.len())
             .min(self.available_peers.len());
         if connect_count == 0 {
@@ -389,34 +416,37 @@ impl Torrent {
 
         // skip trackers that errored too often
         // TODO: introduce a retry timeout
+        let tracker_error_threshold = self.conf.tracker_error_threshold;
         for tracker in self
             .trackers
             .iter_mut()
-            .filter(|t| t.error_count < TRACKER_ERROR_THRESHOLD)
+            .filter(|t| t.error_count < tracker_error_threshold)
         {
             // Check if the torrent's peer count has fallen below the minimum.
             // But don't request new peers otherwise or if we're about to stop
             // torrent.
             let peer_count = self.peers.len() + self.available_peers.len();
-            let needed_peer_count = if peer_count >= MIN_REQUESTED_PEER_COUNT
+            let needed_peer_count = if peer_count
+                >= self.conf.min_requested_peer_count
                 || event == Some(Event::Stopped)
             {
                 None
             } else {
-                debug_assert!(MAX_CONNECTED_PEER_COUNT >= peer_count);
-                let needed = MAX_CONNECTED_PEER_COUNT - peer_count;
+                debug_assert!(self.conf.max_connected_peer_count >= peer_count);
+                let needed = self.conf.max_connected_peer_count - peer_count;
                 // Download at least this many peers, even if we don't need as
                 // much. This is because later we may be able to connect to more
                 // peers and in that case we don't want to wait till the next
                 // tracker request.
-                Some(MIN_REQUESTED_PEER_COUNT.min(needed))
+                Some(self.conf.min_requested_peer_count.min(needed))
             };
 
             // we can override the normal annoucne interval if we need peers or
             // if we have an event to announce
             if event.is_some()
-                || (needed_peer_count > Some(0) && tracker.can_announce(now))
-                || tracker.should_announce(now)
+                || (needed_peer_count > Some(0)
+                    && tracker.can_announce(now, self.conf.announce_interval))
+                || tracker.should_announce(now, self.conf.announce_interval)
             {
                 let params = Announce {
                     tracker_id: tracker.id.clone(),
@@ -511,6 +541,43 @@ impl Torrent {
         Ok(())
     }
 
+    /// Returns high-level statistics about the torrent to send it to the user.
+    async fn stats(&self) -> TorrentStats {
+        let missing_piece_count =
+            self.ctx.piece_picker.read().await.missing_piece_count();
+        let piece_count = self.ctx.storage.piece_count;
+        TorrentStats {
+            start_time: self.start_time,
+            run_duration: self.run_duration,
+            pieces: PieceStats {
+                total: piece_count,
+                complete: piece_count - missing_piece_count,
+                pending: self.ctx.downloads.read().await.len(),
+            },
+            download_payload_stats: ThroughputStats::from(
+                &self.downloaded_payload_counter,
+            ),
+            wasted_payload_count: self.wasted_payload_count,
+            upload_payload_stats: ThroughputStats::from(
+                &self.uploaded_payload_counter,
+            ),
+            download_protocol_stats: ThroughputStats::from(
+                &self.downloaded_protocol_counter,
+            ),
+            upload_protocol_stats: ThroughputStats::from(
+                &self.uploaded_protocol_counter,
+            ),
+            peer_count: self.peers.len(),
+        }
+    }
+
+    /// Handles the message that peer sessions send to torrent when their state
+    /// changed.
+    ///
+    /// It simply updates the minimum copy of the peer's state that is kept in
+    /// torrent in order to perform various pieces of logic (the choke
+    /// algorithm and detailed reporting to user, neither of which is done at
+    /// the moment).
     fn handle_peer_state_change(
         &mut self,
         addr: SocketAddr,
@@ -523,7 +590,7 @@ impl Torrent {
             self.downloaded_payload_counter +=
                 info.stats.downloaded_payload_count;
             self.uploaded_payload_counter += info.stats.uploaded_payload_count;
-            self.wasted_payload_counter += info.stats.wasted_payload_count;
+            self.wasted_payload_count += info.stats.wasted_payload_count;
             self.downloaded_protocol_counter +=
                 info.stats.downloaded_protocol_count;
             self.uploaded_protocol_counter +=
@@ -543,7 +610,7 @@ impl Torrent {
     async fn handle_piece_completion(
         &mut self,
         piece: PieceCompletion,
-    ) -> Result<bool> {
+    ) -> Result<()> {
         // if this write completed a piece, check torrent
         // completion
         if piece.is_valid {
@@ -596,14 +663,17 @@ impl Torrent {
 
             // if the torrent is fully downloaded, stop the download loop
             if missing_piece_count == 0 {
-                // TODO: return a global alert here instead and let the user decide
-                // whether to stop the torrent
                 log::info!(
                     "Finished torrent download, exiting. \
                     Peak download rate: {} b/s, wasted: {} b",
                     self.downloaded_payload_counter.peak(),
-                    self.wasted_payload_counter.total()
+                    self.wasted_payload_count,
                 );
+
+                // notify user of torrent completion
+                self.alert_chan
+                    .send(Alert::TorrentComplete(self.ctx.id))
+                    .ok();
 
                 // tell trackers we've finished
                 self.announce_to_trackers(
@@ -611,9 +681,6 @@ impl Torrent {
                     Some(Event::Completed),
                 )
                 .await?;
-
-                // stop the torrent
-                return Ok(true);
             }
         } else {
             // TODO(https://github.com/mandreyel/cratetorrent/issues/61):
@@ -627,7 +694,7 @@ impl Torrent {
             }
         }
 
-        Ok(false)
+        Ok(())
     }
 
     /// Shuts down torrent and all peer sessions, and also announces torrent's
@@ -788,10 +855,14 @@ impl TrackerEntry {
     ///
     /// Later this function should take into consideration the client's minimum
     /// announce frequency settings.
-    fn should_announce(&self, t: Instant) -> bool {
+    fn should_announce(
+        &self,
+        t: Instant,
+        default_announce_interval: Duration,
+    ) -> bool {
         if let Some(last_announce_time) = self.last_announce_time {
             let min_next_announce_time = last_announce_time
-                + self.interval.unwrap_or(DEFAULT_ANNOUNCE_INTERVAL);
+                + self.interval.unwrap_or(default_announce_interval);
             t > min_next_announce_time
         } else {
             true
@@ -803,30 +874,20 @@ impl TrackerEntry {
     /// We may need peers before the next step in the announce interval.
     /// However, we can't do this too often, so we need to check our last
     /// announce time first.
-    fn can_announce(&self, t: Instant) -> bool {
+    fn can_announce(
+        &self,
+        t: Instant,
+        default_announce_interval: Duration,
+    ) -> bool {
         if let Some(last_announce_time) = self.last_announce_time {
             let min_next_announce_time = last_announce_time
                 + self
                     .min_interval
                     .or(self.min_interval)
-                    .unwrap_or(DEFAULT_ANNOUNCE_INTERVAL);
+                    .unwrap_or(default_announce_interval);
             t > min_next_announce_time
         } else {
             true
         }
     }
 }
-
-/// The minimum number of peers we want to keep in torrent at all times.
-/// This will be configurable later.
-const MIN_REQUESTED_PEER_COUNT: usize = 10;
-/// The max number of connected peers torrent should have.
-// TODO: make this configurable
-const MAX_CONNECTED_PEER_COUNT: usize = 50;
-
-/// If the tracker doesn't provide a minimum announce interval, we default to
-/// announcing every 30 seconds.
-const DEFAULT_ANNOUNCE_INTERVAL: Duration = Duration::from_secs(30 * 60);
-
-/// After this many attempts, we stop announcing to tracker.
-const TRACKER_ERROR_THRESHOLD: usize = 10;
