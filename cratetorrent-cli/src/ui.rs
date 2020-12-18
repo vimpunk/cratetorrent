@@ -1,4 +1,3 @@
-
 use std::borrow::Cow;
 
 use tui::{
@@ -36,7 +35,7 @@ pub fn draw(f: &mut Frame<impl Backend>, app: &mut App) {
             .split(f.size());
         draw_info(f, torrent, chunks[0]);
         draw_progress_bar(f, torrent, chunks[1]);
-        draw_details(f, torrent, chunks[1]);
+        //draw_details(f, torrent, chunks[1]);
     }
 }
 
@@ -155,19 +154,19 @@ pub fn draw_progress_bar(
     f.render_widget(progress, area);
 }
 
-pub fn draw_details(
-    f: &mut Frame<impl Backend>,
-    torrent: &Torrent,
-    area: Rect,
-) {
-    let chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints(
-            [Constraint::Percentage(50), Constraint::Percentage(50)].as_ref(),
-        )
-        .split(area);
-    // TODO
-}
+//pub fn draw_details(
+//f: &mut Frame<impl Backend>,
+//torrent: &Torrent,
+//area: Rect,
+//) {
+//let chunks = Layout::default()
+//.direction(Direction::Horizontal)
+//.constraints(
+//[Constraint::Percentage(50), Constraint::Percentage(50)].as_ref(),
+//)
+//.split(area);
+//// TODO
+//}
 
 fn create_block<'a>(title: impl Into<Cow<'a, str>>) -> Block<'a> {
     let title =

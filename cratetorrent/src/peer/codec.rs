@@ -881,7 +881,7 @@ mod tests {
     /// Returns `Bitfield` and its expected encoded variant.
     fn make_bitfield() -> (Message, Bytes) {
         let bitfield =
-            Bitfield::from_slice(&[0b11001001, 0b10000011, 0b11111011]);
+            Bitfield::from_vec(vec![0b11001001, 0b10000011, 0b11111011]);
         let encoded = {
             // 1 byte message id and n byte f bitfield
             //

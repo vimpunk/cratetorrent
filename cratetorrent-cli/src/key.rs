@@ -24,7 +24,8 @@ impl Keys {
             let stdin = io::stdin();
             for key in stdin.keys() {
                 if let Ok(key) = key {
-                    if let Err(err) = tx.send(key) {
+                    if let Err(e) = tx.send(key) {
+                        eprintln!("{}", e);
                         return;
                     }
                     if key == exit_key {

@@ -8,7 +8,7 @@ use std::{
 
 use reqwest::Url;
 
-use crate::{storage_info::FsStructure, FileInfo, Sha1Hash};
+use crate::{FileInfo, Sha1Hash};
 
 pub use serde_bencode::Error as BencodeError;
 
@@ -75,8 +75,8 @@ pub struct Metainfo {
     /// The nominal lengths of a piece, that is, the length of all but
     /// potentially the last piece, which may be smaller.
     pub piece_len: u32,
-    /// The paths and lenths of the downloaded files.
-    pub structure: FsStructure,
+    /// The paths and lenths of the files in torrent.
+    pub files: Vec<FileInfo>,
     /// The trackers that we can announce to.
     /// The tier information is not currently present in this field as
     /// cratetorrent doesn't use it. In the future it may be added.
@@ -101,8 +101,9 @@ impl Metainfo {
             return Err(MetainfoError::InvalidPieces);
         }
 
-        // verify download structure
-        let structure = if let Some(len) = metainfo.info.len {
+        // verify download structure and build up files metadata
+        let mut files = Vec::new();
+        if let Some(len) = metainfo.info.len {
             if metainfo.info.files.is_some() {
                 log::warn!("Metainfo cannot contain both `length` and `files`");
                 return Err(MetainfoError::InvalidMetainfo);
@@ -112,22 +113,23 @@ impl Metainfo {
                 return Err(MetainfoError::InvalidMetainfo);
             }
 
-            FsStructure::File(FileInfo {
+            // the path of this file is just the torrent name
+            files.push(FileInfo {
                 path: metainfo.info.name.clone().into(),
                 len,
                 torrent_offset: 0,
-            })
-        } else if let Some(files) = &metainfo.info.files {
-            if files.is_empty() {
+            });
+        } else if let Some(raw_files) = &metainfo.info.files {
+            if raw_files.is_empty() {
                 log::warn!("Metainfo files must not be empty");
                 return Err(MetainfoError::InvalidMetainfo);
             }
 
-            // map the file information entries to our internal representation
-            let mut file_infos = Vec::with_capacity(files.len());
+            files.reserve_exact(raw_files.len());
+
             // and sum up the file offsets in the torrent
             let mut torrent_offset = 0;
-            for file in files.iter() {
+            for file in raw_files.iter() {
                 // verify that the file length is non-zero
                 if file.len == 0 {
                     log::warn!("File {:?} length is 0", file.path);
@@ -154,7 +156,7 @@ impl Metainfo {
                 }
 
                 // file is now verified, we can collect it
-                file_infos.push(FileInfo {
+                files.push(FileInfo {
                     path,
                     torrent_offset,
                     len: file.len,
@@ -163,12 +165,10 @@ impl Metainfo {
                 // advance offset for next file
                 torrent_offset += file.len;
             }
-
-            FsStructure::Archive { files: file_infos }
         } else {
             log::warn!("No `length` or `files` key present in metainfo");
             return Err(MetainfoError::InvalidMetainfo);
-        };
+        }
 
         let mut trackers = Vec::new();
         if !metainfo.announce_list.is_empty() {
@@ -208,9 +208,22 @@ impl Metainfo {
             info_hash,
             pieces: metainfo.info.pieces,
             piece_len: metainfo.info.piece_len,
-            structure,
+            files,
             trackers,
         })
+    }
+
+    /// Returns true if the download is for an archive.
+    pub fn is_archive(&self) -> bool {
+        self.files.len() > 1
+    }
+
+    /// Returns the total download size in bytes.
+    ///
+    /// Note that this is an O(n) operation for archive downloads, where n is
+    /// the number of files, so the return value should ideally be cached.
+    pub fn download_len(&self) -> u64 {
+        self.files.iter().map(|f| f.len).sum()
     }
 
     /// Returns the number of pieces in this torrent.
@@ -226,7 +239,7 @@ impl fmt::Debug for Metainfo {
             .field("info_hash", &self.info_hash)
             .field("pieces", &"<pieces...>")
             .field("piece_len", &self.piece_len)
-            .field("structure", &self.structure)
+            .field("structure", &self.files)
             .finish()
     }
 }
@@ -237,7 +250,7 @@ mod raw {
     //! is not ensured at this level. The semantic validation happens in the
     //! [`super::Metainfo`] type, which is essentially a mapping of
     //! [`Metainfo`], but with semantic requirements encoded in the type
-    //! system..
+    //! system.
 
     use sha1::{Digest, Sha1};
 

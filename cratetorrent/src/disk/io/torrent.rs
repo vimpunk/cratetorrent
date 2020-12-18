@@ -20,7 +20,7 @@ use crate::{
         },
     },
     peer,
-    storage_info::{FsStructure, StorageInfo},
+    storage_info::StorageInfo,
     torrent::{self, PieceCompletion},
     Block, BlockInfo, CachedBlock, PieceIndex,
 };
@@ -140,58 +140,55 @@ impl Torrent {
             log::info!("Download directory {:?} created", info.download_dir);
         }
 
-        let files = match &info.structure {
-            FsStructure::File(file) => {
-                log::debug!(
-                    "Torrent is single {} bytes long file {:?}",
-                    file.len,
-                    file.path
-                );
-                vec![sync::RwLock::new(TorrentFile::new(
+        // TODO: return error instead
+        debug_assert_ne!(info.files.len(), 0, "torrent must have files");
+        let files = if info.files.len() == 1 {
+            let file = &info.files[0];
+            log::debug!(
+                "Torrent is single {} bytes long file {:?}",
+                file.len,
+                file.path
+            );
+            vec![sync::RwLock::new(TorrentFile::new(
+                &info.download_dir,
+                file.clone(),
+            )?)]
+        } else {
+            debug_assert!(!info.files.is_empty());
+            log::debug!("Torrent is multi file: {:?}", info.files);
+            log::debug!("Setting up directory structure");
+
+            let mut torrent_files = Vec::with_capacity(info.files.len());
+            for file in info.files.iter() {
+                let path = info.download_dir.join(&file.path);
+                // file or subdirectory in download root must not exist if
+                // download root does not exists
+                debug_assert!(!path.exists());
+                debug_assert!(path.is_absolute());
+
+                // get the parent of the file path: if there is one (i.e.
+                // this is not a file in the torrent root), and doesn't
+                // exist, create it
+                if let Some(subdir) = path.parent() {
+                    if !subdir.exists() {
+                        log::info!("Creating torrent subdir {:?}", subdir);
+                        fs::create_dir_all(&subdir).map_err(|e| {
+                            log::error!("Failed to create subdir {:?}", subdir);
+                            NewTorrentError::Io(e)
+                        })?;
+                    }
+                }
+
+                // open the file and get a handle to it
+                //
+                // TODO: is there a clean way of avoiding creating the path
+                // buffer twice?
+                torrent_files.push(sync::RwLock::new(TorrentFile::new(
                     &info.download_dir,
                     file.clone(),
-                )?)]
+                )?));
             }
-            FsStructure::Archive { files } => {
-                debug_assert!(!files.is_empty());
-                log::debug!("Torrent is multi file: {:?}", files);
-                log::debug!("Setting up directory structure");
-
-                let mut torrent_files = Vec::with_capacity(files.len());
-                for file in files.iter() {
-                    let path = info.download_dir.join(&file.path);
-                    // file or subdirectory in download root must not exist if
-                    // download root does not exists
-                    debug_assert!(!path.exists());
-                    debug_assert!(path.is_absolute());
-
-                    // get the parent of the file path: if there is one (i.e.
-                    // this is not a file in the torrent root), and doesn't
-                    // exist, create it
-                    if let Some(subdir) = path.parent() {
-                        if !subdir.exists() {
-                            log::info!("Creating torrent subdir {:?}", subdir);
-                            fs::create_dir_all(&subdir).map_err(|e| {
-                                log::error!(
-                                    "Failed to create subdir {:?}",
-                                    subdir
-                                );
-                                NewTorrentError::Io(e)
-                            })?;
-                        }
-                    }
-
-                    // open the file and get a handle to it
-                    //
-                    // TODO: is there a clean way of avoiding creating the path
-                    // buffer twice?
-                    torrent_files.push(sync::RwLock::new(TorrentFile::new(
-                        &info.download_dir,
-                        file.clone(),
-                    )?));
-                }
-                torrent_files
-            }
+            torrent_files
         };
 
         Ok(Self {

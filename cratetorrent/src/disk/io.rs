@@ -350,7 +350,7 @@ mod tests {
             for block in blocks.iter() {
                 hasher.update(&block);
             }
-            hasher.result().into()
+            hasher.finalize().into()
         };
         let len = blocks.len() as u32 * BLOCK_LEN;
         // convert blocks to a b-tree map

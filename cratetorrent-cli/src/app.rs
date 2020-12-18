@@ -6,7 +6,7 @@ use cratetorrent::{
     conf::Conf,
     engine::{EngineHandle, TorrentParams},
     metainfo::Metainfo,
-    storage_info::FsStructure,
+    storage_info::StorageInfo,
     torrent::stats::{PieceStats, ThroughputStats, TorrentStats},
     TorrentId,
 };
@@ -16,6 +16,7 @@ use crate::{Args, Result};
 
 /// Holds the application state.
 pub struct App {
+    pub download_dir: PathBuf,
     pub engine: EngineHandle,
     pub alert_rx: Fuse<AlertReceiver>,
     pub torrents: HashMap<TorrentId, Torrent>,
@@ -24,11 +25,12 @@ pub struct App {
 impl App {
     pub fn new(download_dir: PathBuf) -> Result<Self> {
         // start engine
-        let conf = Conf::new(download_dir);
+        let conf = Conf::new(download_dir.clone());
         let (engine, alert_rx) = cratetorrent::engine::spawn(conf)?;
         let alert_rx = alert_rx.fuse();
 
         Ok(Self {
+            download_dir,
             engine,
             alert_rx,
             torrents: HashMap::new(),
@@ -41,7 +43,9 @@ impl App {
         let metainfo = Metainfo::from_bytes(&metainfo)?;
         let info_hash = hex::encode(&metainfo.info_hash);
         let piece_count = metainfo.piece_count();
-        let download_len = metainfo.structure.download_len();
+        let download_len = metainfo.download_len();
+
+        let storage = StorageInfo::new(&metainfo, self.download_dir.clone());
 
         // create torrent
         let torrent_id = self.engine.create_torrent(TorrentParams {
@@ -56,7 +60,7 @@ impl App {
             info_hash,
             piece_len: metainfo.piece_len,
             download_len,
-            fs: metainfo.structure,
+            storage,
 
             run_duration: Default::default(),
             pieces: PieceStats {
@@ -119,7 +123,7 @@ pub struct Torrent {
     pub info_hash: String,
     pub piece_len: u32,
     pub download_len: u64,
-    pub fs: FsStructure,
+    pub storage: StorageInfo,
     // TODO
     // total download size
 
