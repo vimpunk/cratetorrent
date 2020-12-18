@@ -156,6 +156,14 @@ pub(crate) struct Torrent {
 
     /// The configuration of this particular torrent.
     conf: TorrentConf,
+
+    /// If `TorrentAlertConf::latest_completed_pieces` alert type is set, each
+    /// round the torrent collects the pieces that were downloaded, sends them
+    /// to peer as an alert, and resets the list.
+    ///
+    /// This is set to some if the configuration is enabled, and set to none if
+    /// disabled.
+    latest_completed_pieces: Option<Vec<PieceIndex>>,
 }
 
 impl Torrent {
@@ -183,6 +191,11 @@ impl Torrent {
         let piece_picker = PiecePicker::new(own_pieces);
         let port = port.fuse();
         let trackers = trackers.into_iter().map(TrackerEntry::new).collect();
+        let latest_completed_pieces = if conf.alerts.latest_completed_pieces {
+            Some(Vec::new())
+        } else {
+            None
+        };
 
         (
             Self {
@@ -211,6 +224,7 @@ impl Torrent {
                 listen_addr,
                 alert_tx,
                 conf,
+                latest_completed_pieces,
             },
             tx,
         )
@@ -377,10 +391,11 @@ impl Torrent {
         }
 
         // send periodic stats update to api user
+        let stats = self.build_stats().await;
         self.alert_tx
             .send(Alert::TorrentStats {
                 id: self.ctx.id,
-                stats: self.stats().await,
+                stats,
             })
             .ok();
 
@@ -559,10 +574,17 @@ impl Torrent {
     }
 
     /// Returns high-level statistics about the torrent to send it to the user.
-    async fn stats(&self) -> TorrentStats {
+    async fn build_stats(&mut self) -> TorrentStats {
         let missing_piece_count =
             self.ctx.piece_picker.read().await.missing_piece_count();
         let piece_count = self.ctx.storage.piece_count;
+        let latest_completed_pieces = self
+            .latest_completed_pieces
+            .as_mut()
+            .map(|latest_completed_pieces| {
+                std::mem::replace(latest_completed_pieces, Vec::new())
+            });
+
         TorrentStats {
             start_time: self.start_time,
             run_duration: self.run_duration,
@@ -570,6 +592,7 @@ impl Torrent {
                 total: piece_count,
                 complete: piece_count - missing_piece_count,
                 pending: self.ctx.downloads.read().await.len(),
+                latest_completed: latest_completed_pieces,
             },
             downloaded_payload_stats: ThroughputStats::from(
                 &self.downloaded_payload_counter,
@@ -661,6 +684,12 @@ impl Torrent {
                 piece.index,
                 missing_piece_count
             );
+
+            if let Some(latest_completed_pieces) =
+                &mut self.latest_completed_pieces
+            {
+                latest_completed_pieces.push(piece.index);
+            }
 
             // tell all sessions that we got a new piece so that they can send
             // a "have(piece)" message to their peers or cancel potential

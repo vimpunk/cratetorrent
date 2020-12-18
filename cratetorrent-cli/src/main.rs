@@ -42,6 +42,9 @@ pub struct Args {
     /// The socket address on which to listen for new connections.
     #[structopt(short, long)]
     listen: Option<SocketAddr>,
+
+    #[structopt(short, long)]
+    quit_after_complete: bool,
 }
 
 fn parse_mode(s: &str) -> Mode {
@@ -53,7 +56,10 @@ fn parse_mode(s: &str) -> Mode {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    env_logger::init();
+    flexi_logger::Logger::with_env()
+        .log_to_file()
+        .directory("/tmp/cratetorrent")
+        .start()?;
 
     // parse cli args
     let mut args = Args::from_args();
@@ -61,6 +67,8 @@ async fn main() -> Result<()> {
     if let Mode::Download { seeds } = &mut args.mode {
         *seeds = args.seeds.clone().unwrap_or_default();
     };
+
+    let quit_after_complete = args.quit_after_complete;
 
     // set up TUI backend
     let stdout = io::stdout().into_raw_mode()?;
@@ -97,7 +105,9 @@ async fn main() -> Result<()> {
                     }
                     Alert::TorrentComplete(_) => {
                         // TODO: some notification/popup
-                        run = false;
+                        if quit_after_complete {
+                            run = false;
+                        }
                     }
                 }
             }

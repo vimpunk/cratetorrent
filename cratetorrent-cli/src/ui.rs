@@ -2,10 +2,10 @@ use std::borrow::Cow;
 
 use tui::{
     backend::Backend,
-    layout::{Alignment, Constraint, Direction, Layout, Rect},
+    layout::{Alignment, Constraint, Corner, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Span, Spans},
-    widgets::{Block, Borders, Gauge, Paragraph, Sparkline},
+    widgets::{Block, Borders, Gauge, List, ListItem, Paragraph, Sparkline},
     Frame,
 };
 
@@ -33,13 +33,17 @@ pub fn draw(f: &mut Frame<impl Backend>, app: &mut App) {
                 .as_ref(),
             )
             .split(f.size());
-        draw_info(f, torrent, chunks[0]);
+        draw_metadata_and_throughput(f, torrent, chunks[0]);
         draw_progress_bar(f, torrent, chunks[1]);
-        //draw_details(f, torrent, chunks[1]);
+        draw_files_and_pieces(f, torrent, chunks[2]);
     }
 }
 
-pub fn draw_info(f: &mut Frame<impl Backend>, torrent: &Torrent, area: Rect) {
+pub fn draw_metadata_and_throughput(
+    f: &mut Frame<impl Backend>,
+    torrent: &Torrent,
+    area: Rect,
+) {
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints(
@@ -58,7 +62,20 @@ pub fn draw_metadata(
     let text = vec![
         // TODO: avoid clones here
         create_key_value_spans("Name: ", torrent.name.clone()),
+        create_key_value_spans(
+            "Path: ",
+            torrent
+                .storage
+                .download_dir
+                .join(&torrent.name)
+                .display()
+                .to_string(),
+        ),
         create_key_value_spans("Info hash: ", torrent.info_hash.clone()),
+        create_key_value_spans(
+            "Size: ",
+            format!("{} b", torrent.storage.download_len),
+        ),
         create_key_value_spans("Piece len: ", torrent.piece_len.to_string()),
         create_key_value_spans(
             "Elapsed: ",
@@ -72,6 +89,10 @@ pub fn draw_metadata(
                 torrent.pieces.total,
                 torrent.pieces.pending
             ),
+        ),
+        create_key_value_spans(
+            "Connected peers: ",
+            torrent.peer_count.to_string(),
         ),
     ];
 
@@ -154,19 +175,76 @@ pub fn draw_progress_bar(
     f.render_widget(progress, area);
 }
 
-//pub fn draw_details(
-//f: &mut Frame<impl Backend>,
-//torrent: &Torrent,
-//area: Rect,
-//) {
-//let chunks = Layout::default()
-//.direction(Direction::Horizontal)
-//.constraints(
-//[Constraint::Percentage(50), Constraint::Percentage(50)].as_ref(),
-//)
-//.split(area);
-//// TODO
-//}
+pub fn draw_files_and_pieces(
+    f: &mut Frame<impl Backend>,
+    torrent: &Torrent,
+    area: Rect,
+) {
+    let chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints(
+            [Constraint::Percentage(50), Constraint::Percentage(50)].as_ref(),
+        )
+        .split(area);
+    draw_files(f, torrent, chunks[0]);
+    draw_pieces(f, torrent, chunks[1]);
+}
+
+pub fn draw_files(f: &mut Frame<impl Backend>, torrent: &Torrent, area: Rect) {
+    let files: Vec<ListItem> = torrent
+        .files
+        .iter()
+        .map(|file| {
+            let delim = Spans::from("-".repeat(area.width as usize));
+            let path = Spans::from(Span::styled(
+                file.info.path.display().to_string(),
+                Style::default().add_modifier(Modifier::BOLD),
+            ));
+            let downloaded_percent =
+                (file.complete as f64 / file.info.len as f64) * 100.0;
+            let file_size = Spans::from(format!(
+                "{}/{} bytes ({}%)",
+                file.complete, file.info.len, downloaded_percent as u16
+            ));
+            // Build up the final list item:
+            // 1. Add a `---` spacing line above the list entry
+            // 2. Add the file name/path as bold
+            // 3. Add a spacer line
+            // 4. Add the file size
+            ListItem::new(vec![delim, path, Spans::from(""), file_size])
+        })
+        .collect();
+    let files = List::new(files).block(create_block("Files"));
+    f.render_widget(files, area);
+}
+
+pub fn draw_pieces(f: &mut Frame<impl Backend>, torrent: &Torrent, area: Rect) {
+    let pieces: Vec<ListItem> = torrent
+        .pieces
+        .latest_completed
+        .as_ref()
+        .map(|latest_completed| {
+            latest_completed
+                .iter()
+                .map(|piece| {
+                    let delim = Spans::from("-".repeat(area.width as usize));
+                    let piece_index = Spans::from(Span::styled(
+                        piece.to_string(),
+                        Style::default().add_modifier(Modifier::BOLD),
+                    ));
+                    // Build up the final list item:
+                    // 1. Add a `---` spacing line above the list entry
+                    // 2. Add piece index
+                    ListItem::new(vec![delim, piece_index])
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let pieces = List::new(pieces)
+        .block(create_block("Latest pieces"))
+        .start_corner(Corner::BottomLeft);
+    f.render_widget(pieces, area);
+}
 
 fn create_block<'a>(title: impl Into<Cow<'a, str>>) -> Block<'a> {
     let title =

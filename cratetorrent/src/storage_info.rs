@@ -18,12 +18,12 @@ pub struct FileInfo {
 impl FileInfo {
     /// Returns a range that represents the file's first and one past the last
     /// bytes' offsets in the torrent.
-    pub(crate) fn byte_range(&self) -> Range<u64> {
+    pub fn byte_range(&self) -> Range<u64> {
         self.torrent_offset..self.torrent_end_offset()
     }
 
     /// Returns the file's one past the last byte's offset in the torrent.
-    pub(crate) fn torrent_end_offset(&self) -> u64 {
+    pub fn torrent_end_offset(&self) -> u64 {
         self.torrent_offset + self.len
     }
 
@@ -41,7 +41,7 @@ impl FileInfo {
     ///
     /// This will panic if `torrent_offset` is smaller than the file's offset in
     /// torrent, or if it's past the last byte in file.
-    pub(crate) fn get_slice(&self, torrent_offset: u64, len: u64) -> FileSlice {
+    pub fn get_slice(&self, torrent_offset: u64, len: u64) -> FileSlice {
         assert!(
             torrent_offset >= self.torrent_offset,
             "torrent offset must be larger than file offset",
@@ -62,7 +62,7 @@ impl FileInfo {
 
 /// Represents the location of a range of bytes within a file.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct FileSlice {
+pub struct FileSlice {
     /// The byte offset in file, relative to the file's start.
     pub offset: u64,
     /// The length of the slice, in bytes.

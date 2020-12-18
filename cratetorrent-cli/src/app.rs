@@ -3,12 +3,12 @@ use std::{fs, path::PathBuf, time::Duration};
 
 use cratetorrent::{
     alert::AlertReceiver,
-    conf::Conf,
-    engine::{EngineHandle, TorrentParams},
+    conf::{Conf, TorrentAlertConf, TorrentConf},
+    engine::{EngineHandle, Mode, TorrentParams},
     metainfo::Metainfo,
     storage_info::StorageInfo,
     torrent::stats::{PieceStats, ThroughputStats, TorrentStats},
-    TorrentId,
+    FileInfo, TorrentId,
 };
 use futures::stream::{Fuse, StreamExt};
 
@@ -44,15 +44,44 @@ impl App {
         let info_hash = hex::encode(&metainfo.info_hash);
         let piece_count = metainfo.piece_count();
         let download_len = metainfo.download_len();
+        let is_seed = matches!(args.mode, Mode::Seed);
 
         let storage = StorageInfo::new(&metainfo, self.download_dir.clone());
+        let files = storage
+            .files
+            .iter()
+            .map(|f| FileStats {
+                info: f.clone(),
+                complete: if is_seed { f.len } else { 0 },
+            })
+            .collect();
+
+        let pieces = if is_seed {
+            PieceStats {
+                total: piece_count,
+                complete: piece_count,
+                ..Default::default()
+            }
+        } else {
+            PieceStats {
+                total: piece_count,
+                latest_completed: Some(Vec::new()),
+                ..Default::default()
+            }
+        };
 
         // create torrent
         let torrent_id = self.engine.create_torrent(TorrentParams {
             metainfo: metainfo.clone(),
             listen_addr: args.listen,
             mode: args.mode,
-            conf: None,
+            conf: Some(TorrentConf {
+                alerts: TorrentAlertConf {
+                    latest_completed_pieces: true,
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
         })?;
 
         let torrent = Torrent {
@@ -63,10 +92,8 @@ impl App {
             storage,
 
             run_duration: Default::default(),
-            pieces: PieceStats {
-                total: piece_count,
-                ..Default::default()
-            },
+            pieces,
+            files,
             peer_count: Default::default(),
             downloaded_payload_stats: Default::default(),
             wasted_payload_count: Default::default(),
@@ -85,8 +112,67 @@ impl App {
         stats: TorrentStats,
     ) {
         if let Some(torrent) = self.torrents.get_mut(&torrent_id) {
+            // update file completion by checking which pieces were downloaded
+            // this round
+            // TODO: clean this up or possibly move into cratetorrent as
+            // a utility function
+            // TODO: consider letting tradetorrent send file completion progress
+            // since if a client is not listening continuously for completed
+            // pieces they won't be able to reconsruct this
+            if let Some(pieces) = &stats.pieces.latest_completed {
+                // for each piece, check which
+                for piece in pieces.iter().cloned() {
+                    let piece_len = torrent
+                        .storage
+                        .piece_len(piece)
+                        .expect("engine sent invalid piece index");
+                    let mut torrent_piece_offset =
+                        torrent.storage.torrent_piece_offset(piece);
+                    let mut consumed = 0;
+
+                    let file_range = torrent
+                        .storage
+                        .files_intersecting_piece(piece)
+                        .expect("invalid file range");
+                    let files = &mut torrent.files[file_range];
+                    for file in files.iter_mut() {
+                        let remaining_piece_len = piece_len as u64 - consumed;
+                        let file_slice = file.info.get_slice(
+                            torrent_piece_offset,
+                            remaining_piece_len,
+                        );
+                        torrent_piece_offset += file_slice.len;
+                        consumed += file_slice.len;
+                        file.complete += file_slice.len;
+                        debug_assert!(
+                            file.complete <= file.info.len,
+                            "cannot have downloaded more than file length"
+                        );
+                    }
+                }
+            }
+
+            // update piece download stats, but take care not to overwrite our
+            // piece history, which is needed to produce a continuous event list
+            let latest_completed_pieces =
+                if let (Some(mut existing), Some(new)) = (
+                    torrent.pieces.latest_completed.take(),
+                    stats.pieces.latest_completed,
+                ) {
+                    existing.extend(new.into_iter());
+                    if existing.len() > 100 {
+                        let overflow = existing.len() - 100;
+                        existing.drain(0..overflow);
+                    }
+                    Some(existing)
+                } else {
+                    None
+                };
+            torrent.pieces = PieceStats {
+                latest_completed: latest_completed_pieces,
+                ..stats.pieces
+            };
             torrent.run_duration = stats.run_duration;
-            torrent.pieces = stats.pieces;
             torrent.peer_count = stats.peer_count;
 
             const HISTORY_LIMIT: usize = 100;
@@ -132,6 +218,8 @@ pub struct Torrent {
     pub pieces: PieceStats,
     pub peer_count: usize,
 
+    pub files: Vec<FileStats>,
+
     pub downloaded_payload_stats: ThroughputHistory,
     pub wasted_payload_count: u64,
     pub uploaded_payload_stats: ThroughputHistory,
@@ -161,4 +249,9 @@ impl ThroughputHistory {
         self.peak = stats.peak;
         self.total = stats.total;
     }
+}
+
+pub struct FileStats {
+    pub info: FileInfo,
+    pub complete: u64,
 }

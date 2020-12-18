@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-use crate::counter::Counter;
+use crate::{counter::Counter, PieceIndex};
 
 /// Aggregated statistics of a torrent.
 #[derive(Clone, Debug, Default)]
@@ -24,11 +24,20 @@ pub struct TorrentStats {
 }
 
 /// Statistics of a torrent's pieces.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PieceStats {
-    pub pending: usize,
-    pub complete: usize,
+    /// The total number of pieces in torrent.
     pub total: usize,
+    /// The number of pieces that the torrent is currently downloading.
+    pub pending: usize,
+    /// The number of pieces that the torrent has downloaded.
+    pub complete: usize,
+    /// The pieces that were completed since the last status update.
+    ///
+    /// By default this information is not sent, as it has a little overhead. It
+    /// needs to be turned on in the torrent's [configuration]
+    /// (crate::conf::TorrentAlertConf::latest_completed_pieces).
+    pub latest_completed: Option<Vec<PieceIndex>>,
 }
 
 impl PieceStats {

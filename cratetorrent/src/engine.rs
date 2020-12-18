@@ -246,8 +246,10 @@ impl Engine {
         params: TorrentParams,
     ) -> Result<()> {
         let conf = params.conf.unwrap_or_else(|| self.conf.torrent.clone());
-        let storage_info =
-            StorageInfo::new(&params.metainfo, conf.download_dir.clone());
+        let storage_info = StorageInfo::new(
+            &params.metainfo,
+            self.conf.engine.download_dir.clone(),
+        );
         // TODO: don't duplicate trackers if multiple torrents use the same
         // ones (common in practice)
         let trackers = params
