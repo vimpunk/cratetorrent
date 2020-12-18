@@ -348,7 +348,7 @@ mod tests {
         let expected_hash = {
             let mut hasher = Sha1::new();
             for block in blocks.iter() {
-                hasher.input(&block);
+                hasher.update(&block);
             }
             hasher.result().into()
         };

@@ -7,22 +7,23 @@ edition = "2018"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-bitvec = "0.17"
+bitvec = "0.19"
 bytes = "0.5"
 chashmap = "2.2"
 futures = "0.3"
 hex = "0.4"
 lazy_static = "1.4"
 log = "0.4"
-nix = "0.17"
+nix = "0.19"
 percent-encoding = "2.1"
 reqwest = "0.10"
 serde = "1.0"
 serde_bencode = "0.2"
 serde_bytes = "0.11"
 serde_derive = "1.0"
-sha-1 = "0.8"
+sha-1 = "0.9"
 # TODO(#54): specify exact features to use to cut down build times
+# TODO(#76): update tokio when reqwest also updates it
 tokio = { version = "0.2", features = ["full"] }
 tokio-util = { version = "0.2", features = ["codec"] }
 url = "2.2"
@@ -30,7 +31,7 @@ url = "2.2"
 [dev-dependencies]
 criterion = "0.3"
 lazy_static = "1.4"
-mockito = "0.27"
+mockito = "0.28"
 pretty_assertions = "0.6"
 
 [[bench]]

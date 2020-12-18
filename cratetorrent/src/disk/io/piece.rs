@@ -70,9 +70,9 @@ impl Piece {
         debug_assert_eq!(self.blocks.len(), block_count(self.len));
         let mut hasher = Sha1::new();
         for block in self.blocks.values() {
-            hasher.input(&block);
+            hasher.update(&block);
         }
-        let hash = hasher.result();
+        let hash = hasher.finalize();
         log::debug!("Piece hash: {:x}", hash);
         hash.as_slice() == self.expected_hash
     }
