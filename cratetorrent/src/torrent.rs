@@ -79,6 +79,20 @@ pub(crate) struct PieceCompletion {
     pub is_valid: bool,
 }
 
+/// Parameters for the torrent constructor.
+pub(crate) struct Params {
+    pub id: TorrentId,
+    pub disk: DiskHandle,
+    pub info_hash: Sha1Hash,
+    pub storage_info: StorageInfo,
+    pub own_pieces: Bitfield,
+    pub trackers: Vec<Tracker>,
+    pub client_id: PeerId,
+    pub listen_addr: SocketAddr,
+    pub conf: TorrentConf,
+    pub alert_chan: AlertSender,
+}
+
 /// Represents a torrent upload or download.
 ///
 /// This is the main entity responsible for the high-level management of
@@ -152,23 +166,24 @@ impl Torrent {
     ///
     /// This constructor only initializes the torrent components but does not
     /// actually start it. See [`Self::start`].
-    pub fn new(
-        id: TorrentId,
-        disk: DiskHandle,
-        info_hash: Sha1Hash,
-        storage_info: StorageInfo,
-        have_pieces: Bitfield,
-        trackers: Vec<Tracker>,
-        client_id: PeerId,
-        listen_addr: SocketAddr,
-        conf: TorrentConf,
-        alert_chan: AlertSender,
-    ) -> (Self, Sender) {
+    pub fn new(params: Params) -> (Self, Sender) {
+        let Params {
+            id,
+            disk,
+            info_hash,
+            storage_info,
+            own_pieces,
+            trackers,
+            client_id,
+            listen_addr,
+            conf,
+            alert_chan,
+        } = params;
+
         let (chan, port) = mpsc::unbounded_channel();
-        let piece_picker = PiecePicker::new(have_pieces);
+        let piece_picker = PiecePicker::new(own_pieces);
         let port = port.fuse();
-        let trackers =
-            trackers.into_iter().map(|t| TrackerEntry::new(t)).collect();
+        let trackers = trackers.into_iter().map(TrackerEntry::new).collect();
 
         (
             Self {
@@ -220,6 +235,9 @@ impl Torrent {
         let mut last_tick_time = None;
 
         let mut listener = TcpListener::bind(&self.listen_addr).await?;
+        // the bind port may have been 0, so we need to get the actual port in
+        // use
+        self.listen_addr = listener.local_addr()?;
         let mut incoming = listener.incoming().fuse();
 
         // the torrent loop is triggered every second by the loop timer and by
@@ -450,8 +468,8 @@ impl Torrent {
             {
                 let params = Announce {
                     tracker_id: tracker.id.clone(),
-                    info_hash: self.ctx.info_hash.clone(),
-                    peer_id: self.ctx.client_id.clone(),
+                    info_hash: self.ctx.info_hash,
+                    peer_id: self.ctx.client_id,
                     port: self.listen_addr.port(),
                     peer_count: needed_peer_count,
                     uploaded,

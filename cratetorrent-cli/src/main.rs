@@ -63,12 +63,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let listen_addr = matches.value_of("listen");
     println!("{:?}", listen_addr);
     let listen_addr = listen_addr.and_then(|l| l.parse().ok());
-    let metainfo_path = matches
-        .value_of("metainfo")
-        .ok_or_else(|| "--seed must be set")?;
+    let metainfo_path =
+        matches.value_of("metainfo").ok_or("--seed must be set")?;
     let download_dir = matches
         .value_of("download-dir")
-        .ok_or_else(|| "--download-dir must be set")?;
+        .ok_or("--download-dir must be set")?;
 
     // optional
     let seeds: Vec<SocketAddr> = matches

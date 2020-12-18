@@ -253,7 +253,7 @@ impl Engine {
             .metainfo
             .trackers
             .into_iter()
-            .map(|url| Tracker::new(url))
+            .map(Tracker::new)
             .collect();
         let own_pieces = params.mode.own_pieces(storage_info.piece_count);
 
@@ -262,22 +262,22 @@ impl Engine {
         // pause/restart APIs, this will be a separate step. There should be
         // a `start` flag in `params` that says whether to immediately spawn
         // a new torrent (or maybe in `TorrentConf`).
-        let (mut torrent, torrent_chan) = Torrent::new(
+        let (mut torrent, torrent_chan) = Torrent::new(torrent::Params {
             id,
-            self.disk.clone(),
-            params.metainfo.info_hash,
-            storage_info.clone(),
+            disk: self.disk.clone(),
+            info_hash: params.metainfo.info_hash,
+            storage_info: storage_info.clone(),
             own_pieces,
             trackers,
-            self.conf.engine.client_id,
-            params.listen_addr.unwrap_or_else(|| {
+            client_id: self.conf.engine.client_id,
+            listen_addr: params.listen_addr.unwrap_or_else(|| {
                 // the port 0 tells the kernel to assign a free port from the
                 // dynamic range
                 SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), 0)
             }),
             conf,
-            self.alert_chan.clone(),
-        );
+            alert_chan: self.alert_chan.clone(),
+        });
 
         // Allocate torrent on disk. This is an asynchronous process and we can
         // start the torrent in the meantime.

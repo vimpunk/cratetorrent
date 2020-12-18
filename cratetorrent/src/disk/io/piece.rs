@@ -43,10 +43,12 @@ impl Piece {
     /// Places block into piece's write buffer if it doesn't exist. TODO: should
     /// we return an error if it does?
     pub fn enqueue_block(&mut self, offset: u32, data: Vec<u8>) {
-        if self.blocks.contains_key(&offset) {
+        use std::collections::btree_map::Entry;
+        let entry = self.blocks.entry(offset);
+        if matches!(entry, Entry::Occupied(_)) {
             log::warn!("Duplicate piece block at offset {}", offset);
         } else {
-            self.blocks.insert(offset, data);
+            entry.or_insert(data);
         }
     }
 
@@ -154,7 +156,7 @@ impl Piece {
 /// * `len` - The length of the piece to read in.  While this function is
 ///     currently used to read the whole piece, it could also be used to read
 ///     only a portion of the piece or several pieces with this argument.
-pub(super) fn read<'a>(
+pub(super) fn read(
     torrent_piece_offset: u64,
     file_range: Range<FileIndex>,
     files: &[sync::RwLock<TorrentFile>],
