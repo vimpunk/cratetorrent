@@ -4,8 +4,6 @@ pub(crate) mod torrent;
 
 #[cfg(test)]
 mod tests {
-    use sha1::{Digest, Sha1};
-
     use std::{
         collections::BTreeMap,
         fs,
@@ -14,6 +12,8 @@ mod tests {
         path::{Path, PathBuf},
         sync,
     };
+
+    use sha1::{Digest, Sha1};
 
     use crate::{
         disk::{
@@ -348,9 +348,9 @@ mod tests {
         let expected_hash = {
             let mut hasher = Sha1::new();
             for block in blocks.iter() {
-                hasher.input(&block);
+                hasher.update(&block);
             }
-            hasher.result().into()
+            hasher.finalize().into()
         };
         let len = blocks.len() as u32 * BLOCK_LEN;
         // convert blocks to a b-tree map

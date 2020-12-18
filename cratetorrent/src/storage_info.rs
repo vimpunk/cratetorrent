@@ -146,6 +146,7 @@ impl StorageInfo {
     }
 
     /// Returns the length of the piece at the given index.
+    #[allow(clippy::comparison_chain)]
     pub fn piece_len(&self, index: PieceIndex) -> Result<u32> {
         if index == self.piece_count - 1 {
             Ok(self.last_piece_len)

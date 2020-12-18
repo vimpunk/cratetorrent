@@ -49,15 +49,15 @@ pub fn spawn(conf: Conf) -> Result<(EngineHandle, AlertReceiver)> {
     log::info!("Spawning engine task");
 
     // create alert channels and return alert port to user
-    let (alert_chan, alert_port) = mpsc::unbounded_channel();
-    let (mut engine, chan) = Engine::new(conf, alert_chan)?;
+    let (alert_tx, alert_port) = mpsc::unbounded_channel();
+    let (mut engine, tx) = Engine::new(conf, alert_tx)?;
 
     let join_handle = task::spawn(async move { engine.run().await });
     log::info!("Spawned engine task");
 
     Ok((
         EngineHandle {
-            chan,
+            tx,
             join_handle: Some(join_handle),
         },
         alert_port,
@@ -68,7 +68,7 @@ type JoinHandle = task::JoinHandle<Result<()>>;
 
 /// A handle to the currently running torrent engine.
 pub struct EngineHandle {
-    chan: Sender,
+    tx: Sender,
     join_handle: Option<JoinHandle>,
 }
 
@@ -80,7 +80,7 @@ impl EngineHandle {
     pub fn create_torrent(&self, params: TorrentParams) -> Result<TorrentId> {
         log::trace!("Creating torrent");
         let id = TorrentId::new();
-        self.chan.send(Command::CreateTorrent { id, params })?;
+        self.tx.send(Command::CreateTorrent { id, params })?;
         Ok(id)
     }
 
@@ -92,7 +92,7 @@ impl EngineHandle {
     /// This method panics if the engine has already been shut down.
     pub async fn shutdown(mut self) -> Result<()> {
         log::trace!("Shutting down engine task");
-        self.chan.send(Command::Shutdown)?;
+        self.tx.send(Command::Shutdown)?;
         if let Err(e) = self
             .join_handle
             .take()
@@ -172,7 +172,7 @@ struct Engine {
     disk_join_handle: Option<disk::JoinHandle>,
 
     /// The channel on which tasks in the engine post alerts to user.
-    alert_chan: AlertSender,
+    alert_tx: AlertSender,
 
     /// The global engine configuration that includes defaults for torrents
     /// whose config is not overridden.
@@ -182,16 +182,16 @@ struct Engine {
 /// A running torrent's entry in the engine.
 struct TorrentEntry {
     /// The torrent's command channel on which engine sends commands to torrent.
-    chan: torrent::Sender,
+    tx: torrent::Sender,
     /// The torrent task's join handle, used during shutdown.
     join_handle: Option<JoinHandle>,
 }
 
 impl Engine {
     /// Creates a new engine, spawning the disk task.
-    fn new(conf: Conf, alert_chan: AlertSender) -> Result<(Self, Sender)> {
-        let (chan, port) = mpsc::unbounded_channel();
-        let (disk_join_handle, disk) = disk::spawn(chan.clone())?;
+    fn new(conf: Conf, alert_tx: AlertSender) -> Result<(Self, Sender)> {
+        let (tx, port) = mpsc::unbounded_channel();
+        let (disk_join_handle, disk) = disk::spawn(tx.clone())?;
 
         Ok((
             Self {
@@ -199,10 +199,10 @@ impl Engine {
                 port,
                 disk,
                 disk_join_handle: Some(disk_join_handle),
-                alert_chan,
+                alert_tx,
                 conf,
             },
-            chan,
+            tx,
         ))
     }
 
@@ -253,7 +253,7 @@ impl Engine {
             .metainfo
             .trackers
             .into_iter()
-            .map(|url| Tracker::new(url))
+            .map(Tracker::new)
             .collect();
         let own_pieces = params.mode.own_pieces(storage_info.piece_count);
 
@@ -262,22 +262,22 @@ impl Engine {
         // pause/restart APIs, this will be a separate step. There should be
         // a `start` flag in `params` that says whether to immediately spawn
         // a new torrent (or maybe in `TorrentConf`).
-        let (mut torrent, torrent_chan) = Torrent::new(
+        let (mut torrent, torrent_tx) = Torrent::new(torrent::Params {
             id,
-            self.disk.clone(),
-            params.metainfo.info_hash,
-            storage_info.clone(),
+            disk: self.disk.clone(),
+            info_hash: params.metainfo.info_hash,
+            storage_info: storage_info.clone(),
             own_pieces,
             trackers,
-            self.conf.engine.client_id,
-            params.listen_addr.unwrap_or_else(|| {
+            client_id: self.conf.engine.client_id,
+            listen_addr: params.listen_addr.unwrap_or_else(|| {
                 // the port 0 tells the kernel to assign a free port from the
                 // dynamic range
                 SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), 0)
             }),
             conf,
-            self.alert_chan.clone(),
-        );
+            alert_tx: self.alert_tx.clone(),
+        });
 
         // Allocate torrent on disk. This is an asynchronous process and we can
         // start the torrent in the meantime.
@@ -298,7 +298,7 @@ impl Engine {
             id,
             storage_info,
             params.metainfo.pieces,
-            torrent_chan.clone(),
+            torrent_tx.clone(),
         )?;
 
         let seeds = params.mode.seeds();
@@ -308,7 +308,7 @@ impl Engine {
         self.torrents.insert(
             id,
             TorrentEntry {
-                chan: torrent_chan,
+                tx: torrent_tx,
                 join_handle: Some(join_handle),
             },
         );
@@ -323,7 +323,7 @@ impl Engine {
         // tell all torrents to shut down and join their tasks
         for torrent in self.torrents.values_mut() {
             // the torrent task may no longer be running, so don't panic here
-            torrent.chan.send(torrent::Command::Shutdown).ok();
+            torrent.tx.send(torrent::Command::Shutdown).ok();
         }
         // Then join all torrent task handles. Shutting down a torrent may take
         // a while, so join as a separate step to first initiate the shutdown of

@@ -334,7 +334,7 @@ where
     D: de::Deserializer<'de>,
 {
     let s: Option<u64> = de::Deserialize::deserialize(deserializer)?;
-    Ok(s.map(|s| Duration::from_secs(s)))
+    Ok(s.map(Duration::from_secs))
 }
 
 /// Contains the characters that need to be URL encoded according to:
