@@ -34,10 +34,9 @@ use crate::{
     tracker::{Announce, Event, Tracker},
     Bitfield, BlockInfo, PeerId, PieceIndex, Sha1Hash, TorrentId,
 };
+use stats::{PieceStats, ThroughputStats, TorrentStats};
 
-pub use stats::*;
-
-mod stats;
+pub mod stats;
 
 /// The channel for communicating with torrent.
 pub(crate) type Sender = UnboundedSender<Command>;

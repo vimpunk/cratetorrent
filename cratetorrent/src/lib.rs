@@ -158,7 +158,7 @@ mod peer;
 mod piece_picker;
 pub mod prelude;
 pub mod storage_info;
-mod torrent;
+pub mod torrent;
 mod tracker;
 
 /// Each torrent gets a randomly assigned ID that is unique within the

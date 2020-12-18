@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 use crate::counter::Counter;
 
 /// Aggregated statistics of a torrent.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct TorrentStats {
     /// When the torrent was _first_ started.
     pub start_time: Option<Instant>,
@@ -24,7 +24,7 @@ pub struct TorrentStats {
 }
 
 /// Statistics of a torrent's pieces.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PieceStats {
     pub pending: usize,
     pub complete: usize,
@@ -45,7 +45,7 @@ impl PieceStats {
 }
 
 /// Statistics of a torrent's current throughput.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ThroughputStats {
     pub total: u64,
     pub rate: u64,

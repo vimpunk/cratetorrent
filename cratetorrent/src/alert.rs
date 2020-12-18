@@ -7,7 +7,7 @@
 
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
-use crate::{torrent::TorrentStats, TorrentId};
+use crate::{torrent::stats::TorrentStats, TorrentId};
 
 pub(crate) type AlertSender = UnboundedSender<Alert>;
 /// The channel on which alerts from the engine can be received. See [`Alert`]
