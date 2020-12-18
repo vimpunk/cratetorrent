@@ -90,7 +90,7 @@ pub(crate) struct Params {
     pub client_id: PeerId,
     pub listen_addr: SocketAddr,
     pub conf: TorrentConf,
-    pub alert_chan: AlertSender,
+    pub alert_tx: AlertSender,
 }
 
 /// Represents a torrent upload or download.
@@ -153,7 +153,7 @@ pub(crate) struct Torrent {
     uploaded_protocol_counter: Counter,
 
     /// The channel on which to post alerts to user.
-    alert_chan: AlertSender,
+    alert_tx: AlertSender,
 
     /// The configuration of this particular torrent.
     conf: TorrentConf,
@@ -177,10 +177,10 @@ impl Torrent {
             client_id,
             listen_addr,
             conf,
-            alert_chan,
+            alert_tx,
         } = params;
 
-        let (chan, port) = mpsc::unbounded_channel();
+        let (tx, port) = mpsc::unbounded_channel();
         let piece_picker = PiecePicker::new(own_pieces);
         let port = port.fuse();
         let trackers = trackers.into_iter().map(TrackerEntry::new).collect();
@@ -191,7 +191,7 @@ impl Torrent {
                 available_peers: Vec::new(),
                 ctx: Arc::new(TorrentContext {
                     id,
-                    chan: chan.clone(),
+                    tx: tx.clone(),
                     piece_picker: Arc::new(RwLock::new(piece_picker)),
                     downloads: RwLock::new(HashMap::new()),
                     info_hash,
@@ -210,10 +210,10 @@ impl Torrent {
                 downloaded_protocol_counter: Default::default(),
                 uploaded_protocol_counter: Default::default(),
                 listen_addr,
-                alert_chan,
+                alert_tx,
                 conf,
             },
-            chan,
+            tx,
         )
     }
 
@@ -265,11 +265,11 @@ impl Torrent {
                     log::info!("New connection {:?}", addr);
 
                     // start inbound session
-                    let (session, chan) = PeerSession::new(
+                    let (session, tx) = PeerSession::new(
                         Arc::clone(&self.ctx),
                         addr,
                     );
-                    self.peers.insert(addr, PeerSessionEntry::start_inbound(socket, session, chan));
+                    self.peers.insert(addr, PeerSessionEntry::start_inbound(socket, session, tx));
                 }
                 cmd = self.port.select_next_some() => {
                     match cmd {
@@ -378,7 +378,7 @@ impl Torrent {
         }
 
         // send periodic stats update to api user
-        self.alert_chan
+        self.alert_tx
             .send(Alert::TorrentStats {
                 id: self.ctx.id,
                 stats: self.stats().await,
@@ -414,9 +414,9 @@ impl Torrent {
         log::debug!("Connecting {} peer(s)", connect_count);
         for addr in self.available_peers.drain(0..connect_count) {
             log::info!("Connecting to peer {}", addr);
-            let (session, chan) = PeerSession::new(Arc::clone(&self.ctx), addr);
+            let (session, tx) = PeerSession::new(Arc::clone(&self.ctx), addr);
             self.peers
-                .insert(addr, PeerSessionEntry::start_outbound(session, chan));
+                .insert(addr, PeerSessionEntry::start_outbound(session, tx));
         }
     }
 
@@ -667,11 +667,11 @@ impl Torrent {
             // a "have(piece)" message to their peers or cancel potential
             // duplicate requests for the same piece
             for peer in self.peers.values() {
-                if let Some(chan) = &peer.chan {
+                if let Some(tx) = &peer.tx {
                     // this may be after the peer session had already stopped
                     // but before the torrent tick ran and got a chance to reap
                     // the dead session
-                    chan.send(peer::Command::PieceCompletion {
+                    tx.send(peer::Command::PieceCompletion {
                         index: piece.index,
                         in_endgame: self.in_endgame,
                     })
@@ -689,7 +689,7 @@ impl Torrent {
                 );
 
                 // notify user of torrent completion
-                self.alert_chan
+                self.alert_tx
                     .send(Alert::TorrentComplete(self.ctx.id))
                     .ok();
 
@@ -720,10 +720,10 @@ impl Torrent {
     async fn shutdown(&mut self) -> Result<()> {
         // send shutdown command to all connected peers
         for peer in self.peers.values() {
-            if let Some(chan) = &peer.chan {
+            if let Some(tx) = &peer.tx {
                 // we don't particularly care if we weren't successful
                 // in sending the command (for now)
-                chan.send(peer::Command::Shutdown).ok();
+                tx.send(peer::Command::Shutdown).ok();
             }
         }
 
@@ -753,7 +753,7 @@ struct PeerSessionEntry {
     /// The channel on which to communicate with the peer session.
     ///
     /// This is set when the session is started.
-    chan: Option<peer::Sender>,
+    tx: Option<peer::Sender>,
     /// Cached information about the session state. Updated every time peer
     /// updates us.
     state: SessionState,
@@ -762,11 +762,11 @@ struct PeerSessionEntry {
 }
 
 impl PeerSessionEntry {
-    fn start_outbound(mut session: PeerSession, chan: peer::Sender) -> Self {
+    fn start_outbound(mut session: PeerSession, tx: peer::Sender) -> Self {
         let join_handle =
             task::spawn(async move { session.start_outbound().await });
         Self {
-            chan: Some(chan),
+            tx: Some(tx),
             state: SessionState {
                 connection: ConnectionState::Connecting,
                 ..Default::default()
@@ -778,12 +778,12 @@ impl PeerSessionEntry {
     fn start_inbound(
         socket: TcpStream,
         mut session: PeerSession,
-        chan: peer::Sender,
+        tx: peer::Sender,
     ) -> Self {
         let join_handle =
             task::spawn(async move { session.start_inbound(socket).await });
         Self {
-            chan: Some(chan),
+            tx: Some(tx),
             state: SessionState {
                 connection: ConnectionState::Handshaking,
                 ..Default::default()
@@ -811,7 +811,7 @@ pub(crate) struct TorrentContext {
     /// A copy of the torrent channel sender. This is not used by torrent iself,
     /// but by the peer session tasks to which an arc copy of this torrent
     /// context is given.
-    pub chan: Sender,
+    pub tx: Sender,
 
     /// The piece picker picks the next most optimal piece to download and is
     /// shared by all peers in a torrent.

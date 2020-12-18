@@ -79,7 +79,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("seeds: {:?}", seeds);
 
     let conf = Conf::new(download_dir);
-    let (handle, mut alert_port) = cratetorrent::engine::spawn(conf)?;
+    let (handle, mut alert_rx) = cratetorrent::engine::spawn(conf)?;
 
     // read in torrent metainfo
     let metainfo = fs::read(metainfo_path)?;
@@ -102,7 +102,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     })?;
 
     // listen to alerts from the engine
-    while let Some(alert) = alert_port.next().await {
+    while let Some(alert) = alert_rx.next().await {
         match alert {
             Alert::TorrentStats { id, stats } => {
                 println!("{}: {:#?}", id, stats);

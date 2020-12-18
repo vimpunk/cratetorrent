@@ -24,15 +24,15 @@ mod io;
 /// Spawns a disk IO task and returns a tuple with the task join handle and the
 /// disk handle used for sending commands.
 pub(crate) fn spawn(
-    engine_chan: engine::Sender,
+    engine_tx: engine::Sender,
 ) -> Result<(JoinHandle, DiskHandle)> {
     log::info!("Spawning disk IO task");
-    let (mut disk, disk_chan) = Disk::new(engine_chan)?;
+    let (mut disk, disk_tx) = Disk::new(engine_tx)?;
     // spawn disk event loop on a new task
     let join_handle = task::spawn(async move { disk.start().await });
     log::info!("Spawned disk IO task");
 
-    Ok((join_handle, DiskHandle(disk_chan)))
+    Ok((join_handle, DiskHandle(disk_tx)))
 }
 
 pub(crate) type JoinHandle = task::JoinHandle<Result<()>>;
@@ -57,7 +57,7 @@ impl DiskHandle {
         id: TorrentId,
         storage_info: StorageInfo,
         piece_hashes: Vec<u8>,
-        torrent_chan: torrent::Sender,
+        torrent_tx: torrent::Sender,
     ) -> Result<()> {
         log::trace!("Allocating new torrent {}", id);
         self.0
@@ -65,7 +65,7 @@ impl DiskHandle {
                 id,
                 storage_info,
                 piece_hashes,
-                torrent_chan,
+                torrent_tx,
             })
             .map_err(Error::from)
     }
@@ -98,14 +98,14 @@ impl DiskHandle {
         &self,
         id: TorrentId,
         block_info: BlockInfo,
-        result_chan: peer::Sender,
+        result_tx: peer::Sender,
     ) -> Result<()> {
         log::trace!("Reading block {:?} from disk", block_info);
         self.0
             .send(Command::ReadBlock {
                 id,
                 block_info,
-                result_chan,
+                result_tx,
             })
             .map_err(Error::from)
     }
@@ -129,7 +129,7 @@ enum Command {
         id: TorrentId,
         storage_info: StorageInfo,
         piece_hashes: Vec<u8>,
-        torrent_chan: torrent::Sender,
+        torrent_tx: torrent::Sender,
     },
     /// Request to eventually write a block to disk.
     WriteBlock {
@@ -142,7 +142,7 @@ enum Command {
     ReadBlock {
         id: TorrentId,
         block_info: BlockInfo,
-        result_chan: peer::Sender,
+        result_tx: peer::Sender,
     },
     /// Eventually shut down the disk task.
     Shutdown,
@@ -156,23 +156,23 @@ struct Disk {
     /// channel.
     torrents: HashMap<TorrentId, RwLock<Torrent>>,
     /// Port on which disk IO commands are received.
-    cmd_port: Receiver,
+    cmd_rx: Receiver,
     /// Channel on which `Disk` sends alerts to the torrent engine.
-    engine_chan: engine::Sender,
+    engine_tx: engine::Sender,
 }
 
 impl Disk {
     /// Creates a new `Disk` instance and returns a command sender and an alert
     /// receiver.
-    fn new(engine_chan: engine::Sender) -> Result<(Self, Sender)> {
-        let (cmd_chan, cmd_port) = mpsc::unbounded_channel();
+    fn new(engine_tx: engine::Sender) -> Result<(Self, Sender)> {
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         Ok((
             Self {
                 torrents: HashMap::new(),
-                cmd_port,
-                engine_chan,
+                cmd_rx,
+                engine_tx,
             },
-            cmd_chan,
+            cmd_tx,
         ))
     }
 
@@ -180,13 +180,13 @@ impl Disk {
     /// unrecoverable error occurs (e.g. mpsc channel failure).
     async fn start(&mut self) -> Result<()> {
         log::info!("Starting disk IO event loop");
-        while let Some(cmd) = self.cmd_port.recv().await {
+        while let Some(cmd) = self.cmd_rx.recv().await {
             match cmd {
                 Command::NewTorrent {
                     id,
                     storage_info,
                     piece_hashes,
-                    torrent_chan,
+                    torrent_tx,
                 } => {
                     log::trace!(
                         "Disk received NewTorrent command: id={}, info={:?}",
@@ -195,7 +195,7 @@ impl Disk {
                     );
                     if self.torrents.contains_key(&id) {
                         log::warn!("Torrent {} already allocated", id);
-                        self.engine_chan.send(
+                        self.engine_tx.send(
                             engine::Command::TorrentAllocation {
                                 id,
                                 result: Err(NewTorrentError::AlreadyExists),
@@ -208,13 +208,13 @@ impl Disk {
                     // the disk task due to potential disk IO errors: we just
                     // want to log it and notify engine of it.
                     let torrent_res =
-                        Torrent::new(storage_info, piece_hashes, torrent_chan);
+                        Torrent::new(storage_info, piece_hashes, torrent_tx);
                     match torrent_res {
                         Ok(torrent) => {
                             log::info!("Torrent {} successfully allocated", id);
                             self.torrents.insert(id, RwLock::new(torrent));
                             // send notificaiton of allocation success
-                            self.engine_chan.send(
+                            self.engine_tx.send(
                                 engine::Command::TorrentAllocation {
                                     id,
                                     result: Ok(()),
@@ -228,7 +228,7 @@ impl Disk {
                                 e
                             );
                             // send notificaiton of allocation failure
-                            self.engine_chan.send(
+                            self.engine_tx.send(
                                 engine::Command::TorrentAllocation {
                                     id,
                                     result: Err(e),
@@ -247,9 +247,9 @@ impl Disk {
                 Command::ReadBlock {
                     id,
                     block_info,
-                    result_chan,
+                    result_tx,
                 } => {
-                    self.read_block(id, block_info, result_chan).await?;
+                    self.read_block(id, block_info, result_tx).await?;
                 }
                 Command::Shutdown => {
                     log::info!("Shutting down disk event loop");
@@ -297,7 +297,7 @@ impl Disk {
         &self,
         id: TorrentId,
         block_info: BlockInfo,
-        chan: peer::Sender,
+        tx: peer::Sender,
     ) -> Result<()> {
         log::trace!("Reading torrent {} block {} from disk", id, block_info);
 
@@ -310,7 +310,7 @@ impl Disk {
             log::error!("Torrent {} not found", id);
             Error::InvalidTorrentId
         })?;
-        torrent.read().await.read_block(block_info, chan).await
+        torrent.read().await.read_block(block_info, tx).await
     }
 }
 
@@ -331,14 +331,14 @@ mod tests {
     /// torrent returning an error.
     #[tokio::test]
     async fn should_allocate_new_torrent() {
-        let (chan, mut port) = mpsc::unbounded_channel();
-        let (_, disk_handle) = spawn(chan).unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (_, disk_handle) = spawn(tx).unwrap();
 
         let Env {
             id,
             piece_hashes,
             info,
-            torrent_chan,
+            torrent_tx,
             ..
         } = Env::new("allocate_new_torrent");
 
@@ -348,11 +348,11 @@ mod tests {
                 id,
                 info.clone(),
                 piece_hashes.clone(),
-                torrent_chan.clone(),
+                torrent_tx.clone(),
             )
             .unwrap();
         // wait for result on alert port
-        let alert = port.recv().await.unwrap();
+        let alert = rx.recv().await.unwrap();
         assert!(matches!(
             alert,
             engine::Command::TorrentAllocation {
@@ -370,11 +370,11 @@ mod tests {
 
         // try to allocate the same torrent a second time
         disk_handle
-            .allocate_new_torrent(id, info, piece_hashes, torrent_chan.clone())
+            .allocate_new_torrent(id, info, piece_hashes, torrent_tx.clone())
             .unwrap();
 
         // we should get an already exists error
-        let alert = port.recv().await.unwrap();
+        let alert = rx.recv().await.unwrap();
         assert!(matches!(
             alert,
             engine::Command::TorrentAllocation {
@@ -388,16 +388,16 @@ mod tests {
     /// alert of each disk write is returned by the disk task.
     #[tokio::test]
     async fn should_write_all_pieces() {
-        let (chan, mut port) = mpsc::unbounded_channel();
-        let (_, disk_handle) = spawn(chan).unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (_, disk_handle) = spawn(tx).unwrap();
 
         let Env {
             id,
             pieces,
             piece_hashes,
             info,
-            torrent_chan,
-            mut torrent_port,
+            torrent_tx,
+            mut torrent_rx,
         } = Env::new("write_all_pieces");
 
         // allocate torrent via channel
@@ -406,11 +406,11 @@ mod tests {
                 id,
                 info.clone(),
                 piece_hashes,
-                torrent_chan.clone(),
+                torrent_tx.clone(),
             )
             .unwrap();
         // wait for result on alert port
-        port.recv().await.expect("cannot allocate torrent");
+        rx.recv().await.expect("cannot allocate torrent");
 
         // write all pieces to disk
         for index in 0..pieces.len() {
@@ -425,7 +425,7 @@ mod tests {
 
             // wait for disk write result
             if let Some(torrent::Command::PieceCompletion(Ok(piece))) =
-                torrent_port.recv().await
+                torrent_rx.recv().await
             {
                 // piece is complete so it should be hashed and valid
                 assert_eq!(piece.index, index);
@@ -448,16 +448,16 @@ mod tests {
     /// is returned by the disk task.
     #[tokio::test]
     async fn should_reject_writing_invalid_piece() {
-        let (chan, mut port) = mpsc::unbounded_channel();
-        let (_, disk_handle) = spawn(chan).unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (_, disk_handle) = spawn(tx).unwrap();
 
         let Env {
             id,
             pieces,
             piece_hashes,
             info,
-            torrent_chan,
-            mut torrent_port,
+            torrent_tx,
+            mut torrent_rx,
         } = Env::new("write_invalid_piece");
 
         // allocate torrent via channel
@@ -466,11 +466,11 @@ mod tests {
                 id,
                 info.clone(),
                 piece_hashes,
-                torrent_chan.clone(),
+                torrent_tx.clone(),
             )
             .unwrap();
         // wait for result on alert port
-        port.recv().await.expect("cannot allocate torrent");
+        rx.recv().await.expect("cannot allocate torrent");
 
         // write an invalid piece to disk
         let index = 0;
@@ -487,7 +487,7 @@ mod tests {
 
         // wait for disk write result
         if let Some(torrent::Command::PieceCompletion(Ok(piece))) =
-            torrent_port.recv().await
+            torrent_rx.recv().await
         {
             assert_eq!(piece.index, index);
             assert_eq!(piece.is_valid, false);
@@ -500,16 +500,16 @@ mod tests {
     /// returned via the provided sender.
     #[tokio::test]
     async fn should_read_piece_blocks() {
-        let (chan, mut port) = mpsc::unbounded_channel();
-        let (_, disk_handle) = spawn(chan).unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (_, disk_handle) = spawn(tx).unwrap();
 
         let Env {
             id,
             pieces,
             piece_hashes,
             info,
-            torrent_chan,
-            mut torrent_port,
+            torrent_tx,
+            mut torrent_rx,
         } = Env::new("read_piece_blocks");
 
         // allocate torrent via channel
@@ -518,11 +518,11 @@ mod tests {
                 id,
                 info.clone(),
                 piece_hashes,
-                torrent_chan.clone(),
+                torrent_tx.clone(),
             )
             .unwrap();
         // wait for result on alert port
-        port.recv().await.expect("cannot allocate torrent");
+        rx.recv().await.expect("cannot allocate torrent");
 
         // write piece to disk
         let index = 1;
@@ -536,10 +536,10 @@ mod tests {
         });
 
         // wait for disk write result
-        assert!(torrent_port.recv().await.is_some());
+        assert!(torrent_rx.recv().await.is_some());
 
         // set up channels to communicate disk read results
-        let (chan, mut port) = mpsc::unbounded_channel();
+        let (tx, mut rx) = mpsc::unbounded_channel();
 
         // read each block in piece
         let block_count = block_count(piece.len() as u32) as u32;
@@ -554,12 +554,10 @@ mod tests {
                 len: block_len,
             };
             // read block
-            disk_handle
-                .read_block(id, block_info, chan.clone())
-                .unwrap();
+            disk_handle.read_block(id, block_info, tx.clone()).unwrap();
 
             // wait for result
-            if let Some(peer::Command::Block(block)) = port.recv().await {
+            if let Some(peer::Command::Block(block)) = rx.recv().await {
                 assert_eq!(block.info(), block_info);
             } else {
                 assert!(false, "block could not be read from disk");
@@ -614,8 +612,8 @@ mod tests {
         pieces: Vec<Vec<u8>>,
         piece_hashes: Vec<u8>,
         info: StorageInfo,
-        torrent_chan: torrent::Sender,
-        torrent_port: torrent::Receiver,
+        torrent_tx: torrent::Sender,
+        torrent_rx: torrent::Receiver,
     }
 
     impl Env {
@@ -687,15 +685,15 @@ mod tests {
                 }),
             };
 
-            let (torrent_chan, torrent_port) = mpsc::unbounded_channel();
+            let (torrent_tx, torrent_rx) = mpsc::unbounded_channel();
 
             Self {
                 id,
                 pieces,
                 piece_hashes,
                 info,
-                torrent_chan,
-                torrent_port,
+                torrent_tx,
+                torrent_rx,
             }
         }
     }

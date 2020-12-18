@@ -62,7 +62,7 @@ pub(crate) struct Torrent {
 struct ThreadContext {
     /// The channel used to alert a torrent that a block has been written to
     /// disk and/or a piece was completed.
-    chan: torrent::Sender,
+    tx: torrent::Sender,
 
     /// The read cache that caches entire pieces.
     ///
@@ -127,7 +127,7 @@ impl Torrent {
     pub fn new(
         info: StorageInfo,
         piece_hashes: Vec<u8>,
-        torrent_chan: torrent::Sender,
+        torrent_tx: torrent::Sender,
     ) -> Result<Self, NewTorrentError> {
         // TODO: since this is done as part of a tokio::task, should we use
         // tokio_fs here?
@@ -198,7 +198,7 @@ impl Torrent {
             info,
             write_buf: HashMap::new(),
             thread_ctx: Arc::new(ThreadContext {
-                chan: torrent_chan,
+                tx: torrent_tx,
                 read_cache: CHashMap::new(),
                 files,
                 stats: Stats::default(),
@@ -218,7 +218,7 @@ impl Torrent {
         if !self.write_buf.contains_key(&piece_index) {
             if let Err(e) = self.start_new_piece(info.piece_index) {
                 self.thread_ctx
-                    .chan
+                    .tx
                     .send(torrent::Command::PieceCompletion(Err(e)))?;
                 // return with ok as the disk task itself shouldn't be aborted
                 // due to invalid input
@@ -276,7 +276,7 @@ impl Torrent {
                             .write_failure_count
                             .fetch_add(1, Ordering::Relaxed);
                         // alert torrent of block write failure
-                        ctx.chan
+                        ctx.tx
                             .send(torrent::Command::PieceCompletion(Err(e)))
                             .map_err(|e| {
                                 log::error!(
@@ -298,7 +298,7 @@ impl Torrent {
                 }
 
                 // alert torrent of piece completion and hash result
-                ctx.chan
+                ctx.tx
                     .send(torrent::Command::PieceCompletion(Ok(
                         PieceCompletion {
                             index: piece_index,
@@ -387,7 +387,7 @@ impl Torrent {
     pub async fn read_block(
         &self,
         block_info: BlockInfo,
-        result_chan: peer::Sender,
+        result_tx: peer::Sender,
     ) -> Result<()> {
         log::trace!("Reading {} from disk", block_info);
 
@@ -404,7 +404,7 @@ impl Torrent {
                     piece_index,
                     block_info.offset
                 );
-                self.thread_ctx.chan.send(torrent::Command::ReadError {
+                self.thread_ctx.tx.send(torrent::Command::ReadError {
                     block_info,
                     error: ReadError::InvalidBlockOffset,
                 })?;
@@ -414,7 +414,7 @@ impl Torrent {
 
             // return block via sender
             let block = Arc::clone(&blocks[block_index]);
-            result_chan
+            result_tx
                 .send(peer::Command::Block(Block::new(block_info, block)))?;
         } else {
             // otherwise read in the piece from disk
@@ -430,7 +430,7 @@ impl Torrent {
                 Ok(file_range) => file_range,
                 Err(_) => {
                     log::error!("Piece {} not in file", piece_index);
-                    self.thread_ctx.chan.send(torrent::Command::ReadError {
+                    self.thread_ctx.tx.send(torrent::Command::ReadError {
                         block_info,
                         error: ReadError::InvalidPieceIndex,
                     })?;
@@ -471,7 +471,7 @@ impl Torrent {
                             .fetch_add(piece_len as u64, Ordering::Relaxed);
 
                         // send block to peer
-                        result_chan
+                        result_tx
                             .send(peer::Command::Block(Block::new(
                                 block_info, block,
                             )))
@@ -494,7 +494,7 @@ impl Torrent {
                         ctx.stats
                             .read_failure_count
                             .fetch_add(1, Ordering::Relaxed);
-                        ctx.chan
+                        ctx.tx
                             .send(torrent::Command::ReadError {
                                 block_info,
                                 error: e,
