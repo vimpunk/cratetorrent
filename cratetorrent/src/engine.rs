@@ -130,6 +130,7 @@ pub struct TorrentParams {
 // TODO: remove in favor of automatic detection
 // TODO: when seeding is specified, we need to verify that the files to be
 // seeded exist and are complete
+#[derive(Debug)]
 pub enum Mode {
     Download { seeds: Vec<SocketAddr> },
     Seed,
