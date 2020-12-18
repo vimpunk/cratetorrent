@@ -1,3 +1,6 @@
+//! This module contains a type safe representation of a torrent's metainfo, as
+//! well as utilities to construct it.
+
 use std::{
     fmt,
     path::{Path, PathBuf},
@@ -228,11 +231,12 @@ impl fmt::Debug for Metainfo {
 }
 
 mod raw {
-    //! Contains the types that we directly deserialize into, but is not to be used
-    //! by the rest of the crate, as the validity of the parsed structure is not
-    //! ensured at this level. The semantic validation happens in the [`Metainfo`]
-    //! type, which is essentially a mapping of [`raw::Metainfo`], but with semantic
-    //! requirements encoded in the type system..
+    //! Contains the types that we directly deserialize into, but is not to be
+    //! used by the rest of the crate, as the validity of the parsed structure
+    //! is not ensured at this level. The semantic validation happens in the
+    //! [`super::Metainfo`] type, which is essentially a mapping of
+    //! [`Metainfo`], but with semantic requirements encoded in the type
+    //! system..
 
     use sha1::{Digest, Sha1};
 

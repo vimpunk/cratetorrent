@@ -1,3 +1,13 @@
+//! This module defines the implementation of the BitTorrent peer wire protocol.
+//!
+//! The main type responsible for communication with a peer is
+//! a [`PeerSession`]. Making use of the BitTorrent byte protocol codec
+//! implementation, this type implements the high-level operations of the
+//! protocol.
+//!
+//! Each peer session is spawned within a torrent and cannot be used without
+//! one, due to making use of shared data in torrent.
+
 use std::{
     collections::HashSet,
     net::SocketAddr,
@@ -314,7 +324,7 @@ impl PeerSession {
                     e
                 );
                 self.ctx.set_connection_state(ConnectionState::Disconnected);
-                self.torrent.chan.send(torrent::Message::PeerState {
+                self.torrent.chan.send(torrent::Command::PeerState {
                     addr: self.peer.addr,
                     info: self.session_info(),
                 })?;
@@ -322,7 +332,7 @@ impl PeerSession {
         } else {
             log::error!(target: &self.ctx.log_target, "No handshake received");
             self.ctx.set_connection_state(ConnectionState::Disconnected);
-            self.torrent.chan.send(torrent::Message::PeerState {
+            self.torrent.chan.send(torrent::Command::PeerState {
                 addr: self.peer.addr,
                 info: self.session_info(),
             })?;
@@ -345,7 +355,7 @@ impl PeerSession {
         // send a state update message to torrent to actualize possible download
         // stats changes
         self.ctx.set_connection_state(ConnectionState::Disconnected);
-        self.torrent.chan.send(torrent::Message::PeerState {
+        self.torrent.chan.send(torrent::Command::PeerState {
             addr: self.peer.addr,
             info: self.session_info(),
         })?;
@@ -382,13 +392,13 @@ impl PeerSession {
         }
 
         // used for collecting session stats every second
-        let mut loop_timer = time::interval(Duration::from_secs(1)).fuse();
+        let mut tick_timer = time::interval(Duration::from_secs(1)).fuse();
 
         // start the loop for receiving messages from peer and commands from
         // other parts of the engine
         loop {
             select! {
-                now = loop_timer.select_next_some() => {
+                now = tick_timer.select_next_some() => {
                     self.tick(&mut sink, now.into_std()).await?;
                 }
                 msg = stream.select_next_some() => {
@@ -459,6 +469,13 @@ impl PeerSession {
         Ok(())
     }
 
+    /// The session tick, as in "the tick of a clock", which runs every second
+    /// to perform periodic updates.
+    ///
+    /// This is when we update statistics and report them to torrent (and later
+    /// perhaps to the user directly, if requested), when the session leaves
+    /// slow-start, when it checks various timeouts, and when it updates the
+    /// target request queue size.
     async fn tick(
         &mut self,
         sink: &mut SplitSink<Framed<TcpStream, PeerCodec>, Message>,
@@ -487,8 +504,11 @@ impl PeerSession {
 
         // if there was any state change, notify torrent
         if self.ctx.changed {
-            log::debug!(target: &self.ctx.log_target, "State changed, updating torrent");
-            self.torrent.chan.send(torrent::Message::PeerState {
+            log::debug!(
+                target: &self.ctx.log_target,
+                "State changed, updating torrent",
+            );
+            self.torrent.chan.send(torrent::Command::PeerState {
                 addr: self.peer.addr,
                 info: self.session_info(),
             })?;
@@ -535,6 +555,7 @@ impl PeerSession {
         Ok(())
     }
 
+    /// Times out the peer if it hasn't sent a request in too long.
     async fn check_request_timeout(
         &mut self,
         sink: &mut SplitSink<Framed<TcpStream, PeerCodec>, Message>,

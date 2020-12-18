@@ -1,6 +1,6 @@
 [package]
 name = "cratetorrent"
-version = "1.0.0-alpha.2"
+version = "0.1.0"
 authors = ["mandreyel <mandreyel@protonmail.com>"]
 edition = "2018"
 
@@ -12,6 +12,7 @@ bytes = "0.5"
 chashmap = "2.2"
 futures = "0.3"
 hex = "0.4"
+lazy_static = "1.4"
 log = "0.4"
 nix = "0.17"
 percent-encoding = "2.1"

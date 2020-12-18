@@ -1,6 +1,6 @@
 [package]
 name = "cratetorrent-cli"
-version = "1.0.0-alpha.2"
+version = "0.1.0"
 authors = ["mandreyel <mandreyel@protonmail.com>"]
 edition = "2018"
 
@@ -11,4 +11,6 @@ clap = "2.33"
 cratetorrent = { path = "../cratetorrent" }
 env_logger = "0.7"
 hex = "0.4"
+futures = "0.3"
 log = "0.4"
+tokio = { version = "0.2", features = ["full"] }

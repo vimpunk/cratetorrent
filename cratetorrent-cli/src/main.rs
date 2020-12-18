@@ -1,9 +1,11 @@
-use std::{fs, net::SocketAddr, path::PathBuf};
+use std::{fs, net::SocketAddr};
 
 use clap::{App, Arg};
-use cratetorrent::{engine::Mode, metainfo::*};
+use cratetorrent::prelude::*;
+use futures::stream::StreamExt;
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
 
     // set up cli args
@@ -60,16 +62,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // mandatory
     let listen_addr = matches.value_of("listen");
     println!("{:?}", listen_addr);
-    let listen_addr = listen_addr
-        .ok_or_else(|| "--listen must be specified")?
-        .parse()?;
+    let listen_addr = listen_addr.and_then(|l| l.parse().ok());
     let metainfo_path = matches
         .value_of("metainfo")
         .ok_or_else(|| "--seed must be set")?;
-    let download_dir: PathBuf = matches
+    let download_dir = matches
         .value_of("download-dir")
-        .ok_or_else(|| "--download-dir must be set")?
-        .into();
+        .ok_or_else(|| "--download-dir must be set")?;
 
     // optional
     let seeds: Vec<SocketAddr> = matches
@@ -80,32 +79,43 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .collect();
     println!("seeds: {:?}", seeds);
 
-    let mode = matches.value_of("mode").unwrap_or_default();
-    let mode = match mode {
-        "seed" => Mode::Seed,
-        _ => Mode::Download { seeds },
-    };
+    let conf = Conf::new(download_dir);
+    let (handle, mut alert_port) = cratetorrent::engine::spawn(conf)?;
 
     // read in torrent metainfo
     let metainfo = fs::read(metainfo_path)?;
     let metainfo = Metainfo::from_bytes(&metainfo)?;
 
+    let mode = matches.value_of("mode").unwrap_or_default();
+    let mode = match mode {
+        "seed" => Mode::Seed,
+        _ => Mode::Download { seeds },
+    };
     println!("metainfo: {:?}", metainfo);
     println!("piece count: {}", metainfo.piece_count());
     println!("info hash: {}", hex::encode(&metainfo.info_hash));
 
-    // arbitrary client id for now
-    const CLIENT_ID: &str = "cbt-2020-03-03-00000";
-    let mut client_id = [0; 20];
-    client_id.copy_from_slice(CLIENT_ID.as_bytes());
-
-    cratetorrent::engine::run(
-        client_id,
-        download_dir,
+    let _torrent_id = handle.create_torrent(TorrentParams {
         metainfo,
         listen_addr,
         mode,
-    )?;
+        conf: None,
+    })?;
+
+    // listen to alerts from the engine
+    while let Some(alert) = alert_port.next().await {
+        match alert {
+            Alert::TorrentStats { id, stats } => {
+                println!("{}: {:#?}", id, stats);
+            }
+            Alert::TorrentComplete(id) => {
+                println!("{} complete, shutting down", id);
+                break;
+            }
+        }
+    }
+
+    handle.shutdown().await?;
 
     Ok(())
 }
