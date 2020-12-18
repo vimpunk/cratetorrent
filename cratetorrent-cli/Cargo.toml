@@ -14,6 +14,6 @@ hex = "0.4"
 futures = "0.3"
 log = "0.4"
 structopt = "0.3"
-tokio = { version = "0.2", features = ["macros", "rt-threaded"] }
+tokio = { version = "0.2", features = ["io-std", "macros", "rt-threaded"] }
 tui = "0.13"
 termion = "1.5"

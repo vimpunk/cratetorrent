@@ -689,9 +689,7 @@ impl Torrent {
                 );
 
                 // notify user of torrent completion
-                self.alert_tx
-                    .send(Alert::TorrentComplete(self.ctx.id))
-                    .ok();
+                self.alert_tx.send(Alert::TorrentComplete(self.ctx.id)).ok();
 
                 // tell trackers we've finished
                 self.announce_to_trackers(

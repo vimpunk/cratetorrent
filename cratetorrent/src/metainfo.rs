@@ -62,6 +62,7 @@ impl std::error::Error for MetainfoError {
 
 /// The parsed and validated torrent metainfo file, containing necessary
 /// arguments for starting a torrent.
+#[derive(Clone)]
 pub struct Metainfo {
     /// The name of the torrent, which is usually used to form the download
     /// path.

@@ -157,7 +157,7 @@ pub mod metainfo;
 mod peer;
 mod piece_picker;
 pub mod prelude;
-mod storage_info;
+pub mod storage_info;
 mod torrent;
 mod tracker;
 
