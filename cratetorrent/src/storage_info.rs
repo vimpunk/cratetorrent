@@ -42,14 +42,16 @@ impl FileInfo {
     /// This will panic if `torrent_offset` is smaller than the file's offset in
     /// torrent, or if it's past the last byte in file.
     pub(crate) fn get_slice(&self, torrent_offset: u64, len: u64) -> FileSlice {
-        if torrent_offset < self.torrent_offset {
-            panic!("torrent offset must be larger than file offset");
-        }
+        assert!(
+            torrent_offset >= self.torrent_offset,
+            "torrent offset must be larger than file offset",
+        );
 
         let torrent_end_offset = self.torrent_end_offset();
-        if torrent_offset >= torrent_end_offset {
-            panic!("torrent offset must be smaller than file end offset");
-        }
+        assert!(
+            torrent_offset < torrent_end_offset,
+            "torrent offset must be smaller than file end offset",
+        );
 
         FileSlice {
             offset: torrent_offset - self.torrent_offset,
