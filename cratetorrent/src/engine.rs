@@ -1,13 +1,18 @@
-//! The torrent engine is top-level coordinator that runs and manages all
-//! entities in the engine. The user interacts with the engine via the
-//! [`EngineHandle`] which exposes a restricted API available to the public.
+//! The engine is the top-level coordinator that runs and manages all entities
+//! in the torrent engine. The user interacts with the engine via the
+//! [`EngineHandle`] which exposes a restricted public API. The underlying
+//! communication method is [tokio mpsc
+//! channels](https://docs.rs/tokio/0.2.16/tokio/sync/mpsc).
 //!
-//! The engine is spawned as a [tokio task](`tokio::task`) and runs in the
-//! background. As with spawning other tokio tasks, it must be done within the
-//! context of a tokio executor.
+//! The engine is spawned as a [tokio
+//! task](https://docs.rs/tokio/0.2.16/tokio/task) and runs in the background.
+//! As with spawning other tokio tasks, it must be done within the context of
+//! a tokio executor.
 //!
 //! The engine is run until an unrecoverable error occurs, or until the user
 //! sends a shutdown command.
+//!
+//! For usage examples, see the [library documentation](crate).
 
 use std::{
     collections::HashMap,
@@ -32,7 +37,7 @@ use crate::{
     Bitfield, TorrentId,
 };
 
-/// Spawns the engine as a [tokio task](tokio::Task).
+/// Spawns the engine as a tokio task.
 ///
 /// As with spawning other tokio tasks, it must be done within the context of
 /// a tokio executor.
@@ -109,7 +114,8 @@ pub struct TorrentParams {
     pub conf: Option<TorrentConf>,
     /// Whether to download or seed the torrent.
     ///
-    /// This is expected to be removed as this will become automatic.
+    /// This is expected to be removed as this will become automatic once
+    /// torrent resume data is supported.
     pub mode: Mode,
     /// The address on which the torrent should listen for new peers.
     ///
@@ -122,6 +128,8 @@ pub struct TorrentParams {
 
 /// The download mode.
 // TODO: remove in favor of automatic detection
+// TODO: when seeding is specified, we need to verify that the files to be
+// seeded exist and are complete
 pub enum Mode {
     Download { seeds: Vec<SocketAddr> },
     Seed,
@@ -171,7 +179,7 @@ struct Engine {
     conf: Conf,
 }
 
-/// A running torrent entry in the engine.
+/// A running torrent's entry in the engine.
 struct TorrentEntry {
     /// The torrent's command channel on which engine sends commands to torrent.
     chan: torrent::Sender,

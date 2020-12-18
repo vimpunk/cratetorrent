@@ -1,3 +1,6 @@
+//! This module defines the entity responsible for disk IO and various utility
+//! types and functions.
+
 use std::collections::HashMap;
 
 use tokio::{

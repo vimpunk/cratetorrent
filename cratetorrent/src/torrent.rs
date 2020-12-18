@@ -554,17 +554,17 @@ impl Torrent {
                 complete: piece_count - missing_piece_count,
                 pending: self.ctx.downloads.read().await.len(),
             },
-            download_payload_stats: ThroughputStats::from(
+            downloaded_payload_stats: ThroughputStats::from(
                 &self.downloaded_payload_counter,
             ),
             wasted_payload_count: self.wasted_payload_count,
-            upload_payload_stats: ThroughputStats::from(
+            uploaded_payload_stats: ThroughputStats::from(
                 &self.uploaded_payload_counter,
             ),
-            download_protocol_stats: ThroughputStats::from(
+            downloaded_protocol_stats: ThroughputStats::from(
                 &self.downloaded_protocol_counter,
             ),
-            upload_protocol_stats: ThroughputStats::from(
+            uploaded_protocol_stats: ThroughputStats::from(
                 &self.uploaded_protocol_counter,
             ),
             peer_count: self.peers.len(),

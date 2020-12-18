@@ -13,17 +13,17 @@ pub struct TorrentStats {
     /// The pieces this torrent has.
     pub pieces: PieceStats,
 
-    pub download_payload_stats: ThroughputStats,
+    pub downloaded_payload_stats: ThroughputStats,
     pub wasted_payload_count: u64,
-    pub upload_payload_stats: ThroughputStats,
-    pub download_protocol_stats: ThroughputStats,
-    pub upload_protocol_stats: ThroughputStats,
+    pub uploaded_payload_stats: ThroughputStats,
+    pub downloaded_protocol_stats: ThroughputStats,
+    pub uploaded_protocol_stats: ThroughputStats,
 
     pub peer_count: usize,
     // TODO: include latest errors, if any
 }
 
-/// Statistics a torrent's pieces.
+/// Statistics of a torrent's pieces.
 #[derive(Clone, Copy, Debug)]
 pub struct PieceStats {
     pub pending: usize,
@@ -44,7 +44,7 @@ impl PieceStats {
     }
 }
 
-/// Statistics a torrent's current throughput.
+/// Statistics of a torrent's current throughput.
 #[derive(Clone, Copy, Debug)]
 pub struct ThroughputStats {
     pub total: u64,

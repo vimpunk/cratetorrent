@@ -1,12 +1,7 @@
-use std::{fs, net::SocketAddr, path::PathBuf};
+use std::{fs, net::SocketAddr};
 
 use clap::{App, Arg};
-use cratetorrent::{
-    alert::Alert,
-    conf::Conf,
-    engine::{Mode, TorrentParams},
-    metainfo::*,
-};
+use cratetorrent::prelude::*;
 use futures::stream::StreamExt;
 
 #[tokio::main]
@@ -71,10 +66,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let metainfo_path = matches
         .value_of("metainfo")
         .ok_or_else(|| "--seed must be set")?;
-    let download_dir: PathBuf = matches
+    let download_dir = matches
         .value_of("download-dir")
-        .ok_or_else(|| "--download-dir must be set")?
-        .into();
+        .ok_or_else(|| "--download-dir must be set")?;
 
     // optional
     let seeds: Vec<SocketAddr> = matches
@@ -112,10 +106,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     while let Some(alert) = alert_port.next().await {
         match alert {
             Alert::TorrentStats { id, stats } => {
-                println!("t#{}: {:#?}", id, stats);
+                println!("{}: {:#?}", id, stats);
             }
             Alert::TorrentComplete(id) => {
-                println!("t#{} complete, shutting down", id);
+                println!("{} complete, shutting down", id);
                 break;
             }
         }

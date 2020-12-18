@@ -1,3 +1,13 @@
+//! This module defines the implementation of the BitTorrent peer wire protocol.
+//!
+//! The main type responsible for communication with a peer is
+//! a [`PeerSession`]. Making use of the BitTorrent byte protocol codec
+//! implementation, this type implements the high-level operations of the
+//! protocol.
+//!
+//! Each peer session is spawned within a torrent and cannot be used without
+//! one, due to making use of shared data in torrent.
+
 use std::{
     collections::HashSet,
     net::SocketAddr,

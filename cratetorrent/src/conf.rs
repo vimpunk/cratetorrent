@@ -1,3 +1,5 @@
+//! This module defines types used to configure the engine and its parts.
+
 use std::{path::PathBuf, time::Duration};
 
 use crate::PeerId;
@@ -17,7 +19,7 @@ impl Conf {
     /// the download directory, as it is not sensible to guess that for the
     /// user. It uses the default cratetorrent client id,
     /// [`CRATETORRENT_CLIENT_ID`].
-    pub fn new(download_dir: PathBuf) -> Self {
+    pub fn new(download_dir: impl Into<PathBuf>) -> Self {
         Self {
             engine: EngineConf {
                 client_id: *CRATETORRENT_CLIENT_ID,
@@ -63,9 +65,9 @@ impl TorrentConf {
     /// Returns the torrent configuration with reasonable defaults, except for
     /// the download directory, as it is not sensible to guess that for the
     /// user.
-    pub fn new(download_dir: PathBuf) -> Self {
+    pub fn new(download_dir: impl Into<PathBuf>) -> Self {
         Self {
-            download_dir,
+            download_dir: download_dir.into(),
             // We always request at least 10 peers as anything less is a waste
             // of network round trip and it allows us to buffer up a bit more
             // than needed.
