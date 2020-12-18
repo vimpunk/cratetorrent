@@ -123,7 +123,7 @@ impl Decoder for HandshakeCodec {
         // buffer cursor was not advanced and thus we need to consider the
         // prefix too)
         let payload_len = prot_len + 8 + 20 + 20;
-        if buf.remaining() >= 1 + payload_len {
+        if buf.remaining() > payload_len {
             // we have the full message in the buffer so advance the buffer
             // cursor past the message length header
             buf.advance(1);

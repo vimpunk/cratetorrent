@@ -126,7 +126,7 @@ impl Metainfo {
             let mut file_infos = Vec::with_capacity(files.len());
             // and sum up the file offsets in the torrent
             let mut torrent_offset = 0;
-            for file in files.into_iter() {
+            for file in files.iter() {
                 // verify that the file length is non-zero
                 if file.len == 0 {
                     log::warn!("File {:?} length is 0", file.path);

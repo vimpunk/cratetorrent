@@ -896,7 +896,7 @@ communicated via the alert channels. Because of this we know that in the
 following code a disk write won't abort the event loop because of IO failure,
 only because of channel sending failure (which is for now the desired behavior):
 ```rust
-while let Some(cmd) = self.cmd_port.recv().await {
+while let Some(cmd) = self.cmd_rx.recv().await {
     match cmd {
         Command::BlockWrite(block) => {
             self.write_block(block)?;

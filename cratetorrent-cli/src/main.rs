@@ -63,12 +63,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let listen_addr = matches.value_of("listen");
     println!("{:?}", listen_addr);
     let listen_addr = listen_addr.and_then(|l| l.parse().ok());
-    let metainfo_path = matches
-        .value_of("metainfo")
-        .ok_or_else(|| "--seed must be set")?;
+    let metainfo_path =
+        matches.value_of("metainfo").ok_or("--seed must be set")?;
     let download_dir = matches
         .value_of("download-dir")
-        .ok_or_else(|| "--download-dir must be set")?;
+        .ok_or("--download-dir must be set")?;
 
     // optional
     let seeds: Vec<SocketAddr> = matches
@@ -80,7 +79,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("seeds: {:?}", seeds);
 
     let conf = Conf::new(download_dir);
-    let (handle, mut alert_port) = cratetorrent::engine::spawn(conf)?;
+    let (handle, mut alert_rx) = cratetorrent::engine::spawn(conf)?;
 
     // read in torrent metainfo
     let metainfo = fs::read(metainfo_path)?;
@@ -103,7 +102,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     })?;
 
     // listen to alerts from the engine
-    while let Some(alert) = alert_port.next().await {
+    while let Some(alert) = alert_rx.next().await {
         match alert {
             Alert::TorrentStats { id, stats } => {
                 println!("{}: {:#?}", id, stats);

@@ -108,7 +108,7 @@ pub(crate) struct PeerSession {
     /// A copy of this is kept within peer session as disk block reads are
     /// communicated back to session directly via its command port. For this, we
     /// need to pass a copy of the sender with each block read to the disk task.
-    cmd_chan: Sender,
+    cmd_tx: Sender,
     /// The port on which peer session receives commands.
     cmd_port: Fuse<Receiver>,
 
@@ -193,14 +193,14 @@ impl PeerSession {
         torrent: Arc<TorrentContext>,
         addr: SocketAddr,
     ) -> (Self, Sender) {
-        let (cmd_chan, cmd_port) = mpsc::unbounded_channel();
+        let (cmd_tx, cmd_port) = mpsc::unbounded_channel();
         let piece_count = torrent.storage.piece_count;
         let log_target =
             format!("cratetorrent::peer [{}][{}]", torrent.id, addr);
         (
             Self {
                 torrent,
-                cmd_chan: cmd_chan.clone(),
+                cmd_tx: cmd_tx.clone(),
                 cmd_port: cmd_port.fuse(),
                 peer: PeerInfo {
                     addr,
@@ -215,7 +215,7 @@ impl PeerSession {
                 outgoing_requests: HashSet::new(),
                 incoming_requests: HashSet::new(),
             },
-            cmd_chan,
+            cmd_tx,
         )
     }
 
@@ -324,7 +324,7 @@ impl PeerSession {
                     e
                 );
                 self.ctx.set_connection_state(ConnectionState::Disconnected);
-                self.torrent.chan.send(torrent::Command::PeerState {
+                self.torrent.tx.send(torrent::Command::PeerState {
                     addr: self.peer.addr,
                     info: self.session_info(),
                 })?;
@@ -332,7 +332,7 @@ impl PeerSession {
         } else {
             log::error!(target: &self.ctx.log_target, "No handshake received");
             self.ctx.set_connection_state(ConnectionState::Disconnected);
-            self.torrent.chan.send(torrent::Command::PeerState {
+            self.torrent.tx.send(torrent::Command::PeerState {
                 addr: self.peer.addr,
                 info: self.session_info(),
             })?;
@@ -355,7 +355,7 @@ impl PeerSession {
         // send a state update message to torrent to actualize possible download
         // stats changes
         self.ctx.set_connection_state(ConnectionState::Disconnected);
-        self.torrent.chan.send(torrent::Command::PeerState {
+        self.torrent.tx.send(torrent::Command::PeerState {
             addr: self.peer.addr,
             info: self.session_info(),
         })?;
@@ -508,7 +508,7 @@ impl PeerSession {
                 target: &self.ctx.log_target,
                 "State changed, updating torrent",
             );
-            self.torrent.chan.send(torrent::Command::PeerState {
+            self.torrent.tx.send(torrent::Command::PeerState {
                 addr: self.peer.addr,
                 info: self.session_info(),
             })?;
@@ -1041,7 +1041,7 @@ impl PeerSession {
         self.torrent.disk.read_block(
             self.torrent.id,
             block_info,
-            self.cmd_chan.clone(),
+            self.cmd_tx.clone(),
         )?;
 
         Ok(())
