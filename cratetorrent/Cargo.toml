@@ -1,6 +1,6 @@
 [package]
 name = "cratetorrent"
-version = "1.0.0-alpha.2"
+version = "0.1.0"
 authors = ["mandreyel <mandreyel@protonmail.com>"]
 edition = "2018"
 
