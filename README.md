@@ -3,6 +3,8 @@
 Cratetorrent is a Rust crate implementing the BitTorrent version 1 protocol. It
 can be used as a library and also provides a simple example CLI torrent app.
 
+![](assets/partial-download.gif)
+
 The name is a homage to the C++
 [libtorrent](https://github.com/arvidn/libtorrent) library, from which many
 lessons were learned when I first wrote my torrent engine in C++.
