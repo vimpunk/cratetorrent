@@ -496,11 +496,11 @@ impl Torrent {
             } else {
                 debug_assert!(self.conf.max_connected_peer_count >= peer_count);
                 let needed = self.conf.max_connected_peer_count - peer_count;
-                // Download at least this many peers, even if we don't need as
-                // much. This is because later we may be able to connect to more
-                // peers and in that case we don't want to wait till the next
-                // tracker request.
-                Some(self.conf.min_requested_peer_count.min(needed))
+                // Download at least this numbe of peers, even if we don't need
+                // as many. This is because later we may be able to connect to
+                // more peers and in that case we don't want to wait till the
+                // next tracker request.
+                Some(self.conf.min_requested_peer_count.max(needed))
             };
 
             // we can override the normal annoucne interval if we need peers or
