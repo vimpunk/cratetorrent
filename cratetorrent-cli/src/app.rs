@@ -7,7 +7,7 @@ use cratetorrent::{
     engine::{EngineHandle, Mode, TorrentParams},
     metainfo::Metainfo,
     storage_info::StorageInfo,
-    torrent::stats::{PieceStats, ThroughputStats, TorrentStats},
+    torrent::stats::{Channel, Peers, PieceStats, Thruput, TorrentStats},
     FileInfo, TorrentId,
 };
 use futures::stream::{Fuse, StreamExt};
@@ -77,7 +77,8 @@ impl App {
             mode: args.mode,
             conf: Some(TorrentConf {
                 alerts: TorrentAlertConf {
-                    latest_completed_pieces: true,
+                    completed_pieces: true,
+                    peers: true,
                     ..Default::default()
                 },
                 ..Default::default()
@@ -94,12 +95,10 @@ impl App {
             run_duration: Default::default(),
             pieces,
             files,
-            peer_count: Default::default(),
-            downloaded_payload_stats: Default::default(),
+            peers: Default::default(),
+            protocol: Default::default(),
+            payload: Default::default(),
             wasted_payload_count: Default::default(),
-            uploaded_payload_stats: Default::default(),
-            downloaded_protocol_stats: Default::default(),
-            uploaded_protocol_stats: Default::default(),
         };
         self.torrents.insert(torrent_id, torrent);
 
@@ -168,35 +167,44 @@ impl App {
                 } else {
                     None
                 };
+
             torrent.pieces = PieceStats {
                 latest_completed: latest_completed_pieces,
                 ..stats.pieces
             };
+            torrent.peers = stats.peers;
+            let is_seed = torrent.is_seed();
+            if let Peers::Full(peers) = &mut torrent.peers {
+                // sort peers by thruput rate in descending order: by upload
+                // rate if torrent is seeding, by download rate otherwise
+                if is_seed {
+                    peers.sort_by(|a, b| {
+                        b.thruput
+                            .payload
+                            .up
+                            .rate
+                            .cmp(&a.thruput.payload.up.rate)
+                    });
+                } else {
+                    peers.sort_by(|a, b| {
+                        b.thruput
+                            .payload
+                            .down
+                            .rate
+                            .cmp(&a.thruput.payload.down.rate)
+                    });
+                }
+            }
             torrent.run_duration = stats.run_duration;
-            torrent.peer_count = stats.peer_count;
 
-            const HISTORY_LIMIT: usize = 100;
-            for (history, update) in [
-                (
-                    &mut torrent.downloaded_payload_stats,
-                    &stats.downloaded_payload_stats,
-                ),
-                (
-                    &mut torrent.uploaded_payload_stats,
-                    &stats.uploaded_payload_stats,
-                ),
-                (
-                    &mut torrent.downloaded_protocol_stats,
-                    &stats.downloaded_protocol_stats,
-                ),
-                (
-                    &mut torrent.uploaded_protocol_stats,
-                    &stats.uploaded_protocol_stats,
-                ),
+            const HISTORY_LIMIT: usize = 300;
+            for (history, curr) in [
+                (&mut torrent.payload, &stats.thruput.payload),
+                (&mut torrent.protocol, &stats.thruput.protocol),
             ]
             .iter_mut()
             {
-                history.update(update, HISTORY_LIMIT);
+                history.update(&curr, HISTORY_LIMIT);
             }
         }
     }
@@ -210,44 +218,60 @@ pub struct Torrent {
     pub piece_len: u32,
     pub download_len: u64,
     pub storage: StorageInfo,
-    // TODO
-    // total download size
 
     // dynamic info
     pub run_duration: Duration,
     pub pieces: PieceStats,
-    pub peer_count: usize,
+    pub peers: Peers,
 
     pub files: Vec<FileStats>,
 
-    pub downloaded_payload_stats: ThroughputHistory,
+    pub protocol: ChannelHistory,
+    pub payload: ChannelHistory,
     pub wasted_payload_count: u64,
-    pub uploaded_payload_stats: ThroughputHistory,
-    pub downloaded_protocol_stats: ThroughputHistory,
-    pub uploaded_protocol_stats: ThroughputHistory,
-    //
-    // TODO:
-    // downloaded
-    // list of files with their sizes (map fs to vec<files>)
+}
+
+impl Torrent {
+    fn is_seed(&self) -> bool {
+        self.pieces.is_seed()
+    }
 }
 
 #[derive(Default)]
-pub struct ThroughputHistory {
-    pub peak: u64,
-    pub total: u64,
-    pub rate_history: Vec<u64>,
+pub struct ChannelHistory {
+    pub down: ThruputHistory,
+    pub up: ThruputHistory,
 }
 
-impl ThroughputHistory {
-    pub fn update(&mut self, stats: &ThroughputStats, limit: usize) {
-        if self.rate_history.len() >= limit {
+impl ChannelHistory {
+    pub fn update(&mut self, c: &Channel, limit: usize) {
+        self.down.update(&c.down, limit);
+        self.up.update(&c.up, limit);
+    }
+}
+
+#[derive(Default)]
+pub struct ThruputHistory {
+    pub peak: u64,
+    pub total: u64,
+    /// Historical data of download rates.
+    pub rates: Vec<u64>,
+}
+
+impl ThruputHistory {
+    pub fn update(&mut self, t: &Thruput, limit: usize) {
+        if self.rates.len() >= limit {
             // pop the first element
             // TODO: make this more optimal
-            self.rate_history.drain(0..1);
+            self.rates.drain(0..1);
         }
-        self.rate_history.push(stats.rate);
-        self.peak = stats.peak;
-        self.total = stats.total;
+        self.rates.push(t.rate);
+        self.peak = t.peak;
+        self.total = t.total;
+    }
+
+    pub fn rate(&self) -> u64 {
+        self.rates.iter().rev().next().cloned().unwrap_or_default()
     }
 }
 

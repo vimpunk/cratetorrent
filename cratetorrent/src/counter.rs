@@ -4,6 +4,66 @@
 
 use std::ops::AddAssign;
 
+/// Counts statistics about the communication channels used in torrents.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct ThruputCounters {
+    /// Counts protocol chatter, which are the exchanged non-payload related
+    /// messages (such as 'unchoke', 'have', 'request', etc).
+    pub protocol: ChannelCounter,
+    /// Counts the exchanged block bytes. This only include the block's data,
+    /// minus the header, which counts towards the protocol chatter.
+    pub payload: ChannelCounter,
+    /// Counts the (downloaded) payload bytes that were wasted (i.e. duplicate
+    /// blocks that had to be discarded).
+    pub waste: Counter,
+}
+
+impl ThruputCounters {
+    /// Resets the per-round accummulators of the counters.
+    ///
+    /// This should be called once a second to provide accurate per second
+    /// thruput rates.
+    pub fn reset(&mut self) {
+        self.protocol.reset();
+        self.payload.reset();
+        self.waste.reset();
+    }
+}
+
+impl AddAssign<&ThruputCounters> for ThruputCounters {
+    fn add_assign(&mut self, rhs: &ThruputCounters) {
+        self.protocol += &rhs.protocol;
+        self.payload += &rhs.payload;
+        self.waste += rhs.waste.round();
+    }
+}
+
+/// Counts statistics about a communication channel (such as protocol chatter or
+/// payload transfer), both the ingress and engress sides.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct ChannelCounter {
+    pub down: Counter,
+    pub up: Counter,
+}
+
+impl ChannelCounter {
+    /// Resets the per-round accummulators of the counters.
+    ///
+    /// This should be called once a second to provide accurate per second
+    /// thruput rates.
+    pub fn reset(&mut self) {
+        self.down.reset();
+        self.up.reset();
+    }
+}
+
+impl AddAssign<&ChannelCounter> for ChannelCounter {
+    fn add_assign(&mut self, rhs: &ChannelCounter) {
+        self.down += rhs.down.round();
+        self.up += rhs.up.round();
+    }
+}
+
 /// Used for counting the running average of throughput rates.
 ///
 /// This counts the total bytes transferred, as well as the current round's
@@ -18,8 +78,8 @@ use std::ops::AddAssign;
 ///
 /// This way a temporary deviation in one round does not punish the overall
 /// download rate disproportionately.
-#[derive(Debug, Default)]
-pub struct Counter {
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct Counter {
     total: u64,
     round: u64,
     avg: f64,

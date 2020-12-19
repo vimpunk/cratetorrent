@@ -14,6 +14,7 @@ use key::Keys;
 mod app;
 mod key;
 mod ui;
+mod unit;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 

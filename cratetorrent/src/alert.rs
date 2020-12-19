@@ -4,6 +4,19 @@
 //! Communication of such alerts is performed via unbounded [tokio mpsc
 //! channels](tokio::sync::mpsc). Thus, the application in which the engine is
 //! integrated may be driven partially or entirely by cratetorrent alerts.
+//!
+//! # Optional information
+//!
+//! By default only the most basic alerts are broadcast from the engine. The
+//! reason for this is that cratetorrent follows a philosophy similar to Rust
+//! and C++: pay for only what you use. This is of course not fully possible
+//! with something as complex as a torrent engine, but an effort is made to make
+//! more expensive operations optional.
+//!
+//! Such alerts include the [latest downloaded
+//! pieces](crate::conf::TorrentAlertConf::completed_pieces) or aggregate
+//! statistics about a torrent's [peers](crate::conf::TorrentAlertConf::peers).
+//! More will be added later.
 
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 

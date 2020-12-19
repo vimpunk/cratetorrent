@@ -72,7 +72,18 @@ pub struct TorrentConf {
 /// not used.
 #[derive(Clone, Debug, Default)]
 pub struct TorrentAlertConf {
-    pub latest_completed_pieces: bool,
+    /// Receive the pieces that were completed each round.
+    ///
+    /// This has minor overhead and so it may be enabled. For full optimization,
+    /// however, it is only enabled when either the pieces or individual file
+    /// completions are needed.
+    pub completed_pieces: bool,
+    /// Receive aggregate statistics about the torrent's peers.
+    ///
+    /// This may be relatively expensive. It is suggested to only turn it on
+    /// when it is specifically neede, e.g. when the UI is showing the peers of
+    /// a torrent.
+    pub peers: bool,
 }
 
 impl Default for TorrentConf {
