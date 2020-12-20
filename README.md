@@ -84,8 +84,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 The project is split up in two:
 - the `cratetorrent` library, that defines most of the functionality,
 - and a `cratetorrent-cli` binary for downloading torrents via the CLI. Note,
-  however, that this is extremely simple at present, currently only used for
-  integration testing.
+  however, that this is extremely simple at present and serves more as a toy for
+  demonstration purposes.
 
 
 ## How to run
@@ -107,37 +107,11 @@ directly connecting to seeds or if the torrent is backed by a HTTP tracker.
 
 Run the following from the repo root:
 ```
-cargo run --release -p cratetorrent-cli \
+cargo run --release -p cratetorrent-cli -- \
     --seeds 192.168.0.10:50051,192.168.0.172:49985 \
     --metainfo path/to/mytorrent.torrent \
     --download-dir ~/Downloads
 ```
-
-### In Docker
-
-A Dockerfile is also provided for the CLI. To build the docker image, first
-  build the binary (also from the repo root):
-```
-cargo build --release -p cratetorrent-cli
-```
-Then build the image:
-```
-docker build --tag cratetorrent-cli .
-```
-And finally run it:
-```
-docker run \
-    -ti \
-    --env LISTEN="${listen_addr}" \
-    --env SEED="${seed_addr}" \
-    --env METAINFO_PATH="${metainfo_cont_path}" \
-    --env RUST_LOG=cratetorrent=trace,cratetorrent_cli=trace \
-    --mount type=bind,src="${metainfo_path}",dst="${metainfo_cont_path}" \
-    cratetorrent-cli
-```
-where `seed_addr` is the IP and port pair of a seed, `metainfo_path` is the path
-of the torrent file on the host, and `metainfo_cont_path` is the
-path of the torrent file mapped into the container.
 
 
 ## Tests
