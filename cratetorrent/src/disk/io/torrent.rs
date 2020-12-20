@@ -8,7 +8,7 @@ use std::{
     },
 };
 
-use chashmap::CHashMap;
+use lru::LruCache;
 use tokio::task;
 
 use crate::{
@@ -72,14 +72,27 @@ struct ThreadContext {
     /// Every time a block read is issued it is checked if it's already cached
     /// here. If not, the whole pieces is read from disk and placed in the cache.
     ///
-    /// The cache is in a read-write lock as an optimization for saturated
-    /// caches: once we have many pieces in cache it is expected that most reads
-    /// will hit the cache rather than the disk. In such cases it's not
-    /// necessary to write lock the cache as it would on a cache misses, and
-    /// this avoids concurrent reads in later stages.
-    // TODO(https://github.com/mandreyel/cratetorrent/issues/22): Currently
-    // there is no upper bound on this. Consider using an LRU cache or similar.
-    read_cache: CHashMap<PieceIndex, Vec<CachedBlock>>,
+    /// # Sync mutex
+    ///
+    /// The cache is behind a synchronous mutex, instead of using tokio's async
+    /// locks. This is because it is being accessed by an async and a blocking
+    /// task (where an async mutex cannot be used). However, it is safe to do so
+    /// as the lock guards are never held across suspension points. In fact, the
+    /// tokio redis example recommends using sync mutexes if holding them across
+    /// await points is not needed:
+    /// https://github.com/tokio-rs/mini-redis/blob/master/src/db.rs#L29.
+    ///
+    /// Locking occurs in two places:
+    /// - once when reading the cache on the async task,
+    /// - and once when inserting a new entry in the blocking task.
+    ///
+    /// Both of these are very short lived and shouldn't bog down the reactor by
+    /// too much.
+    ///
+    /// An improvement would be to use a concurrent LRU cache, or one whose
+    /// cache bookkeeping happens via internal mutability so that it may be
+    /// locked in a read-write lock.
+    read_cache: sync::Mutex<LruCache<PieceIndex, Vec<CachedBlock>>>,
 
     /// Handles of all files in torrent, opened in advance during torrent
     /// creation.
@@ -196,7 +209,9 @@ impl Torrent {
             write_buf: HashMap::new(),
             thread_ctx: Arc::new(ThreadContext {
                 tx: torrent_tx,
-                read_cache: CHashMap::new(),
+                read_cache: sync::Mutex::new(LruCache::new(
+                    READ_CACHE_UPPER_BOUND,
+                )),
                 files,
                 stats: Stats::default(),
             }),
@@ -204,7 +219,7 @@ impl Torrent {
         })
     }
 
-    pub async fn write_block(
+    pub fn write_block(
         &mut self,
         info: BlockInfo,
         data: Vec<u8>,
@@ -381,7 +396,7 @@ impl Torrent {
     /// For now, this is simplified in that we don't pull in blocks from the
     /// next piece. Later, we will make the read cache line size configurable
     /// and it will be applied across piece boundaries.
-    pub async fn read_block(
+    pub fn read_block(
         &self,
         block_info: BlockInfo,
         result_tx: peer::Sender,
@@ -392,7 +407,9 @@ impl Torrent {
         let block_index = block_info.index_in_piece();
 
         // check if piece is in the read cache
-        if let Some(blocks) = self.thread_ctx.read_cache.get(&piece_index) {
+        if let Some(blocks) =
+            self.thread_ctx.read_cache.lock().unwrap().get(&piece_index)
+        {
             log::debug!("Piece {} is in the read cache", piece_index);
             // the block's index in piece may be invalid
             if block_index >= blocks.len() {
@@ -462,7 +479,7 @@ impl Torrent {
                         // could already have read the piece just before this
                         // thread, but replacing it shouldn't be an issue since
                         // we're reading the same data.
-                        ctx.read_cache.insert(piece_index, blocks);
+                        ctx.read_cache.lock().unwrap().put(piece_index, blocks);
                         ctx.stats
                             .read_count
                             .fetch_add(piece_len as u64, Ordering::Relaxed);
@@ -509,3 +526,7 @@ impl Torrent {
         Ok(())
     }
 }
+
+// TODO(https://github.com/mandreyel/cratetorrent/issues/22):
+// make this configurable
+const READ_CACHE_UPPER_BOUND: usize = 1000;

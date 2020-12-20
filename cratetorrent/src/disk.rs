@@ -283,7 +283,7 @@ impl Disk {
             log::error!("Torrent {} not found", id);
             Error::InvalidTorrentId
         })?;
-        torrent.write().await.write_block(block_info, data).await
+        torrent.write().await.write_block(block_info, data)
     }
 
     /// Attempts to read a block from disk and return the result via the given
@@ -310,7 +310,7 @@ impl Disk {
             log::error!("Torrent {} not found", id);
             Error::InvalidTorrentId
         })?;
-        torrent.read().await.read_block(block_info, tx).await
+        torrent.read().await.read_block(block_info, tx)
     }
 }
 
