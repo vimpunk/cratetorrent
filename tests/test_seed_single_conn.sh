@@ -75,10 +75,7 @@ time docker run \
     --env RUST_LOG="${rust_log}" \
     --mount type=bind,src="${metainfo_path}",dst="${metainfo_cont_path}" \
     --mount type=bind,src="${src_dir}",dst="${src_cont_dir}" \
-    -d cratetorrent-cli
-
-# wait for seed to be up
-sleep 5
+    -d cratetorrent-test-cli
 
 ################################################################################
 # 2. Download

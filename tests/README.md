@@ -49,8 +49,13 @@ SUCCESS: downloaded file matches source file
 ## Prerequisites
 
 To run the tests, you first first need to build the `cratetorrent-cli` binary
-and its corresponding docker image. For instructions, see the [project
-readme](../README.md).
+and its corresponding docker image:
+
+```bash
+(cd cli && cargo build --release && docker build --tag cratetorrent-test-cli .)
+```
+
+That's it, now you can run one of the [scenarios](#test-scenarios) below.
 
 
 ## Environment
@@ -69,9 +74,11 @@ only "constant" for local development. These files will be placed in the
 
 ### Test binary
 
-cratetorrent-cli arguments:
-- the seed's address in the local Docker network,
-- and the download destination directory.
+`test-cli` arguments:
+- the seed's address in the local Docker network;
+- the torrent's metainfo file;
+- the torrent's listen address (if testing seeding);
+- the download destination directory.
 
 It runs only as long as the download is in progress. Once it's done, it exits,
 and this fact is used by the test scripts to perform download verification
@@ -92,7 +99,7 @@ suffix).
   - *seeds:*
     - tr-seed-1
   - *leeches:*
-    - cratetorrent-cli
+    - test-cli
 - **Files**: 1 MiB file at `assets/1mb-test.txt`
 
 ### Archive (multi-file) download
@@ -105,7 +112,7 @@ suffix).
   - *seeds:*
     - tr-seed-1
   - *leeches:*
-    - cratetorrent-cli
+    - test-cli
 - **Files**: files in `assets/dir-test`
 
 ### Multi-peer download
@@ -119,7 +126,7 @@ suffix).
     - tr-seed-1
     - tr-seed-2
   - *leeches:*
-    - cratetorrent-cli
+    - test-cli
 - **Files**: 1 MiB file at `assets/1mb-test.txt`
 
 ### Seeding a single peer
@@ -137,7 +144,7 @@ suffix).
   - *seeds:*
     - ${torrent_name}-ct-seed
   - *leeches:*
-    - cratetorrent-cli
+    - test-cli
 - **Files**: As explained above, the file is arbitrary: it depends on what
   torrent file (or directory) is given as argument to the test script.
 

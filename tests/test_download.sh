@@ -125,7 +125,7 @@ fi
 # the container)
 download_dir=/tmp/cratetorrent
 
-# initialize download directory to state expected by the cratetorrent-cli
+# initialize download directory to state expected by the cratetorrent-test-cli
 if [ -d "${download_dir}" ]; then
     echo "Clearing download directory ${download_dir}"
     sudo rm -rf "${download_dir}"/*
@@ -156,7 +156,7 @@ time docker run \
     --env RUST_LOG="${rust_log}" \
     --mount type=bind,src="${metainfo_path}",dst="${metainfo_cont_path}" \
     --mount type=bind,src="${download_dir}",dst="${download_dir}" \
-    cratetorrent-cli
+    cratetorrent-test-cli
 
 ################################################################################
 # 3. Destination existence check
