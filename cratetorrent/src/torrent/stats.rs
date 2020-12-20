@@ -25,8 +25,7 @@ pub struct TorrentStats {
     /// The peers of the torrent.
     ///
     /// By default, only the number of connected peers are sent with each
-    /// torrent tick. This is the
-    /// most efficient.
+    /// torrent tick. This is the most efficient option.
     ///
     /// However, if enabled in the torrent's configuration, a full list of peers
     /// with aggregate statistics is sent with each tick.
@@ -83,6 +82,11 @@ impl Peers {
             Self::Full(peers) => peers.len(),
         }
     }
+
+    /// Returns true when there are no connected peers in torrent.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 }
 
 impl Default for Peers {
@@ -99,13 +103,10 @@ pub struct PeerSessionStats {
     /// Peer's 20 byte BitTorrent id. Updated when the peer sends us its peer
     /// id, in the handshake.
     pub id: Option<PeerId>,
-
     /// The current state of the session.
     pub state: SessionState,
-
     /// The number of pieces the peer has.
     pub piece_count: usize,
-
     /// Various thruput statistics of ths peer.
     pub thruput: ThruputStats,
 }

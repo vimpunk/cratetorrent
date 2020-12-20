@@ -434,7 +434,7 @@ impl Torrent {
         self.alert_tx
             .send(Alert::TorrentStats {
                 id: self.ctx.id,
-                stats,
+                stats: Box::new(stats),
             })
             .ok();
 

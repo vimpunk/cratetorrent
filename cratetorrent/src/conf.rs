@@ -81,7 +81,7 @@ pub struct TorrentAlertConf {
     /// Receive aggregate statistics about the torrent's peers.
     ///
     /// This may be relatively expensive. It is suggested to only turn it on
-    /// when it is specifically neede, e.g. when the UI is showing the peers of
+    /// when it is specifically needed, e.g. when the UI is showing the peers of
     /// a torrent.
     pub peers: bool,
 }

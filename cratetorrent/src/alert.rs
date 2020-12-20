@@ -8,10 +8,11 @@
 //! # Optional information
 //!
 //! By default only the most basic alerts are broadcast from the engine. The
-//! reason for this is that cratetorrent follows a philosophy similar to Rust
-//! and C++: pay for only what you use. This is of course not fully possible
-//! with something as complex as a torrent engine, but an effort is made to make
-//! more expensive operations optional.
+//! reason for this is that cratetorrent follows a philosophy similar what lies
+//! behind Rust or C++: pay for only what you use.
+//!
+//! This is of course not fully possible with something as complex as a torrent
+//! engine, but an effort is made to make more expensive operations optional.
 //!
 //! Such alerts include the [latest downloaded
 //! pieces](crate::conf::TorrentAlertConf::completed_pieces) or aggregate
@@ -34,5 +35,8 @@ pub enum Alert {
     TorrentComplete(TorrentId),
     /// Each running torrent sends an update of its latest statistics every
     /// second via this alert.
-    TorrentStats { id: TorrentId, stats: TorrentStats },
+    TorrentStats {
+        id: TorrentId,
+        stats: Box<TorrentStats>,
+    },
 }

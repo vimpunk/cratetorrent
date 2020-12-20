@@ -79,7 +79,6 @@ impl App {
                 alerts: TorrentAlertConf {
                     completed_pieces: true,
                     peers: true,
-                    ..Default::default()
                 },
                 ..Default::default()
             }),

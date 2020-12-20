@@ -64,7 +64,6 @@ async fn main() -> Result<()> {
 
     // parse cli args
     let mut args = Args::from_args();
-    //let seeds = args.seeds;
     if let Mode::Download { seeds } = &mut args.mode {
         *seeds = args.seeds.clone().unwrap_or_default();
     };
@@ -102,7 +101,7 @@ async fn main() -> Result<()> {
             alert = app.alert_rx.select_next_some() => {
                 match alert {
                     Alert::TorrentStats { id, stats } => {
-                        app.update_torrent_state(id, stats);
+                        app.update_torrent_state(id, *stats);
                     }
                     Alert::TorrentComplete(_) => {
                         // TODO: some notification/popup
