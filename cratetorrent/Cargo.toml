@@ -29,11 +29,5 @@ tokio-util = { version = "0.2", features = ["codec"] }
 url = "2.2"
 
 [dev-dependencies]
-criterion = "0.3"
-lazy_static = "1.4"
 mockito = "0.28"
 pretty_assertions = "0.6"
-
-[[bench]]
-name = "iovecs"
-harness = false
