@@ -1,6 +1,6 @@
 #!/bin/bash
 
-set -e
+set -ex
 
 source common.sh
 
@@ -77,10 +77,8 @@ time docker run \
     --mount type=bind,src="${src_dir}",dst="${src_cont_dir}" \
     -d cratetorrent-cli
 
-# only start the container if it's not already running
-#if ! docker inspect --format '{{.State.Running}}' "${seed_container}" &> /dev/null
-#then
-#fi
+# wait for seed to be up
+sleep 5
 
 ################################################################################
 # 2. Download

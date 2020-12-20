@@ -81,7 +81,7 @@
 //!     let (engine, mut alert_rx) = engine::spawn(conf)?;
 //!
 //!     // parse torrent metainfo and start the download
-//!     let metainfo = std::fs::read("/tmp/imaginary.torrent")?;
+//!     let metainfo = tokio::fs::read("/tmp/imaginary.torrent").await?;
 //!     let metainfo = Metainfo::from_bytes(&metainfo)?;
 //!     let torrent_id = engine.create_torrent(TorrentParams {
 //!         metainfo,

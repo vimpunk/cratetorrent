@@ -87,6 +87,10 @@ seed_port="${seed_port:-${transmission_port}}"
 # collect the IP addresses of all seeds within the docker network
 for seed in "${seeds[@]}"; do
     ip="$(get_container_ip "${seed}")"
+    if [ -z "${ip}" ]; then
+        echo "Error: could not get address of seed ${seed}"
+        exit 1
+    fi
     addr="${ip}:${seed_port}"
     if [ -z "${seeds_addrs}" ]; then
         seeds_addrs="${addr}"
