@@ -1,10 +1,10 @@
 use std::time::{Duration, Instant};
 
-use crate::{avg::SlidingDurationAvg, counter::Counter, BLOCK_LEN};
+use crate::{avg::SlidingDurationAvg, counter::ThruputCounters, BLOCK_LEN};
 
 /// Contains the state of both sides of the connection.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct SessionState {
+pub struct SessionState {
     /// The current state of the connection.
     pub connection: ConnectionState,
     /// If we're choked, peer doesn't allow us to download pieces from them.
@@ -31,21 +31,33 @@ impl Default for SessionState {
     }
 }
 
-/// The various throughput stats of a single round (roughly one second).
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct RoundStats {
-    /// Counts the downloaded block bytes since the last session summary.
-    pub downloaded_payload_count: u64,
-    /// Counts the uploaded block bytes since the last session summary.
-    pub uploaded_payload_count: u64,
-    /// The number of downloaded payload bytes that were wasted this round.
-    pub wasted_payload_count: u64,
-    /// Counts the bytes received during protocol chatter since the last session
-    /// summary.
-    pub downloaded_protocol_count: u64,
-    /// Counts the bytes sent during protocol chatter since the last session
-    /// summary.
-    pub uploaded_protocol_count: u64,
+/// At any given time, a connection with a peer is in one of the below states.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ConnectionState {
+    /// The peer connection has not yet been connected or it had been connected
+    /// before but has been stopped.
+    Disconnected,
+    /// The state during which the TCP connection is established.
+    Connecting,
+    /// The state after establishing the TCP connection and exchanging the
+    /// initial BitTorrent handshake.
+    Handshaking,
+    /// This state is optional, it is used to verify that the bitfield exchange
+    /// occurrs after the handshake and not later. It is set once the handshakes
+    /// are exchanged and changed as soon as we receive the bitfield or the the
+    /// first message that is not a bitfield. Any subsequent bitfield messages
+    /// are rejected and the connection is dropped, as per the standard.
+    AvailabilityExchange,
+    /// This is the normal state of a peer session, in which any messages, apart
+    /// from the 'handshake' and 'bitfield', may be exchanged.
+    Connected,
+}
+
+/// The default (and initial) state of a peer session is `Disconnected`.
+impl Default for ConnectionState {
+    fn default() -> Self {
+        Self::Disconnected
+    }
 }
 
 /// Holds and provides facilities to modify the state of a peer session.
@@ -54,18 +66,8 @@ pub(super) struct SessionContext {
     /// The session state.
     pub state: SessionState,
 
-    /// Counts the downloaded block bytes.
-    pub downloaded_payload_counter: Counter,
-    /// Counts the uploaded block bytes.
-    pub uploaded_payload_counter: Counter,
-    /// Counts the (downloaded) payload bytes that were wasted (i.e. duplicate
-    /// blocks that had to be discarded).
-    pub wasted_payload_counter: Counter,
-
-    /// Counts the bytes sent during protocol chatter.
-    pub downloaded_protocol_counter: Counter,
-    /// Counts the bytes received during protocol chatter.
-    pub uploaded_protocol_counter: Counter,
+    /// Measures various transfer statistics.
+    pub counters: ThruputCounters,
 
     /// A flag to indicate whether since the previous session tick the state has
     /// changed in a way that requires sending a new message to the torrent
@@ -75,11 +77,7 @@ pub(super) struct SessionContext {
     /// The fields whose update causes this flag to be set are the ones defined
     /// before this field, that is:
     /// - [`Self::state`]
-    /// - [`Self::downloaded_payload_counter`]
-    /// - [`Self::wasted_payload_counter`]
-    /// - [`Self::uploaded_payload_counter`]
-    /// - [`Self::downloaded_protocol_counter`]
-    /// - [`Self::uploaded_protocol_counter`]
+    /// - [`Self::counters`]
     pub changed: bool,
 
     /// Whether the session is in slow start.
@@ -245,7 +243,7 @@ impl SessionContext {
             self.avg_request_rtt.update(request_rtt);
         }
 
-        self.downloaded_payload_counter += block_len as u64;
+        self.counters.payload.down += block_len as u64;
         self.last_incoming_block_time = Some(now);
 
         // if we're in slow-start mode, we need to increase the target queue
@@ -262,13 +260,13 @@ impl SessionContext {
     }
 
     pub fn record_waste(&mut self, block_len: u32) {
-        self.wasted_payload_counter += block_len as u64;
+        self.counters.waste += block_len as u64;
         self.changed = true;
     }
 
     pub fn update_upload_stats(&mut self, block_len: u32) {
         self.last_outgoing_block_time = Some(Instant::now());
-        self.uploaded_payload_counter += block_len as u64;
+        self.counters.payload.up += block_len as u64;
 
         self.changed = true;
     }
@@ -285,7 +283,7 @@ impl SessionContext {
         // concluded (having this round's download accounted for in the download
         // rate).
         // TODO: can we statically ensure this rather than rely on the comment?
-        self.reset_per_tick_counters();
+        self.counters.reset();
 
         // if we're still in the timeout, we don't want to increase
         // the target request queue size
@@ -306,10 +304,10 @@ impl SessionContext {
         if !self.state.is_choked
             && self.in_slow_start
             && self.target_request_queue_len.is_some()
-            && self.downloaded_payload_counter.round() > 0
-            && self.downloaded_payload_counter.round()
+            && self.counters.payload.down.round() > 0
+            && self.counters.payload.down.round()
                 + Self::SLOW_START_ERROR_MARGIN
-                < self.downloaded_payload_counter.avg()
+                < self.counters.payload.down.avg()
         {
             self.in_slow_start = false;
         }
@@ -327,7 +325,7 @@ impl SessionContext {
             // start mode the request queue is increased with each incoming
             // block
             if !self.in_slow_start {
-                let download_rate = self.downloaded_payload_counter.avg();
+                let download_rate = self.counters.payload.down.avg();
                 // guard against integer truncation and round up as
                 // overestimating the link capacity is cheaper than
                 // underestimating it
@@ -350,50 +348,6 @@ impl SessionContext {
                 );
             }
         }
-    }
-
-    /// Marks the end of the round for the various throughput rate counters.
-    fn reset_per_tick_counters(&mut self) {
-        for counter in [
-            &mut self.downloaded_payload_counter,
-            &mut self.uploaded_payload_counter,
-            &mut self.wasted_payload_counter,
-            &mut self.uploaded_protocol_counter,
-            &mut self.downloaded_protocol_counter,
-        ]
-        .iter_mut()
-        {
-            counter.reset();
-        }
-    }
-}
-
-/// At any given time, a connection with a peer is in one of the below states.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) enum ConnectionState {
-    /// The peer connection has not yet been connected or it had been connected
-    /// before but has been stopped.
-    Disconnected,
-    /// The state during which the TCP connection is established.
-    Connecting,
-    /// The state after establishing the TCP connection and exchanging the
-    /// initial BitTorrent handshake.
-    Handshaking,
-    /// This state is optional, it is used to verify that the bitfield exchange
-    /// occurrs after the handshake and not later. It is set once the handshakes
-    /// are exchanged and changed as soon as we receive the bitfield or the the
-    /// first message that is not a bitfield. Any subsequent bitfield messages
-    /// are rejected and the connection is dropped, as per the standard.
-    AvailabilityExchange,
-    /// This is the normal state of a peer session, in which any messages, apart
-    /// from the 'handshake' and 'bitfield', may be exchanged.
-    Connected,
-}
-
-/// The default (and initial) state of a peer session is `Disconnected`.
-impl Default for ConnectionState {
-    fn default() -> Self {
-        Self::Disconnected
     }
 }
 
@@ -424,7 +378,7 @@ mod tests {
         s.target_request_queue_len = Some(1);
 
         // rate increasing
-        s.downloaded_payload_counter += 10 * BLOCK_LEN as u64;
+        s.counters.payload.down += 10 * BLOCK_LEN as u64;
         // should not exit slow start
         s.maybe_exit_slow_start();
         assert!(s.in_slow_start);
@@ -432,10 +386,10 @@ mod tests {
         // reset counter for next round
         // download rate using weighed average:
         // 0 + (10 * 16384) / 5 = 32768
-        s.downloaded_payload_counter.reset();
+        s.counters.payload.down.reset();
 
         // rate still increasing
-        s.downloaded_payload_counter += 10 * BLOCK_LEN as u64;
+        s.counters.payload.down += 10 * BLOCK_LEN as u64;
         // should not exit slow start yet
         s.maybe_exit_slow_start();
         assert!(s.in_slow_start);
@@ -444,11 +398,11 @@ mod tests {
         // download rate using weighed average:
         // 32768 + (10 * 16384) / 5 = 65536
         // (FIXME: in practice this seems to be 58982)
-        s.downloaded_payload_counter.reset();
+        s.counters.payload.down.reset();
 
         // this round's increase is much less than that of the previous round,
         // should exit slow start
-        s.downloaded_payload_counter += 2 * BLOCK_LEN as u64 + 9000;
+        s.counters.payload.down += 2 * BLOCK_LEN as u64 + 9000;
         s.maybe_exit_slow_start();
         assert!(!s.in_slow_start);
     }
@@ -463,10 +417,10 @@ mod tests {
         s.target_request_queue_len = Some(1);
 
         // rate increasing
-        s.downloaded_payload_counter += 2 * BLOCK_LEN as u64;
+        s.counters.payload.down += 2 * BLOCK_LEN as u64;
 
         // reset counter for next round
-        s.downloaded_payload_counter.reset();
+        s.counters.payload.down.reset();
 
         // this should be a noop
         s.update_target_request_queue_len();
@@ -484,9 +438,9 @@ mod tests {
 
         // rate increasing (make it more than a multiple of the block
         // length to be able to test against integer truncation)
-        s.downloaded_payload_counter += 10 * BLOCK_LEN as u64 + 5000;
+        s.counters.payload.down += 10 * BLOCK_LEN as u64 + 5000;
         // reset counter so that it may be used in the download rate below
-        s.downloaded_payload_counter.reset();
+        s.counters.payload.down.reset();
 
         // should update queue size according to:
         // download rate using weighed average:
@@ -513,6 +467,6 @@ mod tests {
         // incoming request time should be set
         assert!(s.last_incoming_block_time.is_some());
         // download stat should be increased
-        assert_eq!(s.downloaded_payload_counter.round(), BLOCK_LEN as u64);
+        assert_eq!(s.counters.payload.down.round(), BLOCK_LEN as u64);
     }
 }

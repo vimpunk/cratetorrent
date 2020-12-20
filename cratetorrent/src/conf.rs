@@ -23,8 +23,9 @@ impl Conf {
         Self {
             engine: EngineConf {
                 client_id: *CRATETORRENT_CLIENT_ID,
+                download_dir: download_dir.into(),
             },
-            torrent: TorrentConf::new(download_dir),
+            torrent: TorrentConf::default(),
         }
     }
 }
@@ -34,6 +35,9 @@ impl Conf {
 pub struct EngineConf {
     /// The ID of the client to announce to trackers and other peers.
     pub client_id: PeerId,
+    /// The directory in which a torrent's files are placed upon download and
+    /// from which they are seeded.
+    pub download_dir: PathBuf,
 }
 
 /// Configuration for a torrent.
@@ -42,10 +46,6 @@ pub struct EngineConf {
 /// default, but individual torrents may override this configuration.
 #[derive(Clone, Debug)]
 pub struct TorrentConf {
-    /// The directory in which a torrent's files are placed upon download and
-    /// from which they are seeded.
-    pub download_dir: PathBuf,
-
     /// The minimum number of peers we want to keep in torrent at all times.
     /// This will be configurable later.
     pub min_requested_peer_count: usize,
@@ -59,15 +59,36 @@ pub struct TorrentConf {
 
     /// After this many attempts, the torrent stops announcing to a tracker.
     pub tracker_error_threshold: usize,
+
+    /// Specifies which optional alerts to send, besides the default periodic
+    /// stats update.
+    pub alerts: TorrentAlertConf,
 }
 
-impl TorrentConf {
-    /// Returns the torrent configuration with reasonable defaults, except for
-    /// the download directory, as it is not sensible to guess that for the
-    /// user.
-    pub fn new(download_dir: impl Into<PathBuf>) -> Self {
+/// Configuration of a torrent's optional alerts.
+///
+/// By default, all optional alerts are turned off. This is because some of
+/// these alerts may have overhead that shouldn't be paid when the alerts are
+/// not used.
+#[derive(Clone, Debug, Default)]
+pub struct TorrentAlertConf {
+    /// Receive the pieces that were completed each round.
+    ///
+    /// This has minor overhead and so it may be enabled. For full optimization,
+    /// however, it is only enabled when either the pieces or individual file
+    /// completions are needed.
+    pub completed_pieces: bool,
+    /// Receive aggregate statistics about the torrent's peers.
+    ///
+    /// This may be relatively expensive. It is suggested to only turn it on
+    /// when it is specifically needed, e.g. when the UI is showing the peers of
+    /// a torrent.
+    pub peers: bool,
+}
+
+impl Default for TorrentConf {
+    fn default() -> Self {
         Self {
-            download_dir: download_dir.into(),
             // We always request at least 10 peers as anything less is a waste
             // of network round trip and it allows us to buffer up a bit more
             // than needed.
@@ -79,6 +100,7 @@ impl TorrentConf {
             announce_interval: Duration::from_secs(60 * 60),
             // needs testing
             tracker_error_threshold: 15,
+            alerts: Default::default(),
         }
     }
 }

@@ -31,27 +31,30 @@ use tokio::{
 use tokio_util::codec::{Framed, FramedParts};
 
 use crate::{
+    counter::ThruputCounters,
     download::{BlockStatus, PieceDownload},
     error::*,
     torrent::{self, TorrentContext},
-    Bitfield, Block, BlockInfo, PeerId, PieceIndex, Side,
+    Bitfield, Block, BlockInfo, PeerId, PieceIndex,
 };
 use codec::*;
 use state::*;
 
-pub(crate) use state::{ConnectionState, SessionState};
+pub use state::{ConnectionState, SessionState};
 
 mod codec;
 mod state;
 
-/// The most essential information of a peer session, derived from
-/// [`crate::peer::state::SessionContext`]. It is sent with each tick to the
-/// torrent via its sender.
+/// The most essential information of a peer session that is sent to torrent
+/// with each session tick.
 #[derive(Debug)]
-pub(crate) struct SessionInfo {
+pub(crate) struct SessionTick {
+    /// A snapshot of the session state.
     pub state: SessionState,
-    pub peer_side: Side,
-    pub stats: RoundStats,
+    /// Various transfer statistics.
+    pub counters: ThruputCounters,
+    /// The number of pieces the peer has available.
+    pub piece_count: usize,
 }
 
 /// The channel on which torrent can send a command to the peer session task.
@@ -114,6 +117,7 @@ pub(crate) struct PeerSession {
 
     /// Information about the peer.
     peer: PeerInfo,
+
     /// Most of the session's information and state is stored here, i.e. it's
     /// the "context" of the session.
     ctx: SessionContext,
@@ -175,11 +179,11 @@ pub(super) struct PeerInfo {
     ///
     /// Defaults to all pieces set to missing.
     pub pieces: Bitfield,
-    /// Whether the pere is a seed or a leech.
+    /// A cache of the pieces that the peer has available.
     ///
-    /// This is essentially a cache of determining how many pieces are set in
-    /// [`Self::pieces`].
-    pub side: Side,
+    /// This is equivalent to `self.pieces.count_ones()` and is updated every
+    /// time the peer sends us an announcement of a new piece.
+    pub piece_count: usize,
 }
 
 impl PeerSession {
@@ -205,8 +209,8 @@ impl PeerSession {
                 peer: PeerInfo {
                     addr,
                     pieces: Bitfield::repeat(false, piece_count),
+                    piece_count: 0,
                     id: Default::default(),
-                    side: Default::default(),
                 },
                 ctx: SessionContext {
                     log_target,
@@ -262,7 +266,7 @@ impl PeerSession {
             let handshake =
                 Handshake::new(self.torrent.info_hash, self.torrent.client_id);
             log::info!(target: &self.ctx.log_target, "Sending handshake");
-            self.ctx.uploaded_protocol_counter += handshake.len();
+            self.ctx.counters.protocol.up += handshake.len();
             socket.send(handshake).await?;
         }
 
@@ -276,7 +280,7 @@ impl PeerSession {
             // is valid
             debug_assert_eq!(peer_handshake.prot, PROTOCOL_STRING.as_bytes());
 
-            self.ctx.downloaded_protocol_counter += peer_handshake.len();
+            self.ctx.counters.protocol.down += peer_handshake.len();
 
             // verify that the advertised torrent info hash is the same as ours
             if peer_handshake.info_hash != self.torrent.info_hash {
@@ -295,7 +299,7 @@ impl PeerSession {
                     self.torrent.client_id,
                 );
                 log::info!(target: &self.ctx.log_target, "Sending handshake");
-                self.ctx.uploaded_protocol_counter += handshake.len();
+                self.ctx.counters.protocol.up += handshake.len();
                 socket.send(handshake).await?;
             }
 
@@ -310,6 +314,12 @@ impl PeerSession {
             new_parts.read_buf = old_parts.read_buf;
             new_parts.write_buf = old_parts.write_buf;
             let socket = Framed::from_parts(new_parts);
+
+            // update torrent of connection
+            self.torrent.tx.send(torrent::Command::PeerConnected {
+                addr: self.peer.addr,
+                id: peer_handshake.peer_id,
+            })?;
 
             // enter the piece availability exchange state
             self.ctx
@@ -538,17 +548,17 @@ impl PeerSession {
             waste: {waste},
             upload: {ul_rate} b/s (peak: {ul_peak} b/s, total: {ul_total} b), \
             pending: {in_req}",
-            dl_rate = self.ctx.downloaded_payload_counter.avg(),
-            dl_peak = self.ctx.downloaded_payload_counter.peak(),
-            dl_total = self.ctx.downloaded_payload_counter.total(),
+            dl_rate = self.ctx.counters.payload.down.avg(),
+            dl_peak = self.ctx.counters.payload.down.peak(),
+            dl_total = self.ctx.counters.payload.down.total(),
             out_req = self.outgoing_requests.len(),
             queue = self.ctx.target_request_queue_len.unwrap_or_default(),
             rtt_ms = self.ctx.avg_request_rtt.mean().as_millis(),
             rtt_s = self.ctx.avg_request_rtt.mean().as_secs(),
-            waste = self.ctx.wasted_payload_counter.total(),
-            ul_rate = self.ctx.uploaded_payload_counter.avg(),
-            ul_peak = self.ctx.uploaded_payload_counter.peak(),
-            ul_total = self.ctx.uploaded_payload_counter.total(),
+            waste = self.ctx.counters.waste.total(),
+            ul_rate = self.ctx.counters.payload.up.avg(),
+            ul_peak = self.ctx.counters.payload.up.peak(),
+            ul_total = self.ctx.counters.payload.up.total(),
             in_req = self.incoming_requests.len(),
         );
 
@@ -621,30 +631,11 @@ impl PeerSession {
 
     /// Returns a summary of the most important information of the session
     /// state to send to torrent.
-    #[inline(always)]
-    fn session_info(&self) -> SessionInfo {
-        SessionInfo {
+    fn session_info(&self) -> SessionTick {
+        SessionTick {
             state: self.ctx.state,
-            peer_side: self.peer.side,
-            stats: RoundStats {
-                uploaded_payload_count: self
-                    .ctx
-                    .uploaded_payload_counter
-                    .round(),
-                downloaded_payload_count: self
-                    .ctx
-                    .downloaded_payload_counter
-                    .round(),
-                wasted_payload_count: self.ctx.wasted_payload_counter.round(),
-                uploaded_protocol_count: self
-                    .ctx
-                    .uploaded_protocol_counter
-                    .round(),
-                downloaded_protocol_count: self
-                    .ctx
-                    .downloaded_protocol_counter
-                    .round(),
-            },
+            counters: self.ctx.counters,
+            piece_count: self.peer.piece_count,
         }
     }
 
@@ -681,15 +672,14 @@ impl PeerSession {
             .await
             .register_availability(&bitfield)?;
         self.peer.pieces = bitfield;
-        let peer_piece_count = self.peer.pieces.count_ones();
-        if peer_piece_count == self.torrent.storage.piece_count {
+        self.peer.piece_count = self.peer.pieces.count_ones();
+        if self.peer.piece_count == self.torrent.storage.piece_count {
             log::info!(target: &self.ctx.log_target, "Peer is a seed, interested: {}", is_interested);
-            self.peer.side = Side::Seed;
         } else {
             log::info!(
                 target: &self.ctx.log_target,
                 "Peer has {}/{} pieces, interested: {}",
-                peer_piece_count,
+                self.peer.piece_count,
                 self.torrent.storage.piece_count,
                 is_interested
             );
@@ -706,7 +696,7 @@ impl PeerSession {
         msg: Message,
     ) -> Result<()> {
         // record protocol message size
-        self.ctx.downloaded_protocol_counter += msg.protocol_len();
+        self.ctx.counters.protocol.down += msg.protocol_len();
         match msg {
             Message::Bitfield(_) => {
                 log::info!(
@@ -915,7 +905,7 @@ impl PeerSession {
                 // TODO: batch these in a single syscall, or is this already
                 // being done by the tokio codec type?
                 sink.send(Message::Request(req)).await?;
-                self.ctx.uploaded_protocol_counter +=
+                self.ctx.counters.protocol.up +=
                     MessageId::Request.header_len();
             }
         }
@@ -1109,9 +1099,7 @@ impl PeerSession {
         }
 
         self.peer.pieces.set(piece_index, true);
-        if self.peer.pieces.all() {
-            self.peer.side = Side::Seed;
-        }
+        self.peer.piece_count += 1;
 
         // need to recalculate interest with each received piece
         let is_interested = self
@@ -1134,8 +1122,7 @@ impl PeerSession {
         // we may have become interested in peer
         if !self.ctx.state.is_interested && is_interested {
             log::info!(target: &self.ctx.log_target, "Became interested in peer");
-            self.ctx.uploaded_protocol_counter +=
-                MessageId::Interested.header_len();
+            self.ctx.counters.protocol.up += MessageId::Interested.header_len();
             self.ctx.update_state(|state| {
                 state.is_interested = is_interested;
             });

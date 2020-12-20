@@ -21,23 +21,22 @@ use tokio::{
 use crate::{
     alert::{Alert, AlertSender},
     conf::TorrentConf,
-    counter::Counter,
+    counter::ThruputCounters,
     disk::{
         error::{ReadError, WriteError},
         DiskHandle,
     },
     download::PieceDownload,
     error::*,
-    peer::{self, ConnectionState, PeerSession, SessionInfo, SessionState},
+    peer::{self, ConnectionState, PeerSession, SessionState, SessionTick},
     piece_picker::PiecePicker,
     storage_info::StorageInfo,
     tracker::{Announce, Event, Tracker},
     Bitfield, BlockInfo, PeerId, PieceIndex, Sha1Hash, TorrentId,
 };
+use stats::{Peers, PieceStats, ThruputStats, TorrentStats};
 
-pub use stats::*;
-
-mod stats;
+pub mod stats;
 
 /// The channel for communicating with torrent.
 pub(crate) type Sender = UnboundedSender<Command>;
@@ -58,9 +57,11 @@ pub(crate) enum Command {
         block_info: BlockInfo,
         error: ReadError,
     },
+    /// A message sent only once, after the peer has been connected.
+    PeerConnected { addr: SocketAddr, id: PeerId },
     /// Peer sessions periodically send this message when they have a state
     /// change.
-    PeerState { addr: SocketAddr, info: SessionInfo },
+    PeerState { addr: SocketAddr, info: SessionTick },
     /// Gracefully shut down the torrent.
     ///
     /// This command tells all active peer sessions of torrent to do the same,
@@ -73,10 +74,51 @@ pub(crate) enum Command {
 pub(crate) struct PieceCompletion {
     /// The index of the piece.
     pub index: PieceIndex,
-    /// Whether the piece is valid.
-    ///
-    /// If the piece is invalid, it is not written to disk.
+    /// Whether the piece is valid. If it's not, it's not written to disk.
     pub is_valid: bool,
+}
+
+/// Information and methods shared with peer sessions in the torrent.
+///
+/// This type contains fields that need to be read or updated by peer sessions.
+/// Fields expected to be mutated are thus secured for inter-task access with
+/// various synchronization primitives.
+pub(crate) struct TorrentContext {
+    /// The torrent ID, unique in this engine.
+    pub id: TorrentId,
+    /// The info hash of the torrent, derived from its metainfo. This is used to
+    /// identify the torrent with other peers and trackers.
+    pub info_hash: Sha1Hash,
+    /// The arbitrary client id, chosen by the user of this library. This is
+    /// advertised to peers and trackers.
+    pub client_id: PeerId,
+
+    /// A copy of the torrent channel sender. This is not used by torrent iself,
+    /// but by the peer session tasks to which an arc copy of this torrent
+    /// context is given.
+    pub tx: Sender,
+
+    /// The piece picker picks the next most optimal piece to download and is
+    /// shared by all peers in a torrent.
+    pub piece_picker: Arc<RwLock<PiecePicker>>,
+    /// These are the active piece downloads in which the peer sessions in this
+    /// torrent are participating.
+    ///
+    /// They are stored and synchronized in this object to download a piece from
+    /// multiple peers, which helps us to have fewer incomplete pieces.
+    ///
+    /// Peer sessions may be run on different threads, any of which may read and
+    /// write to this map and to the pieces in the map. Thus we need a read
+    /// write lock on both.
+    // TODO: Benchmark whether using the nested locking approach isn't too slow.
+    // For mvp it should do.
+    pub downloads: RwLock<HashMap<PieceIndex, RwLock<PieceDownload>>>,
+
+    /// The handle to the disk IO task, used to issue commands on it. A copy of
+    /// this handle is passed down to each peer session.
+    pub disk: DiskHandle,
+    /// Info about the torrent's storage (piece length, download length, etc).
+    pub storage: StorageInfo,
 }
 
 /// Parameters for the torrent constructor.
@@ -139,24 +181,22 @@ pub(crate) struct Torrent {
     /// the slower peers.
     in_endgame: bool,
 
-    /// Counts the total downloaded block bytes in torrent.
-    downloaded_payload_counter: Counter,
-    /// Counts the total uploaded block bytes in torrent.
-    uploaded_payload_counter: Counter,
-    /// Counts the total (downloaded) payload bytes that were wasted (i.e.
-    /// duplicate blocks that had to be discarded).
-    wasted_payload_count: u64,
-
-    /// Counts the total bytes sent during protocol chatter in torrent.
-    downloaded_protocol_counter: Counter,
-    /// Counts the total bytes received during protocol chatter in torrent.
-    uploaded_protocol_counter: Counter,
+    /// Measures various transfer statistics.
+    counters: ThruputCounters,
 
     /// The channel on which to post alerts to user.
     alert_tx: AlertSender,
 
     /// The configuration of this particular torrent.
     conf: TorrentConf,
+
+    /// If `TorrentAlertConf::latest_completed_pieces` alert type is set, each
+    /// round the torrent collects the pieces that were downloaded, sends them
+    /// to peer as an alert, and resets the list.
+    ///
+    /// This is set to some if the configuration is enabled, and set to none if
+    /// disabled.
+    completed_pieces: Option<Vec<PieceIndex>>,
 }
 
 impl Torrent {
@@ -184,6 +224,11 @@ impl Torrent {
         let piece_picker = PiecePicker::new(own_pieces);
         let port = port.fuse();
         let trackers = trackers.into_iter().map(TrackerEntry::new).collect();
+        let completed_pieces = if conf.alerts.completed_pieces {
+            Some(Vec::new())
+        } else {
+            None
+        };
 
         (
             Self {
@@ -204,14 +249,11 @@ impl Torrent {
                 port,
                 trackers,
                 in_endgame: false,
-                downloaded_payload_counter: Default::default(),
-                uploaded_payload_counter: Default::default(),
-                wasted_payload_count: Default::default(),
-                downloaded_protocol_counter: Default::default(),
-                uploaded_protocol_counter: Default::default(),
+                counters: Default::default(),
                 listen_addr,
                 alert_tx,
                 conf,
+                completed_pieces,
             },
             tx,
         )
@@ -273,6 +315,16 @@ impl Torrent {
                 }
                 cmd = self.port.select_next_some() => {
                     match cmd {
+                        Command::PeerConnected { addr, id } => {
+                            if let Some(peer) = self.peers.get_mut(&addr) {
+                                log::debug!(
+                                    "Peer {} connected with client '{}', \
+                                    updating state",
+                                    addr, String::from_utf8_lossy(&id)
+                                );
+                                peer.id = Some(id);
+                            }
+                        }
                         Command::PeerState { addr, info } => {
                             self.handle_peer_state_change(addr, info);
                         }
@@ -348,13 +400,13 @@ impl Torrent {
             download: {} b/s (peak: {} b/s, total: {} b) wasted: {} b \
             upload: {} b/s (peak: {} b/s, total: {} b)",
             self.run_duration.as_secs(),
-            self.downloaded_payload_counter.avg(),
-            self.downloaded_payload_counter.peak(),
-            self.downloaded_payload_counter.total(),
-            self.wasted_payload_count,
-            self.uploaded_payload_counter.avg(),
-            self.uploaded_payload_counter.peak(),
-            self.uploaded_payload_counter.total(),
+            self.counters.payload.down.avg(),
+            self.counters.payload.down.peak(),
+            self.counters.payload.down.total(),
+            self.counters.waste.total(),
+            self.counters.payload.up.avg(),
+            self.counters.payload.up.peak(),
+            self.counters.payload.up.total(),
         );
 
         // TODO: consider removing this check, it's expensive, or caching it in
@@ -378,23 +430,15 @@ impl Torrent {
         }
 
         // send periodic stats update to api user
+        let stats = self.build_stats().await;
         self.alert_tx
             .send(Alert::TorrentStats {
                 id: self.ctx.id,
-                stats: self.stats().await,
+                stats: Box::new(stats),
             })
             .ok();
 
-        for counter in [
-            &mut self.downloaded_payload_counter,
-            &mut self.uploaded_payload_counter,
-            &mut self.downloaded_protocol_counter,
-            &mut self.uploaded_protocol_counter,
-        ]
-        .iter_mut()
-        {
-            counter.reset();
-        }
+        self.counters.reset();
 
         Ok(())
     }
@@ -428,8 +472,8 @@ impl Torrent {
         event: Option<Event>,
     ) -> Result<()> {
         // calculate transfer statistics in advance
-        let uploaded = self.uploaded_payload_counter.total();
-        let downloaded = self.downloaded_payload_counter.total();
+        let uploaded = self.counters.payload.up.total();
+        let downloaded = self.counters.payload.down.total();
         let left = self.ctx.storage.download_len - downloaded;
 
         // skip trackers that errored too often
@@ -452,11 +496,11 @@ impl Torrent {
             } else {
                 debug_assert!(self.conf.max_connected_peer_count >= peer_count);
                 let needed = self.conf.max_connected_peer_count - peer_count;
-                // Download at least this many peers, even if we don't need as
-                // much. This is because later we may be able to connect to more
-                // peers and in that case we don't want to wait till the next
-                // tracker request.
-                Some(self.conf.min_requested_peer_count.min(needed))
+                // Download at least this numbe of peers, even if we don't need
+                // as many. This is because later we may be able to connect to
+                // more peers and in that case we don't want to wait till the
+                // next tracker request.
+                Some(self.conf.min_requested_peer_count.max(needed))
             };
 
             // we can override the normal annoucne interval if we need peers or
@@ -559,11 +603,32 @@ impl Torrent {
         Ok(())
     }
 
-    /// Returns high-level statistics about the torrent to send it to the user.
-    async fn stats(&self) -> TorrentStats {
+    /// Returns high-level statistics about the torrent for sending to the user.
+    async fn build_stats(&mut self) -> TorrentStats {
         let missing_piece_count =
             self.ctx.piece_picker.read().await.missing_piece_count();
         let piece_count = self.ctx.storage.piece_count;
+        let completed_pieces = self
+            .completed_pieces
+            .as_mut()
+            .map(|p| std::mem::replace(p, Vec::new()));
+        let peers = if self.conf.alerts.peers {
+            let peers = self
+                .peers
+                .iter()
+                .map(|(addr, entry)| stats::PeerSessionStats {
+                    addr: *addr,
+                    id: entry.id,
+                    state: entry.state,
+                    piece_count: entry.piece_count,
+                    thruput: entry.thruput,
+                })
+                .collect();
+            Peers::Full(peers)
+        } else {
+            Peers::Count(self.peers.len())
+        };
+
         TorrentStats {
             start_time: self.start_time,
             run_duration: self.run_duration,
@@ -571,21 +636,10 @@ impl Torrent {
                 total: piece_count,
                 complete: piece_count - missing_piece_count,
                 pending: self.ctx.downloads.read().await.len(),
+                latest_completed: completed_pieces,
             },
-            downloaded_payload_stats: ThroughputStats::from(
-                &self.downloaded_payload_counter,
-            ),
-            wasted_payload_count: self.wasted_payload_count,
-            uploaded_payload_stats: ThroughputStats::from(
-                &self.uploaded_payload_counter,
-            ),
-            downloaded_protocol_stats: ThroughputStats::from(
-                &self.downloaded_protocol_counter,
-            ),
-            uploaded_protocol_stats: ThroughputStats::from(
-                &self.uploaded_protocol_counter,
-            ),
-            peer_count: self.peers.len(),
+            thruput: ThruputStats::from(&self.counters),
+            peers,
         }
     }
 
@@ -599,20 +653,17 @@ impl Torrent {
     fn handle_peer_state_change(
         &mut self,
         addr: SocketAddr,
-        info: SessionInfo,
+        info: SessionTick,
     ) {
         if let Some(peer) = self.peers.get_mut(&addr) {
             log::debug!("Updating peer {} state", addr);
+
             peer.state = info.state;
-            peer.state = info.state;
-            self.downloaded_payload_counter +=
-                info.stats.downloaded_payload_count;
-            self.uploaded_payload_counter += info.stats.uploaded_payload_count;
-            self.wasted_payload_count += info.stats.wasted_payload_count;
-            self.downloaded_protocol_counter +=
-                info.stats.downloaded_protocol_count;
-            self.uploaded_protocol_counter +=
-                info.stats.uploaded_protocol_count;
+            peer.piece_count = info.piece_count;
+            peer.thruput = ThruputStats::from(&info.counters);
+
+            // update torrent thruput stats
+            self.counters += &info.counters;
 
             // if we disconnected peer, remove it
             if peer.state.connection == ConnectionState::Disconnected {
@@ -663,6 +714,10 @@ impl Torrent {
                 missing_piece_count
             );
 
+            if let Some(latest_completed_pieces) = &mut self.completed_pieces {
+                latest_completed_pieces.push(piece.index);
+            }
+
             // tell all sessions that we got a new piece so that they can send
             // a "have(piece)" message to their peers or cancel potential
             // duplicate requests for the same piece
@@ -684,14 +739,12 @@ impl Torrent {
                 log::info!(
                     "Finished torrent download, exiting. \
                     Peak download rate: {} b/s, wasted: {} b",
-                    self.downloaded_payload_counter.peak(),
-                    self.wasted_payload_count,
+                    self.counters.payload.down.peak(),
+                    self.counters.waste.total(),
                 );
 
                 // notify user of torrent completion
-                self.alert_tx
-                    .send(Alert::TorrentComplete(self.ctx.id))
-                    .ok();
+                self.alert_tx.send(Alert::TorrentComplete(self.ctx.id)).ok();
 
                 // tell trackers we've finished
                 self.announce_to_trackers(
@@ -754,9 +807,19 @@ struct PeerSessionEntry {
     ///
     /// This is set when the session is started.
     tx: Option<peer::Sender>,
+
+    /// Peer's 20 byte BitTorrent id. Updated when the peer sends us its peer
+    /// id, in the handshake.
+    id: Option<PeerId>,
     /// Cached information about the session state. Updated every time peer
     /// updates us.
     state: SessionState,
+    /// The number of pieces that the peer has available.
+    piece_count: usize,
+
+    /// Most recent throughput statistics of this peer.
+    thruput: ThruputStats,
+
     /// The peer session task's join handle, used during shutdown.
     join_handle: Option<task::JoinHandle<Result<()>>>,
 }
@@ -765,14 +828,7 @@ impl PeerSessionEntry {
     fn start_outbound(mut session: PeerSession, tx: peer::Sender) -> Self {
         let join_handle =
             task::spawn(async move { session.start_outbound().await });
-        Self {
-            tx: Some(tx),
-            state: SessionState {
-                connection: ConnectionState::Connecting,
-                ..Default::default()
-            },
-            join_handle: Some(join_handle),
-        }
+        Self::new(tx, join_handle)
     }
 
     fn start_inbound(
@@ -782,58 +838,25 @@ impl PeerSessionEntry {
     ) -> Self {
         let join_handle =
             task::spawn(async move { session.start_inbound(socket).await });
+        Self::new(tx, join_handle)
+    }
+
+    fn new(
+        tx: peer::Sender,
+        join_handle: task::JoinHandle<Result<()>>,
+    ) -> Self {
         Self {
             tx: Some(tx),
+            id: None,
             state: SessionState {
-                connection: ConnectionState::Handshaking,
+                connection: ConnectionState::Connecting,
                 ..Default::default()
             },
+            piece_count: 0,
+            thruput: Default::default(),
             join_handle: Some(join_handle),
         }
     }
-}
-
-/// Information and methods shared with peer sessions in the torrent.
-///
-/// This type contains fields that need to be read or updated by peer sessions.
-/// Fields expected to be mutated are thus secured for inter-task access with
-/// various synchronization primitives.
-pub(crate) struct TorrentContext {
-    /// The torrent ID, unique in this engine.
-    pub id: TorrentId,
-    /// The info hash of the torrent, derived from its metainfo. This is used to
-    /// identify the torrent with other peers and trackers.
-    pub info_hash: Sha1Hash,
-    /// The arbitrary client id, chosen by the user of this library. This is
-    /// advertised to peers and trackers.
-    pub client_id: PeerId,
-
-    /// A copy of the torrent channel sender. This is not used by torrent iself,
-    /// but by the peer session tasks to which an arc copy of this torrent
-    /// context is given.
-    pub tx: Sender,
-
-    /// The piece picker picks the next most optimal piece to download and is
-    /// shared by all peers in a torrent.
-    pub piece_picker: Arc<RwLock<PiecePicker>>,
-    /// These are the active piece downloads in which the peer sessions in this
-    /// torrent are participating.
-    ///
-    /// They are stored and synchronized in this object to download a piece from
-    /// multiple peers, which helps us to have fewer incomplete pieces.
-    ///
-    /// Peer sessions may be run on different threads, any of which may read and
-    /// write to this map and to the pieces in the map. Thus we need a read
-    /// write lock on both.
-    // TODO: Benchmark whether using the nested locking approach isn't too slow.
-    // For mvp it should do.
-    pub downloads: RwLock<HashMap<PieceIndex, RwLock<PieceDownload>>>,
-
-    /// The handle to the disk IO task, used to issue commands on it. A copy of
-    /// this handle is passed down to each peer session.
-    pub disk: DiskHandle,
-    /// Info about the torrent's storage (piece length, download length, etc).
-    pub storage: StorageInfo,
 }
 
 /// Contains the tracker client as well as additional metadata about the

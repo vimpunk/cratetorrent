@@ -2,15 +2,18 @@
 name = "cratetorrent-cli"
 version = "0.1.0"
 authors = ["mandreyel <mandreyel@protonmail.com>"]
+description = "A simple BitTorrentV1 CLI client"
 edition = "2018"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-clap = "2.33"
 cratetorrent = { path = "../cratetorrent" }
-env_logger = "0.8"
-hex = "0.4"
+flexi_logger = "0.16"
 futures = "0.3"
+hex = "0.4"
 log = "0.4"
-tokio = { version = "0.2", features = ["macros", "rt-threaded"] }
+structopt = "0.3"
+termion = "1.5"
+tokio = { version = "0.2", features = ["io-std", "macros", "rt-threaded"] }
+tui = "0.13"

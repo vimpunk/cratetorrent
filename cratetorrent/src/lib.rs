@@ -154,11 +154,11 @@ pub mod engine;
 pub mod error;
 pub mod iovecs;
 pub mod metainfo;
-mod peer;
+pub mod peer;
 mod piece_picker;
 pub mod prelude;
-mod storage_info;
-mod torrent;
+pub mod storage_info;
+pub mod torrent;
 mod tracker;
 
 /// Each torrent gets a randomly assigned ID that is unique within the

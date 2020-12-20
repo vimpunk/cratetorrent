@@ -18,12 +18,12 @@ pub struct FileInfo {
 impl FileInfo {
     /// Returns a range that represents the file's first and one past the last
     /// bytes' offsets in the torrent.
-    pub(crate) fn byte_range(&self) -> Range<u64> {
+    pub fn byte_range(&self) -> Range<u64> {
         self.torrent_offset..self.torrent_end_offset()
     }
 
     /// Returns the file's one past the last byte's offset in the torrent.
-    pub(crate) fn torrent_end_offset(&self) -> u64 {
+    pub fn torrent_end_offset(&self) -> u64 {
         self.torrent_offset + self.len
     }
 
@@ -41,15 +41,17 @@ impl FileInfo {
     ///
     /// This will panic if `torrent_offset` is smaller than the file's offset in
     /// torrent, or if it's past the last byte in file.
-    pub(crate) fn get_slice(&self, torrent_offset: u64, len: u64) -> FileSlice {
-        if torrent_offset < self.torrent_offset {
-            panic!("torrent offset must be larger than file offset");
-        }
+    pub fn get_slice(&self, torrent_offset: u64, len: u64) -> FileSlice {
+        assert!(
+            torrent_offset >= self.torrent_offset,
+            "torrent offset must be larger than file offset",
+        );
 
         let torrent_end_offset = self.torrent_end_offset();
-        if torrent_offset >= torrent_end_offset {
-            panic!("torrent offset must be smaller than file end offset");
-        }
+        assert!(
+            torrent_offset < torrent_end_offset,
+            "torrent offset must be smaller than file end offset",
+        );
 
         FileSlice {
             offset: torrent_offset - self.torrent_offset,
@@ -60,7 +62,7 @@ impl FileInfo {
 
 /// Represents the location of a range of bytes within a file.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct FileSlice {
+pub struct FileSlice {
     /// The byte offset in file, relative to the file's start.
     pub offset: u64,
     /// The length of the slice, in bytes.
@@ -70,7 +72,7 @@ pub(crate) struct FileSlice {
 /// Information about a torrent's storage details, such as the piece count and
 /// length, download length, etc.
 #[derive(Clone, Debug)]
-pub(crate) struct StorageInfo {
+pub struct StorageInfo {
     /// The number of pieces in the torrent.
     pub piece_count: usize,
     /// The nominal length of a piece.
@@ -94,22 +96,22 @@ pub(crate) struct StorageInfo {
     /// E.g. downloading files into ~/Downloads/<torrent> instead of just
     /// ~/Downloads.
     pub download_dir: PathBuf,
-    /// The paths and lengths of the torrent files.
-    pub structure: FsStructure,
+    /// All files in torrent.
+    pub files: Vec<FileInfo>,
 }
 
 impl StorageInfo {
     /// Extracts storage related information from the torrent metainfo.
     pub fn new(metainfo: &Metainfo, download_dir: PathBuf) -> Self {
         let piece_count = metainfo.piece_count();
-        let download_len = metainfo.structure.download_len();
+        let download_len = metainfo.download_len();
         let piece_len = metainfo.piece_len;
         let last_piece_len =
             download_len - piece_len as u64 * (piece_count - 1) as u64;
         let last_piece_len = last_piece_len as u32;
 
         // if this is an archive, download files into torrent's own dir
-        let download_dir = if metainfo.structure.is_archive() {
+        let download_dir = if metainfo.is_archive() {
             download_dir.join(&metainfo.name)
         } else {
             download_dir
@@ -121,7 +123,7 @@ impl StorageInfo {
             last_piece_len,
             download_len,
             download_dir,
-            structure: metainfo.structure.clone(),
+            files: metainfo.files.clone(),
         }
     }
 
@@ -134,10 +136,69 @@ impl StorageInfo {
         log::trace!("Returning files intersecting piece {}", index);
         let piece_offset = index as u64 * self.piece_len as u64;
         let piece_end = piece_offset + self.piece_len(index)? as u64;
-        let files = self
-            .structure
-            .files_intersecting_bytes(piece_offset..piece_end);
+        let files = self.files_intersecting_bytes(piece_offset..piece_end);
         Ok(files)
+    }
+
+    /// Returns the files that overlap with the given left-inclusive range of
+    /// bytes, where `bytes.start` is the offset and `bytes.end` is one past the
+    /// last byte offset.
+    pub fn files_intersecting_bytes(
+        &self,
+        byte_range: Range<u64>,
+    ) -> Range<FileIndex> {
+        debug_assert_ne!(self.files.len(), 0);
+        if self.files.len() == 1 {
+            // when torrent only has one file, only that file can be returned
+            //
+            // TODO: consider whether to return an error, an empty range, panic,
+            // or do a noop if the range is invalid (outside the first or last
+            // byte offsets of our file)
+            0..1
+        } else {
+            // find the index of the first file that contains the first byte
+            // of the range
+            let first_matching_index = match self
+                .files
+                .iter()
+                .enumerate()
+                .find(|(_, file)| {
+                    // check if the file's byte range contains the first
+                    // byte of the range
+                    file.byte_range().contains(&byte_range.start)
+                })
+                .map(|(index, _)| index)
+            {
+                Some(index) => index,
+                None => return 0..0,
+            };
+
+            // the resulting files
+            let mut file_range = first_matching_index..first_matching_index + 1;
+
+            // Find the the last file that contains the last byte of the
+            // range, starting at the file after the above found one.
+            //
+            // NOTE: the order of `enumerate` and `skip` matters as
+            // otherwise we'd be getting relative indices
+            for (index, file) in
+                self.files.iter().enumerate().skip(first_matching_index + 1)
+            {
+                // stop if file's first byte is not contained by the byte
+                // range (is at or past the end of the byte range we're
+                // looking for)
+                if !byte_range.contains(&file.torrent_offset) {
+                    break;
+                }
+
+                // note that we need to add one to the end as this is
+                // a left-inclusive range, so we want the end (excluded) to
+                // be one past the actually included value
+                file_range.end = index + 1;
+            }
+
+            file_range
+        }
     }
 
     /// Returns the piece's absolute offset in the torrent.
@@ -157,105 +218,6 @@ impl StorageInfo {
             // error to provide an out of bounds index
             log::error!("Piece {} is invalid for torrent: {:?}", index, self);
             Err(Error::InvalidPieceIndex)
-        }
-    }
-}
-
-/// Defines the file system structure of the download.
-#[derive(Clone, Debug)]
-pub enum FsStructure {
-    /// This is a single file download.
-    // TODO: consider changing this back to just File { len: u64 } to not have
-    // to copy the path unnecessarily, since in this case it's just going to be
-    // the download dir + torrent name
-    File(FileInfo),
-    /// The download is for multiple files, possibly with nested directories.
-    Archive {
-        /// A flattened list of all files in the archive.
-        ///
-        /// When all files in the torrent are viewed as a single contiguous byte
-        /// array, we can get the offset of a file in torrent. The file's last
-        /// byte offset in torrent is the key of this map, for helping us with
-        /// lookups of which piece bytes are contained in file.
-        files: Vec<FileInfo>,
-    },
-}
-
-impl FsStructure {
-    /// Returns true if the download is for an archive.
-    pub fn is_archive(&self) -> bool {
-        matches!(self, Self::Archive { .. })
-    }
-
-    /// Returns the total download size in bytes.
-    ///
-    /// Note that this is an O(n) operation for archive downloads, where n is
-    /// the number of files, so the return value should ideally be cached.
-    pub fn download_len(&self) -> u64 {
-        match self {
-            Self::File(file) => file.len,
-            Self::Archive { files } => files.iter().map(|f| f.len).sum(),
-        }
-    }
-
-    /// Returns the files that overlap with the given left-inclusive range of
-    /// bytes, where `bytes.start` is the offset and `bytes.end` is one past the
-    /// last byte offset.
-    pub fn files_intersecting_bytes(
-        &self,
-        byte_range: Range<u64>,
-    ) -> Range<FileIndex> {
-        match self {
-            // when torrent only has one file, only that file can be returned
-            //
-            // TODO: consider whether to return an error, an empty range, panic,
-            // or do a noop if the range is invalid (outside the first or last
-            // byte offsets of our file)
-            Self::File(_) => 0..1,
-            Self::Archive { files } => {
-                // find the index of the first file that contains the first byte
-                // of the given range
-                let first_matching_index = match files
-                    .iter()
-                    .enumerate()
-                    .find(|(_, file)| {
-                        // check if the file's byte range contains the first
-                        // byte of the given range
-                        file.byte_range().contains(&byte_range.start)
-                    })
-                    .map(|(index, _)| index)
-                {
-                    Some(index) => index,
-                    None => return 0..0,
-                };
-
-                // the resulting files
-                let mut file_range =
-                    first_matching_index..first_matching_index + 1;
-
-                // Find the the last file that contains the last byte of the
-                // given range, starting at the file after the above found one.
-                //
-                // NOTE: the order of `enumerate` and `skip` matters as
-                // otherwise we'd be getting relative indices
-                for (index, file) in
-                    files.iter().enumerate().skip(first_matching_index + 1)
-                {
-                    // stop if file's first byte is not contained by the given
-                    // byte range (is at or past the end of the byte range we're
-                    // looking for)
-                    if !byte_range.contains(&file.torrent_offset) {
-                        break;
-                    }
-
-                    // note that we need to add one to the end as this is
-                    // a left-inclusive range, so we want the end (excluded) to
-                    // be one past the actually included value
-                    file_range.end = index + 1;
-                }
-
-                file_range
-            }
         }
     }
 }
@@ -340,18 +302,18 @@ mod tests {
         let last_piece_len = 2;
         // 3 full length pieces; 1 smaller piece,
         let download_len = 3 * 4 + 2;
-        let structure = FsStructure::File(FileInfo {
+        let files = vec![FileInfo {
             path: PathBuf::from("/bogus"),
             torrent_offset: 0,
             len: download_len,
-        });
+        }];
         let info = StorageInfo {
             piece_count,
             piece_len,
             last_piece_len,
             download_len,
             download_dir: PathBuf::from("/"),
-            structure,
+            files,
         };
         // all 4 pieces are in the same file
         assert_eq!(info.files_intersecting_piece(0).unwrap(), 0..1);
@@ -431,7 +393,7 @@ mod tests {
             last_piece_len,
             download_len,
             download_dir: PathBuf::from("/"),
-            structure: FsStructure::Archive { files },
+            files,
         };
         // piece 0 intersects with files 0 and 1
         assert_eq!(info.files_intersecting_piece(0).unwrap(), 0..2);
@@ -449,62 +411,80 @@ mod tests {
 
     #[test]
     fn test_files_intersecting_bytes() {
-        // single file
-        let structure = FsStructure::File(FileInfo {
+        let download_len = 12341234;
+        let files = vec![FileInfo {
             path: PathBuf::from("/bogus"),
             torrent_offset: 0,
-            len: 12341234,
-        });
-        assert_eq!(structure.files_intersecting_bytes(0..0), 0..1);
-        assert_eq!(structure.files_intersecting_bytes(0..1), 0..1);
-        assert_eq!(structure.files_intersecting_bytes(0..12341234), 0..1);
+            len: download_len,
+        }];
+        let info = StorageInfo {
+            // arbitrary piece info (not used in this test)
+            piece_count: 4,
+            piece_len: 4,
+            last_piece_len: 2,
+            download_len,
+            download_dir: PathBuf::from("/"),
+            files,
+        };
+        assert_eq!(info.files_intersecting_bytes(0..0), 0..1);
+        assert_eq!(info.files_intersecting_bytes(0..1), 0..1);
+        assert_eq!(info.files_intersecting_bytes(0..12341234), 0..1);
 
         // multi-file
-        let structure = FsStructure::Archive {
-            files: vec![
-                FileInfo {
-                    path: PathBuf::from("/bogus0"),
-                    torrent_offset: 0,
-                    len: 4,
-                },
-                FileInfo {
-                    path: PathBuf::from("/bogus1"),
-                    torrent_offset: 4,
-                    len: 9,
-                },
-                FileInfo {
-                    path: PathBuf::from("/bogus2"),
-                    torrent_offset: 13,
-                    len: 3,
-                },
-                FileInfo {
-                    path: PathBuf::from("/bogus3"),
-                    torrent_offset: 16,
-                    len: 10,
-                },
-            ],
+        let files = vec![
+            FileInfo {
+                path: PathBuf::from("/bogus0"),
+                torrent_offset: 0,
+                len: 4,
+            },
+            FileInfo {
+                path: PathBuf::from("/bogus1"),
+                torrent_offset: 4,
+                len: 9,
+            },
+            FileInfo {
+                path: PathBuf::from("/bogus2"),
+                torrent_offset: 13,
+                len: 3,
+            },
+            FileInfo {
+                path: PathBuf::from("/bogus3"),
+                torrent_offset: 16,
+                len: 10,
+            },
+        ];
+        let download_len = files.iter().map(|f| f.len).sum();
+        let info = StorageInfo {
+            // arbitrary piece info (not used in this test)
+            piece_count: 4,
+            piece_len: 4,
+            last_piece_len: 2,
+            download_len,
+            download_dir: PathBuf::from("/"),
+            files,
         };
+
         // bytes only in the first file
-        assert_eq!(structure.files_intersecting_bytes(0..4), 0..1);
+        assert_eq!(info.files_intersecting_bytes(0..4), 0..1);
         // bytes intersecting two files
-        assert_eq!(structure.files_intersecting_bytes(0..5), 0..2);
+        assert_eq!(info.files_intersecting_bytes(0..5), 0..2);
         // bytes overlapping with two files
-        assert_eq!(structure.files_intersecting_bytes(0..13), 0..2);
+        assert_eq!(info.files_intersecting_bytes(0..13), 0..2);
         // bytes intersecting three files
-        assert_eq!(structure.files_intersecting_bytes(0..15), 0..3);
+        assert_eq!(info.files_intersecting_bytes(0..15), 0..3);
         // bytes intersecting all files
-        assert_eq!(structure.files_intersecting_bytes(0..18), 0..4);
+        assert_eq!(info.files_intersecting_bytes(0..18), 0..4);
         // bytes intersecting the last byte of the last file
-        assert_eq!(structure.files_intersecting_bytes(25..26), 3..4);
+        assert_eq!(info.files_intersecting_bytes(25..26), 3..4);
         // bytes overlapping with two files in the middle
-        assert_eq!(structure.files_intersecting_bytes(4..16), 1..3);
+        assert_eq!(info.files_intersecting_bytes(4..16), 1..3);
         // bytes intersecting only one byte of two files each, among the middle
         // of all files
-        assert_eq!(structure.files_intersecting_bytes(8..14), 1..3);
+        assert_eq!(info.files_intersecting_bytes(8..14), 1..3);
         // bytes intersecting only one byte of one file, among the middle of all
         // files
-        assert_eq!(structure.files_intersecting_bytes(13..14), 2..3);
+        assert_eq!(info.files_intersecting_bytes(13..14), 2..3);
         // bytes not intersecting any files
-        assert_eq!(structure.files_intersecting_bytes(30..38), 0..0);
+        assert_eq!(info.files_intersecting_bytes(30..38), 0..0);
     }
 }

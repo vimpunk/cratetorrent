@@ -1,120 +1,130 @@
-use std::{fs, net::SocketAddr};
+use std::{io, net::SocketAddr, path::PathBuf};
 
-use clap::{App, Arg};
 use cratetorrent::prelude::*;
-use futures::stream::StreamExt;
+use futures::{select, stream::StreamExt};
+use structopt::StructOpt;
+use termion::{
+    input::MouseTerminal, raw::IntoRawMode, screen::AlternateScreen,
+};
+use tui::{backend::TermionBackend, Terminal};
+
+use app::App;
+use key::Keys;
+
+mod app;
+mod key;
+mod ui;
+mod unit;
+
+type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+
+#[derive(StructOpt, Debug)]
+pub struct Args {
+    /// Whether to 'seed' or 'download' the torrent.
+    #[structopt(
+        short, long,
+        parse(from_str = parse_mode),
+        default_value = "Mode::Download { seeds: Vec::new() }",
+    )]
+    mode: Mode,
+
+    /// The path of the folder where to download file.
+    #[structopt(short, long)]
+    download_dir: PathBuf,
+
+    /// The path to the torrent metainfo file.
+    #[structopt(short, long)]
+    metainfo: PathBuf,
+
+    /// A comma separated list of <ip>:<port> pairs of the seeds.
+    #[structopt(short, long)]
+    seeds: Option<Vec<SocketAddr>>,
+
+    /// The socket address on which to listen for new connections.
+    #[structopt(short, long)]
+    listen: Option<SocketAddr>,
+
+    #[structopt(short, long)]
+    quit_after_complete: bool,
+}
+
+fn parse_mode(s: &str) -> Mode {
+    match s {
+        "seed" => Mode::Seed,
+        _ => Mode::Download { seeds: Vec::new() },
+    }
+}
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    env_logger::init();
-
-    // set up cli args
-    let matches = App::new("Cratetorrent CLI")
-        .version("1.0.0-alpha.1")
-        .arg(
-            Arg::with_name("listen")
-                .short("l")
-                .long("listen")
-                .value_name("SOCKET_ADDR")
-                .help(
-                    "The socket address on which to listen for new connections",
-                )
-                .takes_value(true),
-        )
-        .arg(
-            Arg::with_name("mode")
-                .short("m")
-                .long("mode")
-                .value_name("MODE")
-                .help("Whether to 'seed' or 'download' the torrent.")
-                .takes_value(true),
-        )
-        .arg(
-            Arg::with_name("seeds")
-                .short("s")
-                .long("seeds")
-                .value_name("SOCKET_ADDRS")
-                .help(
-                    "A comma separated list of <ip>:<port> pairs of the seeds",
-                )
-                .takes_value(true),
-        )
-        .arg(
-            Arg::with_name("metainfo")
-                .short("i")
-                .long("metainfo")
-                .value_name("PATH")
-                .help("The path to the torrent metainfo file")
-                .takes_value(true),
-        )
-        .arg(
-            Arg::with_name("download-dir")
-                .short("d")
-                .long("download-dir")
-                .value_name("PATH")
-                .help("The path of the folder where to download file")
-                .takes_value(true),
-        )
-        .get_matches();
+async fn main() -> Result<()> {
+    flexi_logger::Logger::with_env()
+        .log_to_file()
+        .directory("/tmp/cratetorrent")
+        .start()?;
 
     // parse cli args
-
-    // mandatory
-    let listen_addr = matches.value_of("listen");
-    println!("{:?}", listen_addr);
-    let listen_addr = listen_addr.and_then(|l| l.parse().ok());
-    let metainfo_path =
-        matches.value_of("metainfo").ok_or("--seed must be set")?;
-    let download_dir = matches
-        .value_of("download-dir")
-        .ok_or("--download-dir must be set")?;
-
-    // optional
-    let seeds: Vec<SocketAddr> = matches
-        .value_of("seeds")
-        .unwrap_or_default()
-        .split(',')
-        .filter_map(|s| s.parse().ok())
-        .collect();
-    println!("seeds: {:?}", seeds);
-
-    let conf = Conf::new(download_dir);
-    let (handle, mut alert_rx) = cratetorrent::engine::spawn(conf)?;
-
-    // read in torrent metainfo
-    let metainfo = fs::read(metainfo_path)?;
-    let metainfo = Metainfo::from_bytes(&metainfo)?;
-
-    let mode = matches.value_of("mode").unwrap_or_default();
-    let mode = match mode {
-        "seed" => Mode::Seed,
-        _ => Mode::Download { seeds },
+    let mut args = Args::from_args();
+    if let Mode::Download { seeds } = &mut args.mode {
+        *seeds = args.seeds.clone().unwrap_or_default();
     };
-    println!("metainfo: {:?}", metainfo);
-    println!("piece count: {}", metainfo.piece_count());
-    println!("info hash: {}", hex::encode(&metainfo.info_hash));
 
-    let _torrent_id = handle.create_torrent(TorrentParams {
-        metainfo,
-        listen_addr,
-        mode,
-        conf: None,
-    })?;
+    let quit_after_complete = args.quit_after_complete;
 
-    // listen to alerts from the engine
-    while let Some(alert) = alert_rx.next().await {
-        match alert {
-            Alert::TorrentStats { id, stats } => {
-                println!("{}: {:#?}", id, stats);
+    // set up TUI backend
+    let stdout = io::stdout().into_raw_mode()?;
+    let stdout = MouseTerminal::from(stdout);
+    let stdout = AlternateScreen::from(stdout);
+    let backend = TermionBackend::new(stdout);
+    let mut terminal = Terminal::new(backend)?;
+
+    // set up app state and input events
+    let mut app = App::new(args.download_dir.clone())?;
+    let mut keys = Keys::new(key::EXIT_KEY);
+
+    // for now we only support creation of a single torrent, but technically
+    // everything is in place to allow running multiple torrents at the same
+    // time
+    app.create_torrent(args)?;
+
+    // draw initial state
+    terminal.draw(|f| ui::draw(f, &mut app))?;
+
+    // wait for stdin input and alerts from the engine
+    let mut run = true;
+    while run {
+        select! {
+            key = keys.rx.select_next_some() => {
+                if key == key::EXIT_KEY {
+                    run = false;
+                }
             }
-            Alert::TorrentComplete(id) => {
-                println!("{} complete, shutting down", id);
-                break;
+            alert = app.alert_rx.select_next_some() => {
+                match alert {
+                    Alert::TorrentStats { id, stats } => {
+                        app.update_torrent_state(id, *stats);
+                    }
+                    Alert::TorrentComplete(_) => {
+                        // TODO: some notification/popup
+                        if quit_after_complete {
+                            run = false;
+                        }
+                    }
+                }
             }
+        }
+
+        // draw ui with updated state
+        terminal.draw(|f| ui::draw(f, &mut app))?;
+
+        // we want to draw once more before breaking out of the loop as
+        // otherwise the completion of the ui is not rendered, which will result
+        // in a screen as though the app froze
+        if !run {
+            break;
         }
     }
 
-    handle.shutdown().await?;
+    app.engine.shutdown().await?;
 
     Ok(())
 }

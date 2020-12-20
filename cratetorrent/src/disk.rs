@@ -325,7 +325,7 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::*;
-    use crate::{block_count, storage_info::FsStructure, FileInfo, BLOCK_LEN};
+    use crate::{block_count, FileInfo, BLOCK_LEN};
 
     /// Tests the allocation of a torrent, and then the allocation of the same
     /// torrent returning an error.
@@ -362,10 +362,7 @@ mod tests {
         ));
 
         // check that file was created on disk
-        let file = match &info.structure {
-            FsStructure::File(file) => file,
-            _ => unreachable!(),
-        };
+        let file = info.files.first().unwrap();
         assert!(info.download_dir.join(&file.path).is_file());
 
         // try to allocate the same torrent a second time
@@ -436,10 +433,7 @@ mod tests {
         }
 
         // clean up test env
-        let file = match &info.structure {
-            FsStructure::File(file) => file,
-            _ => unreachable!(),
-        };
+        let file = info.files.first().unwrap();
         fs::remove_file(info.download_dir.join(&file.path))
             .expect("cannot clean up disk test torrent file");
     }
@@ -568,10 +562,7 @@ mod tests {
         }
 
         // clean up test env
-        let file = match &info.structure {
-            FsStructure::File(file) => file,
-            _ => unreachable!(),
-        };
+        let file = info.files.first().unwrap();
         fs::remove_file(info.download_dir.join(&file.path))
             .expect("cannot clean up disk test torrent file");
     }
@@ -678,11 +669,11 @@ mod tests {
                 last_piece_len,
                 download_len,
                 download_dir: download_dir.to_path_buf(),
-                structure: FsStructure::File(FileInfo {
+                files: vec![FileInfo {
                     path: download_rel_path,
                     torrent_offset: 0,
                     len: download_len,
-                }),
+                }],
             };
 
             let (torrent_tx, torrent_rx) = mpsc::unbounded_channel();

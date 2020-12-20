@@ -4,10 +4,24 @@
 //! Communication of such alerts is performed via unbounded [tokio mpsc
 //! channels](tokio::sync::mpsc). Thus, the application in which the engine is
 //! integrated may be driven partially or entirely by cratetorrent alerts.
+//!
+//! # Optional information
+//!
+//! By default only the most basic alerts are broadcast from the engine. The
+//! reason for this is that cratetorrent follows a philosophy similar what lies
+//! behind Rust or C++: pay for only what you use.
+//!
+//! This is of course not fully possible with something as complex as a torrent
+//! engine, but an effort is made to make more expensive operations optional.
+//!
+//! Such alerts include the [latest downloaded
+//! pieces](crate::conf::TorrentAlertConf::completed_pieces) or aggregate
+//! statistics about a torrent's [peers](crate::conf::TorrentAlertConf::peers).
+//! More will be added later.
 
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
-use crate::{torrent::TorrentStats, TorrentId};
+use crate::{torrent::stats::TorrentStats, TorrentId};
 
 pub(crate) type AlertSender = UnboundedSender<Alert>;
 /// The channel on which alerts from the engine can be received. See [`Alert`]
@@ -21,5 +35,8 @@ pub enum Alert {
     TorrentComplete(TorrentId),
     /// Each running torrent sends an update of its latest statistics every
     /// second via this alert.
-    TorrentStats { id: TorrentId, stats: TorrentStats },
+    TorrentStats {
+        id: TorrentId,
+        stats: Box<TorrentStats>,
+    },
 }
