@@ -31,7 +31,7 @@ BitTorrent protocol 2, stream encryption, and others) will be supported by
 cratetorrent in the future.
 
 
-## Example
+## Download example
 
 ```rust
 use cratetorrent::prelude::*;
@@ -49,6 +49,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         metainfo,
         // tell the engine to assign a randomly chosen free port
         listen_addr: None,
+        // here we could specify peers we knew of that we'd want
+        // to connect to
         mode: Mode::Download { seeds: Vec::new() },
         conf: None,
     })?;
