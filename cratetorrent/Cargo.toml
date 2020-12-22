@@ -29,7 +29,7 @@ serde_bytes = "0.11"
 serde_derive = "1.0"
 sha-1 = "0.9"
 # TODO(#76): update tokio when reqwest also updates it
-tokio = { version = "0.2", features = ["blocking", "macros", "tcp", "rt-threaded", "stream", "sync", "time"] }
+tokio = { version = "0.2", features = ["blocking", "macros", "rt-threaded", "stream", "sync", "tcp", "time"] }
 tokio-util = { version = "0.2", features = ["codec"] }
 url = "2.2"
 

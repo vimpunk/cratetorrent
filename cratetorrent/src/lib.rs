@@ -80,8 +80,8 @@
 //!     let conf = Conf::new("/tmp/downloads");
 //!     let (engine, mut alert_rx) = engine::spawn(conf)?;
 //!
-//!     // parse torrent metainfo and start the download
-//!     let metainfo = tokio::fs::read("/tmp/imaginary.torrent").await?;
+//!     // parse torrent metainfo and start the download (use tokio::fs)
+//!     let metainfo = std::fs::read("/tmp/imaginary.torrent")?;
 //!     let metainfo = Metainfo::from_bytes(&metainfo)?;
 //!     let torrent_id = engine.create_torrent(TorrentParams {
 //!         metainfo,
