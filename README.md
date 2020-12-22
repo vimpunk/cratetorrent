@@ -1,9 +1,21 @@
 # cratetorrent
 
-Cratetorrent is a Rust crate implementing the BitTorrent version 1 protocol. It
-can be used as a library and also provides a simple example CLI torrent app.
+Cratetorrent is a Rust crate implementing the BitTorrent version 1 protocol.
 
-![](assets/partial-download.gif)
+[![Cargo](https://img.shields.io/crates/v/cratetorrent.svg)](
+https://crates.io/crates/cratetorrent)
+[![Documentation](https://docs.rs/cratetorrent/badge.svg)](
+https://docs.rs/cratetorrent)
+[![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](
+https://github.com/mandreyel/cratetorrent)
+
+---
+
+It can be used as a library and also provides a simple example CLI torrent app.
+It is built on top of [tokio](https://github.com/tokio-rs/tokio) and uses async
+IO for high performance.
+
+![](https://raw.githubusercontent.com/mandreyel/cratetorrent/master/assets/partial-download.gif)
 
 The name is a homage to the C++
 [libtorrent](https://github.com/arvidn/libtorrent) library, from which many
@@ -12,11 +24,12 @@ lessons were learned when I first wrote my torrent engine in C++.
 
 ## Features
 
-- Torrent downloads or uploads, with
-- an arbitrary number of peer connections.
-- Peers may be specified by their address, or if the torrent's metainfo file
-  contains HTTP trackers, peers are requested from these trackers.
-- Performance is decent:
+- Multiple torrent downloads or uploads, with an arbitrary number of peer
+  connections.
+- Manually specify seeds to download from.
+- Get peers from HTTP trackers.
+- Basic per-torrent configurability.
+- Decent performance:
   > On my fairly slow internet connection with peak download rates of about 9 MBps,
   Ubuntu 20.04 LTS (~2.8 GB) is downloaded in about 5 minutes at a download rate
   of 8-9 MPbs, that is, almost fully utilizing the link.
