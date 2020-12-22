@@ -31,9 +31,11 @@ use tokio::{
 use tokio_util::codec::{Framed, FramedParts};
 
 use crate::{
+    alert::Alert,
     counter::ThruputCounters,
     disk,
     download::{BlockStatus, PieceDownload},
+    error::Error,
     torrent::{self, TorrentContext},
     Bitfield, Block, BlockInfo, PeerId, PieceIndex,
 };
@@ -44,7 +46,7 @@ use state::*;
 pub use state::{ConnectionState, SessionState};
 
 mod codec;
-pub(crate) mod error;
+pub mod error;
 mod state;
 
 /// The most essential information of a peer session that is sent to torrent
@@ -341,6 +343,11 @@ impl PeerSession {
                     addr: self.peer.addr,
                     info: self.session_info(),
                 })?;
+                self.torrent.alert_tx.send(Alert::Error(Error::Peer {
+                    id: self.torrent.id,
+                    addr: self.peer.addr,
+                    error: e,
+                }))?;
             }
         } else {
             log::error!(target: &self.ctx.log_target, "No handshake received");

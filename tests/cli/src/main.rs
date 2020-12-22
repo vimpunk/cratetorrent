@@ -78,6 +78,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("{} complete, shutting down", id);
                 break;
             }
+            // we don't care about other errors here
+            _ => (),
         }
     }
 

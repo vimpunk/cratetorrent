@@ -185,7 +185,7 @@ struct TorrentEntry {
     /// The torrent's command channel on which engine sends commands to torrent.
     tx: torrent::Sender,
     /// The torrent task's join handle, used during shutdown.
-    join_handle: Option<JoinHandle>,
+    join_handle: Option<task::JoinHandle<torrent::error::Result<()>>>,
 }
 
 impl Engine {

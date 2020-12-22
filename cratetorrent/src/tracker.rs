@@ -17,6 +17,7 @@ pub(crate) type Result<T, E = TrackerError> = crate::error::Result<T, E>;
 
 /// The possible errors that may occur when contating the tracker.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum TrackerError {
     /// Holds bencode serialization or deserialization related errors.
     Bencode(BencodeError),

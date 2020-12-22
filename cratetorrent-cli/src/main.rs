@@ -109,6 +109,9 @@ async fn main() -> Result<()> {
                             run = false;
                         }
                     }
+                    // TODO(https://github.com/mandreyel/cratetorrent/issues/85):
+                    // handle errors
+                    _ => (),
                 }
             }
         }

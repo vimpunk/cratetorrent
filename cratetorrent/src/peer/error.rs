@@ -4,12 +4,13 @@ pub use tokio::{io::Error as IoError, sync::mpsc::error::SendError};
 
 pub(crate) type Result<T, E = PeerError> = std::result::Result<T, E>;
 
-/// Error type returned on failed block reads.
+/// Error type returned on failed peer sessions.
 ///
 /// This error is non-fatal so it should not be grouped with the global `Error`
 /// type as it may be recovered from.
 #[derive(Debug)]
-pub(crate) enum PeerError {
+#[non_exhaustive]
+pub enum PeerError {
     /// The bitfield message was not sent after the handshake. According to the
     /// protocol, it should only be accepted after the handshake and when
     /// received at any other time, connection is severed.

@@ -27,15 +27,17 @@ use crate::{
         error::{ReadError, WriteError},
     },
     download::PieceDownload,
-    error::*,
+    error::Error,
     peer::{self, ConnectionState, PeerSession, SessionState, SessionTick},
     piece_picker::PiecePicker,
     storage_info::StorageInfo,
     tracker::{Announce, Event, Tracker},
     Bitfield, BlockInfo, PeerId, PieceIndex, Sha1Hash, TorrentId,
 };
+use error::*;
 use stats::{Peers, PieceStats, ThruputStats, TorrentStats};
 
+pub mod error;
 pub mod stats;
 
 /// The channel for communicating with torrent.
@@ -114,6 +116,9 @@ pub(crate) struct TorrentContext {
     // For mvp it should do.
     pub downloads: RwLock<HashMap<PieceIndex, RwLock<PieceDownload>>>,
 
+    /// The channel on which to post alerts to user.
+    pub alert_tx: AlertSender,
+
     /// The handle to the disk IO task, used to issue commands on it. A copy of
     /// this handle is passed down to each peer session.
     pub disk_tx: disk::Sender,
@@ -184,9 +189,6 @@ pub(crate) struct Torrent {
     /// Measures various transfer statistics.
     counters: ThruputCounters,
 
-    /// The channel on which to post alerts to user.
-    alert_tx: AlertSender,
-
     /// The configuration of this particular torrent.
     conf: TorrentConf,
 
@@ -241,6 +243,7 @@ impl Torrent {
                     downloads: RwLock::new(HashMap::new()),
                     info_hash,
                     client_id,
+                    alert_tx,
                     disk_tx,
                     storage: storage_info,
                 }),
@@ -251,7 +254,6 @@ impl Torrent {
                 in_endgame: false,
                 counters: Default::default(),
                 listen_addr,
-                alert_tx,
                 conf,
                 completed_pieces,
             },
@@ -268,11 +270,45 @@ impl Torrent {
         // record the torrent starttime
         self.start_time = Some(Instant::now());
 
-        // TODO: if the torrent is a seed, don't send the started event, just an
-        // empty announce (verify this is the case)
-        self.announce_to_trackers(Instant::now(), Some(Event::Started))
-            .await?;
+        // if the torrent is a seed, don't send the started event, just an
+        // empty announce
+        let tracker_event =
+            if self.ctx.piece_picker.read().await.missing_piece_count() == 0 {
+                None
+            } else {
+                Some(Event::Started)
+            };
+        if let Err(e) = self
+            .announce_to_trackers(Instant::now(), tracker_event)
+            .await
+        {
+            // this is a torrent error, not a tracker error, as that is handled
+            // inside the function
+            self.ctx
+                .alert_tx
+                .send(Alert::Error(Error::Torrent {
+                    id: self.ctx.id,
+                    error: e,
+                }))
+                .ok();
+        }
 
+        if let Err(e) = self.run().await {
+            // send alert of torrent failure to user
+            self.ctx
+                .alert_tx
+                .send(Alert::Error(Error::Torrent {
+                    id: self.ctx.id,
+                    error: e,
+                }))
+                .ok();
+        }
+
+        Ok(())
+    }
+
+    /// Starts the torrent and runs until an error is encountered.
+    async fn run(&mut self) -> Result<()> {
         let mut tick_timer = time::interval(Duration::from_secs(1)).fuse();
         let mut last_tick_time = None;
 
@@ -431,7 +467,8 @@ impl Torrent {
 
         // send periodic stats update to api user
         let stats = self.build_stats().await;
-        self.alert_tx
+        self.ctx
+            .alert_tx
             .send(Alert::TorrentStats {
                 id: self.ctx.id,
                 stats: Box::new(stats),
@@ -594,6 +631,12 @@ impl Torrent {
                             e
                         );
                         tracker.error_count += 1;
+                        self.ctx.alert_tx.send(Alert::Error(
+                            Error::Tracker {
+                                id: self.ctx.id,
+                                error: e,
+                            },
+                        ))?;
                     }
                 }
                 tracker.last_announce_time = Some(now);
@@ -744,7 +787,10 @@ impl Torrent {
                 );
 
                 // notify user of torrent completion
-                self.alert_tx.send(Alert::TorrentComplete(self.ctx.id)).ok();
+                self.ctx
+                    .alert_tx
+                    .send(Alert::TorrentComplete(self.ctx.id))
+                    .ok();
 
                 // tell trackers we've finished
                 self.announce_to_trackers(
@@ -794,9 +840,7 @@ impl Torrent {
 
         // tell trackers we're leaving
         self.announce_to_trackers(Instant::now(), Some(Event::Stopped))
-            .await?;
-
-        return Ok(());
+            .await
     }
 }
 

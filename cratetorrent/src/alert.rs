@@ -21,7 +21,7 @@
 
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
-use crate::{torrent::stats::TorrentStats, TorrentId};
+use crate::{error::Error, torrent::stats::TorrentStats, TorrentId};
 
 pub(crate) type AlertSender = UnboundedSender<Alert>;
 /// The channel on which alerts from the engine can be received. See [`Alert`]
@@ -29,7 +29,8 @@ pub(crate) type AlertSender = UnboundedSender<Alert>;
 pub type AlertReceiver = UnboundedReceiver<Alert>;
 
 /// The alerts that the engine may send the library user.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
+#[non_exhaustive]
 pub enum Alert {
     /// Posted when the torrent has finished downloading.
     TorrentComplete(TorrentId),
@@ -39,4 +40,6 @@ pub enum Alert {
         id: TorrentId,
         stats: Box<TorrentStats>,
     },
+    /// An error from somewhere inside the engine.
+    Error(Error),
 }
