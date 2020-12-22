@@ -42,11 +42,12 @@ impl From<url::ParseError> for MetainfoError {
 
 impl fmt::Display for MetainfoError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        use MetainfoError::*;
         match self {
-            Self::Bencode(e) => e.fmt(f),
-            Self::InvalidMetainfo => write!(f, "invalid metainfo"),
-            Self::InvalidPieces => write!(f, "invalid pieces"),
-            Self::InvalidTrackerUrl => write!(f, "invalid tracker URL"),
+            Bencode(e) => e.fmt(f),
+            InvalidMetainfo => write!(f, "invalid metainfo"),
+            InvalidPieces => write!(f, "invalid pieces"),
+            InvalidTrackerUrl => write!(f, "invalid tracker URL"),
         }
     }
 }

@@ -81,6 +81,7 @@ struct ThreadContext {
     /// tokio redis example recommends using sync mutexes if holding them across
     /// await points is not needed:
     /// https://github.com/tokio-rs/mini-redis/blob/master/src/db.rs#L29.
+    /// https://docs.rs/tokio/0.2.24/tokio/sync/struct.Mutex.html#which-kind-of-mutex-should-you-use
     ///
     /// Locking occurs in two places:
     /// - once when reading the cache on the async task,
@@ -228,14 +229,7 @@ impl Torrent {
 
         let piece_index = info.piece_index;
         if !self.write_buf.contains_key(&piece_index) {
-            if let Err(e) = self.start_new_piece(info.piece_index) {
-                self.thread_ctx
-                    .tx
-                    .send(torrent::Command::PieceCompletion(Err(e)))?;
-                // return with ok as the disk task itself shouldn't be aborted
-                // due to invalid input
-                return Ok(());
-            }
+            self.start_new_piece(info.piece_index);
         }
         let piece = self
             .write_buf
@@ -332,18 +326,18 @@ impl Torrent {
     ///
     /// This involves getting the expected hash of the piece, its length, and
     /// calculating the files that it intersects.
-    fn start_new_piece(
-        &mut self,
-        piece_index: PieceIndex,
-    ) -> Result<(), WriteError> {
+    fn start_new_piece(&mut self, piece_index: PieceIndex) {
         log::trace!("Creating piece {} write buffer", piece_index);
+
+        assert!(
+            piece_index < self.info.piece_count,
+            "piece index is invalid"
+        );
 
         // get the position of the piece in the concatenated hash string
         let hash_pos = piece_index * 20;
-        if hash_pos + 20 > self.piece_hashes.len() {
-            log::error!("Piece index {} is invalid", piece_index);
-            return Err(WriteError::InvalidPieceIndex);
-        }
+        // the above assert should take care of this, but just in case
+        debug_assert!(hash_pos + 20 <= self.piece_hashes.len());
 
         let hash_slice = &self.piece_hashes[hash_pos..hash_pos + 20];
         let mut expected_hash = [0; 20];
@@ -354,18 +348,10 @@ impl Torrent {
             hex::encode(&expected_hash)
         );
 
-        // TODO: consider using expect here as piece index should be verified in
-        // Torrent::write_block
-        let len = self
-            .info
-            .piece_len(piece_index)
-            .map_err(|_| WriteError::InvalidPieceIndex)?;
+        let len = self.info.piece_len(piece_index);
         log::debug!("Piece {} is {} bytes long", piece_index, len);
 
-        let file_range = self
-            .info
-            .files_intersecting_piece(piece_index)
-            .map_err(|_| WriteError::InvalidPieceIndex)?;
+        let file_range = self.info.files_intersecting_piece(piece_index);
         log::debug!("Piece {} intersects files: {:?}", piece_index, file_range);
 
         let piece = Piece {
@@ -375,8 +361,6 @@ impl Torrent {
             file_range,
         };
         self.write_buf.insert(piece_index, piece);
-
-        Ok(())
     }
 
     /// Returns the specified block via the sender, either from the read cache
@@ -437,22 +421,7 @@ impl Torrent {
                 piece_index
             );
 
-            let file_range = match self
-                .info
-                .files_intersecting_piece(piece_index)
-            {
-                Ok(file_range) => file_range,
-                Err(_) => {
-                    log::error!("Piece {} not in file", piece_index);
-                    self.thread_ctx.tx.send(torrent::Command::ReadError {
-                        block_info,
-                        error: ReadError::InvalidPieceIndex,
-                    })?;
-                    // return with ok as the disk task itself shouldn't be aborted
-                    // due to invalid input
-                    return Ok(());
-                }
-            };
+            let file_range = self.info.files_intersecting_piece(piece_index);
 
             // Checking if the file pointed to by info has been downloaded yet
             // is done implicitly as part of the read operation below: if we
@@ -461,7 +430,7 @@ impl Torrent {
             // don't block the reactor with blocking disk IO
             let torrent_piece_offset =
                 self.info.torrent_piece_offset(piece_index);
-            let piece_len = self.info.piece_len(piece_index)?;
+            let piece_len = self.info.piece_len(piece_index);
             let ctx = Arc::clone(&self.thread_ctx);
             task::spawn_blocking(move || {
                 match piece::read(

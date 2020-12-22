@@ -1,49 +1,62 @@
-use std::{convert::From, fmt};
+//! This module includes the errors that could occur in the engine. They are
+//! reported via the [alert system](crate::alert), as most operations via the
+//! engine happen asynchronously.
 
+use std::{fmt, net::SocketAddr};
+
+use crate::TorrentId;
+
+pub use crate::{
+    peer::error::PeerError, torrent::error::TorrentError, tracker::TrackerError,
+};
 pub use tokio::{io::Error as IoError, sync::mpsc::error::SendError};
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum Error {
     /// The channel on which some component in engine was listening or sending
     /// died.
     Channel,
-    /// Peers are not allowed to request blocks while they are choked. If they
-    /// do so, their connection is severed.
-    ChokedPeerSentRequest,
-    /// The bitfield contained a different number of pieces than our own.
-    InvalidBitfield,
-    /// The block length is not 16 KiB.
-    InvalidBlockInfo,
     /// The torrent download location is not valid.
     // TODO: consider adding more variations (path exists, doesn't exist,
     // permission issues)
     InvalidDownloadPath,
-    /// The torrent ID did not correspond to any entry.
+    /// The torrent ID did not correspond to any entry. This is returned when
+    /// the user specified a torrent that does not exist.
     InvalidTorrentId,
-    /// Peer's torrent info hash did not match ours.
-    InvalidPeerInfoHash,
-    /// The piece index was larger than the number of pieces in torrent.
-    InvalidPieceIndex,
-    /// The bitfield message was not sent after the handshake. According to the
-    /// protocol, it should only be accepted after the handshake and when
-    /// received at any other time, connection is severed.
-    BitfieldNotAfterHandshake,
-    /// A peer session timed out because neither side of the connection became
-    /// interested in each other.
-    InactivityTimeout,
-    /// Holds IO related errors.
+    /// Holds global IO related errors.
     Io(IoError),
+    /// An error specific to a torrent.
+    Torrent { id: TorrentId, error: TorrentError },
+    /// An error that occurred while a torrent was announcing to tracker.
+    Tracker { id: TorrentId, error: TrackerError },
+    /// An error that occurred in a torrent's session with a peer.
+    Peer {
+        id: TorrentId,
+        addr: SocketAddr,
+        error: PeerError,
+    },
 }
 
 impl fmt::Display for Error {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
         use Error::*;
         match self {
-            Io(e) => e.fmt(f),
-            // TODO: implement display properly
-            _ => write!(f, "{:?}", *self),
+            Channel => write!(fmt, "channel error"),
+            InvalidDownloadPath => write!(fmt, "invalid download path"),
+            InvalidTorrentId => write!(fmt, "invalid torrent id"),
+            Io(e) => e.fmt(fmt),
+            Torrent { id, error } => {
+                write!(fmt, "torrent {} error: {}", id, error)
+            }
+            Tracker { id, error } => {
+                write!(fmt, "torrent {} tracker error: {}", id, error)
+            }
+            Peer { id, addr, error } => {
+                write!(fmt, "torrent {} peer {} error: {}", id, addr, error)
+            }
         }
     }
 }

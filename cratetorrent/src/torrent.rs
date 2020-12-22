@@ -23,19 +23,21 @@ use crate::{
     conf::TorrentConf,
     counter::ThruputCounters,
     disk::{
+        self,
         error::{ReadError, WriteError},
-        DiskHandle,
     },
     download::PieceDownload,
-    error::*,
+    error::Error,
     peer::{self, ConnectionState, PeerSession, SessionState, SessionTick},
     piece_picker::PiecePicker,
     storage_info::StorageInfo,
     tracker::{Announce, Event, Tracker},
     Bitfield, BlockInfo, PeerId, PieceIndex, Sha1Hash, TorrentId,
 };
+use error::*;
 use stats::{Peers, PieceStats, ThruputStats, TorrentStats};
 
+pub mod error;
 pub mod stats;
 
 /// The channel for communicating with torrent.
@@ -96,7 +98,7 @@ pub(crate) struct TorrentContext {
     /// A copy of the torrent channel sender. This is not used by torrent iself,
     /// but by the peer session tasks to which an arc copy of this torrent
     /// context is given.
-    pub tx: Sender,
+    pub cmd_tx: Sender,
 
     /// The piece picker picks the next most optimal piece to download and is
     /// shared by all peers in a torrent.
@@ -114,9 +116,12 @@ pub(crate) struct TorrentContext {
     // For mvp it should do.
     pub downloads: RwLock<HashMap<PieceIndex, RwLock<PieceDownload>>>,
 
+    /// The channel on which to post alerts to user.
+    pub alert_tx: AlertSender,
+
     /// The handle to the disk IO task, used to issue commands on it. A copy of
     /// this handle is passed down to each peer session.
-    pub disk: DiskHandle,
+    pub disk_tx: disk::Sender,
     /// Info about the torrent's storage (piece length, download length, etc).
     pub storage: StorageInfo,
 }
@@ -124,7 +129,7 @@ pub(crate) struct TorrentContext {
 /// Parameters for the torrent constructor.
 pub(crate) struct Params {
     pub id: TorrentId,
-    pub disk: DiskHandle,
+    pub disk_tx: disk::Sender,
     pub info_hash: Sha1Hash,
     pub storage_info: StorageInfo,
     pub own_pieces: Bitfield,
@@ -153,7 +158,7 @@ pub(crate) struct Torrent {
     ///
     /// The channel has to be wrapped in a `stream::Fuse` so that we can
     /// `select!` on it in the torrent event loop.
-    port: Fuse<Receiver>,
+    cmd_rx: Fuse<Receiver>,
     /// The trackers we can announce to.
     trackers: Vec<TrackerEntry>,
 
@@ -184,9 +189,6 @@ pub(crate) struct Torrent {
     /// Measures various transfer statistics.
     counters: ThruputCounters,
 
-    /// The channel on which to post alerts to user.
-    alert_tx: AlertSender,
-
     /// The configuration of this particular torrent.
     conf: TorrentConf,
 
@@ -209,7 +211,7 @@ impl Torrent {
     pub fn new(params: Params) -> (Self, Sender) {
         let Params {
             id,
-            disk,
+            disk_tx,
             info_hash,
             storage_info,
             own_pieces,
@@ -220,9 +222,9 @@ impl Torrent {
             alert_tx,
         } = params;
 
-        let (tx, port) = mpsc::unbounded_channel();
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let piece_picker = PiecePicker::new(own_pieces);
-        let port = port.fuse();
+        let cmd_rx = cmd_rx.fuse();
         let trackers = trackers.into_iter().map(TrackerEntry::new).collect();
         let completed_pieces = if conf.alerts.completed_pieces {
             Some(Vec::new())
@@ -236,26 +238,26 @@ impl Torrent {
                 available_peers: Vec::new(),
                 ctx: Arc::new(TorrentContext {
                     id,
-                    tx: tx.clone(),
+                    cmd_tx: cmd_tx.clone(),
                     piece_picker: Arc::new(RwLock::new(piece_picker)),
                     downloads: RwLock::new(HashMap::new()),
                     info_hash,
                     client_id,
-                    disk,
+                    alert_tx,
+                    disk_tx,
                     storage: storage_info,
                 }),
                 start_time: None,
                 run_duration: Duration::default(),
-                port,
+                cmd_rx,
                 trackers,
                 in_endgame: false,
                 counters: Default::default(),
                 listen_addr,
-                alert_tx,
                 conf,
                 completed_pieces,
             },
-            tx,
+            cmd_tx,
         )
     }
 
@@ -268,11 +270,45 @@ impl Torrent {
         // record the torrent starttime
         self.start_time = Some(Instant::now());
 
-        // TODO: if the torrent is a seed, don't send the started event, just an
-        // empty announce (verify this is the case)
-        self.announce_to_trackers(Instant::now(), Some(Event::Started))
-            .await?;
+        // if the torrent is a seed, don't send the started event, just an
+        // empty announce
+        let tracker_event =
+            if self.ctx.piece_picker.read().await.missing_piece_count() == 0 {
+                None
+            } else {
+                Some(Event::Started)
+            };
+        if let Err(e) = self
+            .announce_to_trackers(Instant::now(), tracker_event)
+            .await
+        {
+            // this is a torrent error, not a tracker error, as that is handled
+            // inside the function
+            self.ctx
+                .alert_tx
+                .send(Alert::Error(Error::Torrent {
+                    id: self.ctx.id,
+                    error: e,
+                }))
+                .ok();
+        }
 
+        if let Err(e) = self.run().await {
+            // send alert of torrent failure to user
+            self.ctx
+                .alert_tx
+                .send(Alert::Error(Error::Torrent {
+                    id: self.ctx.id,
+                    error: e,
+                }))
+                .ok();
+        }
+
+        Ok(())
+    }
+
+    /// Starts the torrent and runs until an error is encountered.
+    async fn run(&mut self) -> Result<()> {
         let mut tick_timer = time::interval(Duration::from_secs(1)).fuse();
         let mut last_tick_time = None;
 
@@ -313,7 +349,7 @@ impl Torrent {
                     );
                     self.peers.insert(addr, PeerSessionEntry::start_inbound(socket, session, tx));
                 }
-                cmd = self.port.select_next_some() => {
+                cmd = self.cmd_rx.select_next_some() => {
                     match cmd {
                         Command::PeerConnected { addr, id } => {
                             if let Some(peer) = self.peers.get_mut(&addr) {
@@ -431,7 +467,8 @@ impl Torrent {
 
         // send periodic stats update to api user
         let stats = self.build_stats().await;
-        self.alert_tx
+        self.ctx
+            .alert_tx
             .send(Alert::TorrentStats {
                 id: self.ctx.id,
                 stats: Box::new(stats),
@@ -594,6 +631,12 @@ impl Torrent {
                             e
                         );
                         tracker.error_count += 1;
+                        self.ctx.alert_tx.send(Alert::Error(
+                            Error::Tracker {
+                                id: self.ctx.id,
+                                error: e,
+                            },
+                        ))?;
                     }
                 }
                 tracker.last_announce_time = Some(now);
@@ -744,7 +787,10 @@ impl Torrent {
                 );
 
                 // notify user of torrent completion
-                self.alert_tx.send(Alert::TorrentComplete(self.ctx.id)).ok();
+                self.ctx
+                    .alert_tx
+                    .send(Alert::TorrentComplete(self.ctx.id))
+                    .ok();
 
                 // tell trackers we've finished
                 self.announce_to_trackers(
@@ -794,9 +840,7 @@ impl Torrent {
 
         // tell trackers we're leaving
         self.announce_to_trackers(Instant::now(), Some(Event::Stopped))
-            .await?;
-
-        return Ok(());
+            .await
     }
 }
 
@@ -821,7 +865,7 @@ struct PeerSessionEntry {
     thruput: ThruputStats,
 
     /// The peer session task's join handle, used during shutdown.
-    join_handle: Option<task::JoinHandle<Result<()>>>,
+    join_handle: Option<task::JoinHandle<peer::error::Result<()>>>,
 }
 
 impl PeerSessionEntry {
@@ -843,7 +887,7 @@ impl PeerSessionEntry {
 
     fn new(
         tx: peer::Sender,
-        join_handle: task::JoinHandle<Result<()>>,
+        join_handle: task::JoinHandle<peer::error::Result<()>>,
     ) -> Self {
         Self {
             tx: Some(tx),

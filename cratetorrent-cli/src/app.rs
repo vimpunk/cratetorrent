@@ -120,18 +120,13 @@ impl App {
             if let Some(pieces) = &stats.pieces.latest_completed {
                 // for each piece, check which
                 for piece in pieces.iter().cloned() {
-                    let piece_len = torrent
-                        .storage
-                        .piece_len(piece)
-                        .expect("engine sent invalid piece index");
+                    let piece_len = torrent.storage.piece_len(piece);
                     let mut torrent_piece_offset =
                         torrent.storage.torrent_piece_offset(piece);
                     let mut consumed = 0;
 
-                    let file_range = torrent
-                        .storage
-                        .files_intersecting_piece(piece)
-                        .expect("invalid file range");
+                    let file_range =
+                        torrent.storage.files_intersecting_piece(piece);
                     let files = &mut torrent.files[file_range];
                     for file in files.iter_mut() {
                         let remaining_piece_len = piece_len as u64 - consumed;

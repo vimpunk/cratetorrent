@@ -101,6 +101,10 @@
 //!                 println!("{} complete, shutting down", id);
 //!                 break;
 //!             }
+//!             Alert::Error(e) => {
+//!                 // this is where you'd handle recoverable errors
+//!                 println!("Engine error: {}", e);
+//!             }
 //!             _ => (),
 //!         }
 //!     }

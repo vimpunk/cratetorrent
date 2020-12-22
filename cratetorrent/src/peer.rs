@@ -31,18 +31,22 @@ use tokio::{
 use tokio_util::codec::{Framed, FramedParts};
 
 use crate::{
+    alert::Alert,
     counter::ThruputCounters,
+    disk,
     download::{BlockStatus, PieceDownload},
-    error::*,
+    error::Error,
     torrent::{self, TorrentContext},
     Bitfield, Block, BlockInfo, PeerId, PieceIndex,
 };
 use codec::*;
+use error::*;
 use state::*;
 
 pub use state::{ConnectionState, SessionState};
 
 mod codec;
+pub mod error;
 mod state;
 
 /// The most essential information of a peer session that is sent to torrent
@@ -88,7 +92,7 @@ enum Direction {
 /// This entity implements the BitTorrent wire protocol: it is responsible for
 /// exchanging the BitTorrent messages that drive a download.
 /// It only concerns itself with the network aspect of things: disk IO, for
-/// example, is delegated to the [disk task](crate::disk::DiskHandle).
+/// example, is delegated to the [disk task](crate::disk::Disk).
 ///
 /// A peer session may be started in two modes:
 /// - outbound: for connecting to another BitTorrent peer;
@@ -113,7 +117,7 @@ pub(crate) struct PeerSession {
     /// need to pass a copy of the sender with each block read to the disk task.
     cmd_tx: Sender,
     /// The port on which peer session receives commands.
-    cmd_port: Fuse<Receiver>,
+    cmd_rx: Fuse<Receiver>,
 
     /// Information about the peer.
     peer: PeerInfo,
@@ -197,7 +201,7 @@ impl PeerSession {
         torrent: Arc<TorrentContext>,
         addr: SocketAddr,
     ) -> (Self, Sender) {
-        let (cmd_tx, cmd_port) = mpsc::unbounded_channel();
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let piece_count = torrent.storage.piece_count;
         let log_target =
             format!("cratetorrent::peer [{}][{}]", torrent.id, addr);
@@ -205,7 +209,7 @@ impl PeerSession {
             Self {
                 torrent,
                 cmd_tx: cmd_tx.clone(),
-                cmd_port: cmd_port.fuse(),
+                cmd_rx: cmd_rx.fuse(),
                 peer: PeerInfo {
                     addr,
                     pieces: Bitfield::repeat(false, piece_count),
@@ -248,6 +252,7 @@ impl PeerSession {
     /// It returns if the connection is closed or an error occurs.
     pub async fn start_inbound(&mut self, socket: TcpStream) -> Result<()> {
         log::info!(target: &self.ctx.log_target, "Starting inbound session");
+        self.ctx.set_connection_state(ConnectionState::Connecting);
         let socket = Framed::new(socket, HandshakeCodec);
         self.start(socket, Direction::Inbound).await
     }
@@ -286,7 +291,7 @@ impl PeerSession {
             if peer_handshake.info_hash != self.torrent.info_hash {
                 log::info!(target: &self.ctx.log_target, "Peer handshake invalid info hash");
                 // abort session, info hash is invalid
-                return Err(Error::InvalidPeerInfoHash);
+                return Err(PeerError::InvalidInfoHash);
             }
 
             // set the peer's id
@@ -316,7 +321,7 @@ impl PeerSession {
             let socket = Framed::from_parts(new_parts);
 
             // update torrent of connection
-            self.torrent.tx.send(torrent::Command::PeerConnected {
+            self.torrent.cmd_tx.send(torrent::Command::PeerConnected {
                 addr: self.peer.addr,
                 id: peer_handshake.peer_id,
             })?;
@@ -334,15 +339,20 @@ impl PeerSession {
                     e
                 );
                 self.ctx.set_connection_state(ConnectionState::Disconnected);
-                self.torrent.tx.send(torrent::Command::PeerState {
+                self.torrent.cmd_tx.send(torrent::Command::PeerState {
                     addr: self.peer.addr,
                     info: self.session_info(),
                 })?;
+                self.torrent.alert_tx.send(Alert::Error(Error::Peer {
+                    id: self.torrent.id,
+                    addr: self.peer.addr,
+                    error: e,
+                }))?;
             }
         } else {
             log::error!(target: &self.ctx.log_target, "No handshake received");
             self.ctx.set_connection_state(ConnectionState::Disconnected);
-            self.torrent.tx.send(torrent::Command::PeerState {
+            self.torrent.cmd_tx.send(torrent::Command::PeerState {
                 addr: self.peer.addr,
                 info: self.session_info(),
             })?;
@@ -365,7 +375,7 @@ impl PeerSession {
         // send a state update message to torrent to actualize possible download
         // stats changes
         self.ctx.set_connection_state(ConnectionState::Disconnected);
-        self.torrent.tx.send(torrent::Command::PeerState {
+        self.torrent.cmd_tx.send(torrent::Command::PeerState {
             addr: self.peer.addr,
             info: self.session_info(),
         })?;
@@ -455,7 +465,7 @@ impl PeerSession {
                         self.handle_msg(&mut sink, msg).await?;
                     }
                 }
-                cmd = self.cmd_port.select_next_some() => {
+                cmd = self.cmd_rx.select_next_some() => {
                     match cmd {
                         Command::Block(block)=> {
                             self.send_block(&mut sink, block).await?;
@@ -500,7 +510,7 @@ impl PeerSession {
             ) >= INACTIVITY_TIMEOUT
         {
             log::warn!(target: &self.ctx.log_target, "Not interested in each other, disconnecting");
-            return Err(Error::InactivityTimeout);
+            return Err(PeerError::InactivityTimeout);
         }
 
         // resent requests if we have pending requests and more time has elapsed
@@ -518,7 +528,7 @@ impl PeerSession {
                 target: &self.ctx.log_target,
                 "State changed, updating torrent",
             );
-            self.torrent.tx.send(torrent::Command::PeerState {
+            self.torrent.cmd_tx.send(torrent::Command::PeerState {
                 addr: self.peer.addr,
                 info: self.session_info(),
             })?;
@@ -670,7 +680,7 @@ impl PeerSession {
             .piece_picker
             .write()
             .await
-            .register_availability(&bitfield)?;
+            .register_peer_pieces(&bitfield);
         self.peer.pieces = bitfield;
         self.peer.piece_count = self.peer.pieces.count_ones();
         if self.peer.piece_count == self.torrent.storage.piece_count {
@@ -703,7 +713,7 @@ impl PeerSession {
                     target: &self.ctx.log_target,
                     "Peer sent bitfield message not after handshake"
                 );
-                return Err(Error::BitfieldNotAfterHandshake);
+                return Err(PeerError::BitfieldNotAfterHandshake);
             }
             Message::KeepAlive => {
                 log::info!(target: &self.ctx.log_target, "Peer sent keep alive");
@@ -862,7 +872,7 @@ impl PeerSession {
 
                 let mut download = PieceDownload::new(
                     index,
-                    self.torrent.storage.piece_len(index)?,
+                    self.torrent.storage.piece_len(index),
                 );
 
                 download.pick_blocks(
@@ -986,9 +996,11 @@ impl PeerSession {
 
             // validate and save the block to disk by sending a write command to the
             // disk task
-            self.torrent
-                .disk
-                .write_block(self.torrent.id, block_info, data)?;
+            self.torrent.disk_tx.send(disk::Command::WriteBlock {
+                id: self.torrent.id,
+                block_info,
+                data,
+            })?;
         }
 
         Ok(())
@@ -1013,7 +1025,7 @@ impl PeerSession {
         // check if peer is not choked: if they are, they can't request blocks
         if self.ctx.state.is_peer_choked {
             log::warn!(target: &self.ctx.log_target, "Choked peer sent request");
-            return Err(Error::ChokedPeerSentRequest);
+            return Err(PeerError::RequestWhileChoked);
         }
 
         // check if peer is not already requesting this block
@@ -1028,11 +1040,11 @@ impl PeerSession {
 
         // validate and save the block to disk by sending a write command to the
         // disk task
-        self.torrent.disk.read_block(
-            self.torrent.id,
+        self.torrent.disk_tx.send(disk::Command::ReadBlock {
+            id: self.torrent.id,
             block_info,
-            self.cmd_tx.clone(),
-        )?;
+            result_tx: self.cmd_tx.clone(),
+        })?;
 
         Ok(())
     }
@@ -1082,14 +1094,7 @@ impl PeerSession {
         log::info!(target: &self.ctx.log_target, "Peer has piece {}", piece_index);
 
         // validate piece index
-        self.torrent.storage.piece_len(piece_index).map_err(|e| {
-            log::warn!(
-                target: &self.ctx.log_target,
-                "Peer sent have with invalid piece index: {}",
-                piece_index
-            );
-            e
-        })?;
+        self.validate_piece_index(piece_index)?;
 
         // It's important to check if peer already has this piece.
         // Otherwise we'd record duplicate pieces in the swarm in the below
@@ -1107,7 +1112,7 @@ impl PeerSession {
             .piece_picker
             .write()
             .await
-            .register_piece_availability(piece_index)?;
+            .register_peer_piece(piece_index);
 
         // we may have become interested in peer
         self.update_interest(sink, is_interested).await
@@ -1143,23 +1148,27 @@ impl PeerSession {
     /// torrent.
     fn validate_block_info(&self, info: &BlockInfo) -> Result<()> {
         log::trace!(target: &self.ctx.log_target, "Validating {}", info);
-        let piece_len = self
-            .torrent
-            .storage
-            .piece_len(info.piece_index)
-            .map_err(|_| {
-                log::warn!(
-                    target: &self.ctx.log_target,
-                    "Peer sent invalid piece index: {}",
-                    info.piece_index
-                );
-                Error::InvalidBlockInfo
-            })?;
+        self.validate_piece_index(info.piece_index)?;
+        let piece_len = self.torrent.storage.piece_len(info.piece_index);
         if info.len > 0 && info.offset + info.len <= piece_len {
             Ok(())
         } else {
             log::warn!(target: &self.ctx.log_target, "Peer sent invalid {}", info);
-            Err(Error::InvalidBlockInfo)
+            Err(PeerError::InvalidBlockInfo)
+        }
+    }
+
+    /// Validates that the index refers to a valid piece in torrent.
+    fn validate_piece_index(&self, index: PieceIndex) -> Result<()> {
+        if index < self.torrent.storage.piece_count {
+            Ok(())
+        } else {
+            log::warn!(
+                target: &self.ctx.log_target,
+                "Peer sent invalid piece index: {}",
+                index
+            );
+            Err(PeerError::InvalidPieceIndex)
         }
     }
 

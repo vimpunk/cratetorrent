@@ -23,107 +23,26 @@ mod io;
 
 /// Spawns a disk IO task and returns a tuple with the task join handle and the
 /// disk handle used for sending commands.
-pub(crate) fn spawn(
-    engine_tx: engine::Sender,
-) -> Result<(JoinHandle, DiskHandle)> {
+pub(crate) fn spawn(engine_tx: engine::Sender) -> Result<(JoinHandle, Sender)> {
     log::info!("Spawning disk IO task");
     let (mut disk, disk_tx) = Disk::new(engine_tx)?;
     // spawn disk event loop on a new task
     let join_handle = task::spawn(async move { disk.start().await });
     log::info!("Spawned disk IO task");
 
-    Ok((join_handle, DiskHandle(disk_tx)))
+    Ok((join_handle, disk_tx))
 }
 
 pub(crate) type JoinHandle = task::JoinHandle<Result<()>>;
 
-/// The handle for the disk task, used to execute disk IO related tasks.
-///
-/// The handle may be copied an arbitrary number of times. It is an abstraction
-/// over the means to communicate with the disk IO task. For now, mpsc channels
-/// are used for issuing commands and receiving results, but this may well
-/// change later on, hence hiding this behind this handle type.
-#[derive(Clone)]
-pub(crate) struct DiskHandle(Sender);
-
-impl DiskHandle {
-    /// Creates a new torrent in the disk task.
-    ///
-    /// This instructs the disk task to set up everything needed for a new
-    /// torrent, which includes in-memory metadata storage and setting up the
-    /// torrent's file system structure on disk.
-    pub fn allocate_new_torrent(
-        &self,
-        id: TorrentId,
-        storage_info: StorageInfo,
-        piece_hashes: Vec<u8>,
-        torrent_tx: torrent::Sender,
-    ) -> Result<()> {
-        log::trace!("Allocating new torrent {}", id);
-        self.0
-            .send(Command::NewTorrent {
-                id,
-                storage_info,
-                piece_hashes,
-                torrent_tx,
-            })
-            .map_err(Error::from)
-    }
-
-    /// Queues a block for eventual writing to disk.
-    ///
-    /// Once the block is saved, the result is advertised to its
-    /// `AlertReceiver`.
-    pub fn write_block(
-        &self,
-        id: TorrentId,
-        block_info: BlockInfo,
-        data: Vec<u8>,
-    ) -> Result<()> {
-        log::trace!("Saving block {:?} to disk", block_info);
-        self.0
-            .send(Command::WriteBlock {
-                id,
-                block_info,
-                data,
-            })
-            .map_err(Error::from)
-    }
-
-    /// Issues a request for a block on the disk.
-    ///
-    /// Once the block is saved, the result is advertised to its
-    /// `AlertReceiver`.
-    pub fn read_block(
-        &self,
-        id: TorrentId,
-        block_info: BlockInfo,
-        result_tx: peer::Sender,
-    ) -> Result<()> {
-        log::trace!("Reading block {:?} from disk", block_info);
-        self.0
-            .send(Command::ReadBlock {
-                id,
-                block_info,
-                result_tx,
-            })
-            .map_err(Error::from)
-    }
-
-    /// Shuts down the disk IO task.
-    pub fn shutdown(&self) -> Result<()> {
-        log::trace!("Shutting down disk IO task");
-        self.0.send(Command::Shutdown).map_err(Error::from)
-    }
-}
-
 /// The channel for sendng commands to the disk task.
-type Sender = UnboundedSender<Command>;
+pub(crate) type Sender = UnboundedSender<Command>;
 /// The channel the disk task uses to listen for commands.
 type Receiver = UnboundedReceiver<Command>;
 
 /// The type of commands that the disk can execute.
-enum Command {
+#[derive(Debug)]
+pub(crate) enum Command {
     /// Allocate a new torrent in `Disk`.
     NewTorrent {
         id: TorrentId,
@@ -332,7 +251,7 @@ mod tests {
     #[tokio::test]
     async fn should_allocate_new_torrent() {
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let (_, disk_handle) = spawn(tx).unwrap();
+        let (_, disk_tx) = spawn(tx).unwrap();
 
         let Env {
             id,
@@ -343,13 +262,13 @@ mod tests {
         } = Env::new("allocate_new_torrent");
 
         // allocate torrent via channel
-        disk_handle
-            .allocate_new_torrent(
+        disk_tx
+            .send(Command::NewTorrent {
                 id,
-                info.clone(),
-                piece_hashes.clone(),
-                torrent_tx.clone(),
-            )
+                storage_info: info.clone(),
+                piece_hashes: piece_hashes.clone(),
+                torrent_tx: torrent_tx.clone(),
+            })
             .unwrap();
         // wait for result on alert port
         let alert = rx.recv().await.unwrap();
@@ -366,8 +285,13 @@ mod tests {
         assert!(info.download_dir.join(&file.path).is_file());
 
         // try to allocate the same torrent a second time
-        disk_handle
-            .allocate_new_torrent(id, info, piece_hashes, torrent_tx.clone())
+        disk_tx
+            .send(Command::NewTorrent {
+                id,
+                storage_info: info,
+                piece_hashes,
+                torrent_tx: torrent_tx.clone(),
+            })
             .unwrap();
 
         // we should get an already exists error
@@ -386,7 +310,7 @@ mod tests {
     #[tokio::test]
     async fn should_write_all_pieces() {
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let (_, disk_handle) = spawn(tx).unwrap();
+        let (_, disk_tx) = spawn(tx).unwrap();
 
         let Env {
             id,
@@ -398,13 +322,13 @@ mod tests {
         } = Env::new("write_all_pieces");
 
         // allocate torrent via channel
-        disk_handle
-            .allocate_new_torrent(
+        disk_tx
+            .send(Command::NewTorrent {
                 id,
-                info.clone(),
-                piece_hashes,
-                torrent_tx.clone(),
-            )
+                storage_info: info.clone(),
+                piece_hashes: piece_hashes.clone(),
+                torrent_tx: torrent_tx.clone(),
+            })
             .unwrap();
         // wait for result on alert port
         rx.recv().await.expect("cannot allocate torrent");
@@ -417,7 +341,13 @@ mod tests {
                 let data = &piece[block.offset as usize..block_end as usize];
                 debug_assert_eq!(data.len(), block.len as usize);
                 println!("Writing piece {} block {}", index, block);
-                disk_handle.write_block(id, block, data.to_vec()).unwrap();
+                disk_tx
+                    .send(Command::WriteBlock {
+                        id,
+                        block_info: block,
+                        data: data.to_vec(),
+                    })
+                    .unwrap();
             });
 
             // wait for disk write result
@@ -443,7 +373,7 @@ mod tests {
     #[tokio::test]
     async fn should_reject_writing_invalid_piece() {
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let (_, disk_handle) = spawn(tx).unwrap();
+        let (_, disk_tx) = spawn(tx).unwrap();
 
         let Env {
             id,
@@ -455,13 +385,13 @@ mod tests {
         } = Env::new("write_invalid_piece");
 
         // allocate torrent via channel
-        disk_handle
-            .allocate_new_torrent(
+        disk_tx
+            .send(Command::NewTorrent {
                 id,
-                info.clone(),
-                piece_hashes,
-                torrent_tx.clone(),
-            )
+                storage_info: info.clone(),
+                piece_hashes: piece_hashes.clone(),
+                torrent_tx: torrent_tx.clone(),
+            })
             .unwrap();
         // wait for result on alert port
         rx.recv().await.expect("cannot allocate torrent");
@@ -476,7 +406,13 @@ mod tests {
                 &invalid_piece[block.offset as usize..block_end as usize];
             debug_assert_eq!(data.len(), block.len as usize);
             println!("Writing invalid piece {} block {}", index, block);
-            disk_handle.write_block(id, block, data.to_vec()).unwrap();
+            disk_tx
+                .send(Command::WriteBlock {
+                    id,
+                    block_info: block,
+                    data: data.to_vec(),
+                })
+                .unwrap();
         });
 
         // wait for disk write result
@@ -495,7 +431,7 @@ mod tests {
     #[tokio::test]
     async fn should_read_piece_blocks() {
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let (_, disk_handle) = spawn(tx).unwrap();
+        let (_, disk_tx) = spawn(tx).unwrap();
 
         let Env {
             id,
@@ -507,13 +443,13 @@ mod tests {
         } = Env::new("read_piece_blocks");
 
         // allocate torrent via channel
-        disk_handle
-            .allocate_new_torrent(
+        disk_tx
+            .send(Command::NewTorrent {
                 id,
-                info.clone(),
-                piece_hashes,
-                torrent_tx.clone(),
-            )
+                storage_info: info.clone(),
+                piece_hashes: piece_hashes.clone(),
+                torrent_tx: torrent_tx.clone(),
+            })
             .unwrap();
         // wait for result on alert port
         rx.recv().await.expect("cannot allocate torrent");
@@ -526,7 +462,13 @@ mod tests {
             let data = &piece[block.offset as usize..block_end as usize];
             debug_assert_eq!(data.len(), block.len as usize);
             println!("Writing piece {} block {}", index, block);
-            disk_handle.write_block(id, block, data.to_vec()).unwrap();
+            disk_tx
+                .send(Command::WriteBlock {
+                    id,
+                    block_info: block,
+                    data: data.to_vec(),
+                })
+                .unwrap();
         });
 
         // wait for disk write result
@@ -548,7 +490,13 @@ mod tests {
                 len: block_len,
             };
             // read block
-            disk_handle.read_block(id, block_info, tx.clone()).unwrap();
+            disk_tx
+                .send(Command::ReadBlock {
+                    id,
+                    block_info,
+                    result_tx: tx.clone(),
+                })
+                .unwrap();
 
             // wait for result
             if let Some(peer::Command::Block(block)) = rx.recv().await {

@@ -28,7 +28,7 @@ use tokio::{
 use crate::{
     alert::{AlertReceiver, AlertSender},
     conf::{Conf, TorrentConf},
-    disk::{self, error::NewTorrentError, DiskHandle},
+    disk::{self, error::NewTorrentError},
     error::*,
     metainfo::Metainfo,
     storage_info::StorageInfo,
@@ -49,7 +49,7 @@ pub fn spawn(conf: Conf) -> Result<(EngineHandle, AlertReceiver)> {
     log::info!("Spawning engine task");
 
     // create alert channels and return alert port to user
-    let (alert_tx, alert_port) = mpsc::unbounded_channel();
+    let (alert_tx, alert_rx) = mpsc::unbounded_channel();
     let (mut engine, tx) = Engine::new(conf, alert_tx)?;
 
     let join_handle = task::spawn(async move { engine.run().await });
@@ -60,7 +60,7 @@ pub fn spawn(conf: Conf) -> Result<(EngineHandle, AlertReceiver)> {
             tx,
             join_handle: Some(join_handle),
         },
-        alert_port,
+        alert_rx,
     ))
 }
 
@@ -166,10 +166,10 @@ struct Engine {
 
     /// The port on which other entities in the engine, or the API consumer
     /// sends the engine commands.
-    port: Receiver,
+    cmd_rx: Receiver,
 
     /// The disk channel.
-    disk: DiskHandle,
+    disk_tx: disk::Sender,
     disk_join_handle: Option<disk::JoinHandle>,
 
     /// The channel on which tasks in the engine post alerts to user.
@@ -185,25 +185,25 @@ struct TorrentEntry {
     /// The torrent's command channel on which engine sends commands to torrent.
     tx: torrent::Sender,
     /// The torrent task's join handle, used during shutdown.
-    join_handle: Option<JoinHandle>,
+    join_handle: Option<task::JoinHandle<torrent::error::Result<()>>>,
 }
 
 impl Engine {
     /// Creates a new engine, spawning the disk task.
     fn new(conf: Conf, alert_tx: AlertSender) -> Result<(Self, Sender)> {
-        let (tx, port) = mpsc::unbounded_channel();
-        let (disk_join_handle, disk) = disk::spawn(tx.clone())?;
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        let (disk_join_handle, disk_tx) = disk::spawn(cmd_tx.clone())?;
 
         Ok((
             Self {
                 torrents: HashMap::new(),
-                port,
-                disk,
+                cmd_rx,
+                disk_tx,
                 disk_join_handle: Some(disk_join_handle),
                 alert_tx,
                 conf,
             },
-            tx,
+            cmd_tx,
         ))
     }
 
@@ -212,7 +212,7 @@ impl Engine {
     async fn run(&mut self) -> Result<()> {
         log::info!("Starting engine");
 
-        while let Some(cmd) = self.port.next().await {
+        while let Some(cmd) = self.cmd_rx.next().await {
             match cmd {
                 Command::CreateTorrent { id, params } => {
                     self.create_torrent(id, params).await?;
@@ -267,7 +267,7 @@ impl Engine {
         // a new torrent (or maybe in `TorrentConf`).
         let (mut torrent, torrent_tx) = Torrent::new(torrent::Params {
             id,
-            disk: self.disk.clone(),
+            disk_tx: self.disk_tx.clone(),
             info_hash: params.metainfo.info_hash,
             storage_info: storage_info.clone(),
             own_pieces,
@@ -297,12 +297,12 @@ impl Engine {
         //
         // Thus there is little chance to receive data and thus cause a disk
         // write or disk read immediatey.
-        self.disk.allocate_new_torrent(
+        self.disk_tx.send(disk::Command::NewTorrent {
             id,
-            storage_info,
-            params.metainfo.pieces,
-            torrent_tx.clone(),
-        )?;
+            storage_info: storage_info.clone(),
+            piece_hashes: params.metainfo.pieces,
+            torrent_tx: torrent_tx.clone(),
+        })?;
 
         let seeds = params.mode.seeds();
         let join_handle =
@@ -345,7 +345,7 @@ impl Engine {
         }
 
         // send a shutdown command to disk
-        self.disk.shutdown()?;
+        self.disk_tx.send(disk::Command::Shutdown)?;
         // and join on its handle
         self.disk_join_handle
             .take()

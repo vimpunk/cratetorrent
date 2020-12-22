@@ -2,6 +2,12 @@
 name = "cratetorrent"
 version = "0.1.0"
 authors = ["mandreyel <mandreyel@protonmail.com>"]
+description = "A simple BitTorrent V1 engine library"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/mandreyel/cratetorrent/"
+homepage = "https://github.com/mandreyel/cratetorrent/"
+keywords = ["bittorrent", "torrent", "p2p", "networking"]
+categories = ["network-programming"]
 edition = "2018"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
