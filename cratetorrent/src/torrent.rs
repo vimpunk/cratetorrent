@@ -23,8 +23,8 @@ use crate::{
     conf::TorrentConf,
     counter::ThruputCounters,
     disk::{
+        self,
         error::{ReadError, WriteError},
-        DiskHandle,
     },
     download::PieceDownload,
     error::*,
@@ -116,7 +116,7 @@ pub(crate) struct TorrentContext {
 
     /// The handle to the disk IO task, used to issue commands on it. A copy of
     /// this handle is passed down to each peer session.
-    pub disk: DiskHandle,
+    pub disk_tx: disk::Sender,
     /// Info about the torrent's storage (piece length, download length, etc).
     pub storage: StorageInfo,
 }
@@ -124,7 +124,7 @@ pub(crate) struct TorrentContext {
 /// Parameters for the torrent constructor.
 pub(crate) struct Params {
     pub id: TorrentId,
-    pub disk: DiskHandle,
+    pub disk_tx: disk::Sender,
     pub info_hash: Sha1Hash,
     pub storage_info: StorageInfo,
     pub own_pieces: Bitfield,
@@ -209,7 +209,7 @@ impl Torrent {
     pub fn new(params: Params) -> (Self, Sender) {
         let Params {
             id,
-            disk,
+            disk_tx,
             info_hash,
             storage_info,
             own_pieces,
@@ -241,7 +241,7 @@ impl Torrent {
                     downloads: RwLock::new(HashMap::new()),
                     info_hash,
                     client_id,
-                    disk,
+                    disk_tx,
                     storage: storage_info,
                 }),
                 start_time: None,
@@ -821,7 +821,7 @@ struct PeerSessionEntry {
     thruput: ThruputStats,
 
     /// The peer session task's join handle, used during shutdown.
-    join_handle: Option<task::JoinHandle<Result<()>>>,
+    join_handle: Option<task::JoinHandle<peer::error::Result<()>>>,
 }
 
 impl PeerSessionEntry {
@@ -843,7 +843,7 @@ impl PeerSessionEntry {
 
     fn new(
         tx: peer::Sender,
-        join_handle: task::JoinHandle<Result<()>>,
+        join_handle: task::JoinHandle<peer::error::Result<()>>,
     ) -> Self {
         Self {
             tx: Some(tx),

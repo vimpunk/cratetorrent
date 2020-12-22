@@ -1,6 +1,6 @@
 use std::{ops::Range, path::PathBuf};
 
-use crate::{error::*, metainfo::Metainfo, FileIndex, PieceIndex};
+use crate::{metainfo::Metainfo, FileIndex, PieceIndex};
 
 /// Information about a torrent's file.
 #[derive(Clone, Debug)]
@@ -129,15 +129,21 @@ impl StorageInfo {
 
     /// Returns the zero-based indices of the files of torrent that intersect
     /// with the piece.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the piece index is invalid. Validation must happen at the
+    /// protocol level. The internals of the engine work on the assumption that
+    /// piece indices are valid.
     pub fn files_intersecting_piece(
         &self,
         index: PieceIndex,
-    ) -> Result<Range<FileIndex>> {
+    ) -> Range<FileIndex> {
         log::trace!("Returning files intersecting piece {}", index);
         let piece_offset = index as u64 * self.piece_len as u64;
-        let piece_end = piece_offset + self.piece_len(index)? as u64;
+        let piece_end = piece_offset + self.piece_len(index) as u64;
         let files = self.files_intersecting_bytes(piece_offset..piece_end);
-        Ok(files)
+        files
     }
 
     /// Returns the files that overlap with the given left-inclusive range of
@@ -207,17 +213,19 @@ impl StorageInfo {
     }
 
     /// Returns the length of the piece at the given index.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the piece index is invalid. Validation must happen at the
+    /// protocol level. The internals of the engine work on the assumption that
+    /// piece indices are valid.
     #[allow(clippy::comparison_chain)]
-    pub fn piece_len(&self, index: PieceIndex) -> Result<u32> {
+    pub fn piece_len(&self, index: PieceIndex) -> u32 {
+        assert!(index < self.piece_count, "piece index out of range");
         if index == self.piece_count - 1 {
-            Ok(self.last_piece_len)
-        } else if index < self.piece_count - 1 {
-            Ok(self.piece_len)
+            self.last_piece_len
         } else {
-            // TODO: consider panicking instead, as it's more or less an application
-            // error to provide an out of bounds index
-            log::error!("Piece {} is invalid for torrent: {:?}", index, self);
-            Err(Error::InvalidPieceIndex)
+            self.piece_len
         }
     }
 }
@@ -316,10 +324,10 @@ mod tests {
             files,
         };
         // all 4 pieces are in the same file
-        assert_eq!(info.files_intersecting_piece(0).unwrap(), 0..1);
-        assert_eq!(info.files_intersecting_piece(1).unwrap(), 0..1);
-        assert_eq!(info.files_intersecting_piece(2).unwrap(), 0..1);
-        assert_eq!(info.files_intersecting_piece(3).unwrap(), 0..1);
+        assert_eq!(info.files_intersecting_piece(0), 0..1);
+        assert_eq!(info.files_intersecting_piece(1), 0..1);
+        assert_eq!(info.files_intersecting_piece(2), 0..1);
+        assert_eq!(info.files_intersecting_piece(3), 0..1);
 
         // multi-file
         //
@@ -396,17 +404,15 @@ mod tests {
             files,
         };
         // piece 0 intersects with files 0 and 1
-        assert_eq!(info.files_intersecting_piece(0).unwrap(), 0..2);
+        assert_eq!(info.files_intersecting_piece(0), 0..2);
         // piece 1 intersects with files 1, 2, 3
-        assert_eq!(info.files_intersecting_piece(1).unwrap(), 1..4);
+        assert_eq!(info.files_intersecting_piece(1), 1..4);
         // piece 2 intersects with files 3 and 4
-        assert_eq!(info.files_intersecting_piece(2).unwrap(), 3..5);
+        assert_eq!(info.files_intersecting_piece(2), 3..5);
         // piece 3 intersects with only file 5
-        assert_eq!(info.files_intersecting_piece(3).unwrap(), 5..6);
+        assert_eq!(info.files_intersecting_piece(3), 5..6);
         // last piece 4 intersects with only file 6
-        assert_eq!(info.files_intersecting_piece(4).unwrap(), 6..7);
-        // piece 5 is invalid
-        assert!(info.files_intersecting_piece(5).is_err());
+        assert_eq!(info.files_intersecting_piece(4), 6..7);
     }
 
     #[test]
