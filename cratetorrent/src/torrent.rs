@@ -96,7 +96,7 @@ pub(crate) struct TorrentContext {
     /// A copy of the torrent channel sender. This is not used by torrent iself,
     /// but by the peer session tasks to which an arc copy of this torrent
     /// context is given.
-    pub tx: Sender,
+    pub cmd_tx: Sender,
 
     /// The piece picker picks the next most optimal piece to download and is
     /// shared by all peers in a torrent.
@@ -153,7 +153,7 @@ pub(crate) struct Torrent {
     ///
     /// The channel has to be wrapped in a `stream::Fuse` so that we can
     /// `select!` on it in the torrent event loop.
-    port: Fuse<Receiver>,
+    cmd_rx: Fuse<Receiver>,
     /// The trackers we can announce to.
     trackers: Vec<TrackerEntry>,
 
@@ -220,9 +220,9 @@ impl Torrent {
             alert_tx,
         } = params;
 
-        let (tx, port) = mpsc::unbounded_channel();
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let piece_picker = PiecePicker::new(own_pieces);
-        let port = port.fuse();
+        let cmd_rx = cmd_rx.fuse();
         let trackers = trackers.into_iter().map(TrackerEntry::new).collect();
         let completed_pieces = if conf.alerts.completed_pieces {
             Some(Vec::new())
@@ -236,7 +236,7 @@ impl Torrent {
                 available_peers: Vec::new(),
                 ctx: Arc::new(TorrentContext {
                     id,
-                    tx: tx.clone(),
+                    cmd_tx: cmd_tx.clone(),
                     piece_picker: Arc::new(RwLock::new(piece_picker)),
                     downloads: RwLock::new(HashMap::new()),
                     info_hash,
@@ -246,7 +246,7 @@ impl Torrent {
                 }),
                 start_time: None,
                 run_duration: Duration::default(),
-                port,
+                cmd_rx,
                 trackers,
                 in_endgame: false,
                 counters: Default::default(),
@@ -255,7 +255,7 @@ impl Torrent {
                 conf,
                 completed_pieces,
             },
-            tx,
+            cmd_tx,
         )
     }
 
@@ -313,7 +313,7 @@ impl Torrent {
                     );
                     self.peers.insert(addr, PeerSessionEntry::start_inbound(socket, session, tx));
                 }
-                cmd = self.port.select_next_some() => {
+                cmd = self.cmd_rx.select_next_some() => {
                     match cmd {
                         Command::PeerConnected { addr, id } => {
                             if let Some(peer) = self.peers.get_mut(&addr) {

@@ -113,7 +113,7 @@ pub(crate) struct PeerSession {
     /// need to pass a copy of the sender with each block read to the disk task.
     cmd_tx: Sender,
     /// The port on which peer session receives commands.
-    cmd_port: Fuse<Receiver>,
+    cmd_rx: Fuse<Receiver>,
 
     /// Information about the peer.
     peer: PeerInfo,
@@ -197,7 +197,7 @@ impl PeerSession {
         torrent: Arc<TorrentContext>,
         addr: SocketAddr,
     ) -> (Self, Sender) {
-        let (cmd_tx, cmd_port) = mpsc::unbounded_channel();
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let piece_count = torrent.storage.piece_count;
         let log_target =
             format!("cratetorrent::peer [{}][{}]", torrent.id, addr);
@@ -205,7 +205,7 @@ impl PeerSession {
             Self {
                 torrent,
                 cmd_tx: cmd_tx.clone(),
-                cmd_port: cmd_port.fuse(),
+                cmd_rx: cmd_rx.fuse(),
                 peer: PeerInfo {
                     addr,
                     pieces: Bitfield::repeat(false, piece_count),
@@ -248,6 +248,7 @@ impl PeerSession {
     /// It returns if the connection is closed or an error occurs.
     pub async fn start_inbound(&mut self, socket: TcpStream) -> Result<()> {
         log::info!(target: &self.ctx.log_target, "Starting inbound session");
+        self.ctx.set_connection_state(ConnectionState::Connecting);
         let socket = Framed::new(socket, HandshakeCodec);
         self.start(socket, Direction::Inbound).await
     }
@@ -316,7 +317,7 @@ impl PeerSession {
             let socket = Framed::from_parts(new_parts);
 
             // update torrent of connection
-            self.torrent.tx.send(torrent::Command::PeerConnected {
+            self.torrent.cmd_tx.send(torrent::Command::PeerConnected {
                 addr: self.peer.addr,
                 id: peer_handshake.peer_id,
             })?;
@@ -334,7 +335,7 @@ impl PeerSession {
                     e
                 );
                 self.ctx.set_connection_state(ConnectionState::Disconnected);
-                self.torrent.tx.send(torrent::Command::PeerState {
+                self.torrent.cmd_tx.send(torrent::Command::PeerState {
                     addr: self.peer.addr,
                     info: self.session_info(),
                 })?;
@@ -342,7 +343,7 @@ impl PeerSession {
         } else {
             log::error!(target: &self.ctx.log_target, "No handshake received");
             self.ctx.set_connection_state(ConnectionState::Disconnected);
-            self.torrent.tx.send(torrent::Command::PeerState {
+            self.torrent.cmd_tx.send(torrent::Command::PeerState {
                 addr: self.peer.addr,
                 info: self.session_info(),
             })?;
@@ -365,7 +366,7 @@ impl PeerSession {
         // send a state update message to torrent to actualize possible download
         // stats changes
         self.ctx.set_connection_state(ConnectionState::Disconnected);
-        self.torrent.tx.send(torrent::Command::PeerState {
+        self.torrent.cmd_tx.send(torrent::Command::PeerState {
             addr: self.peer.addr,
             info: self.session_info(),
         })?;
@@ -455,7 +456,7 @@ impl PeerSession {
                         self.handle_msg(&mut sink, msg).await?;
                     }
                 }
-                cmd = self.cmd_port.select_next_some() => {
+                cmd = self.cmd_rx.select_next_some() => {
                     match cmd {
                         Command::Block(block)=> {
                             self.send_block(&mut sink, block).await?;
@@ -518,7 +519,7 @@ impl PeerSession {
                 target: &self.ctx.log_target,
                 "State changed, updating torrent",
             );
-            self.torrent.tx.send(torrent::Command::PeerState {
+            self.torrent.cmd_tx.send(torrent::Command::PeerState {
                 addr: self.peer.addr,
                 info: self.session_info(),
             })?;

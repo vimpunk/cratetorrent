@@ -49,7 +49,7 @@ pub fn spawn(conf: Conf) -> Result<(EngineHandle, AlertReceiver)> {
     log::info!("Spawning engine task");
 
     // create alert channels and return alert port to user
-    let (alert_tx, alert_port) = mpsc::unbounded_channel();
+    let (alert_tx, alert_rx) = mpsc::unbounded_channel();
     let (mut engine, tx) = Engine::new(conf, alert_tx)?;
 
     let join_handle = task::spawn(async move { engine.run().await });
@@ -60,7 +60,7 @@ pub fn spawn(conf: Conf) -> Result<(EngineHandle, AlertReceiver)> {
             tx,
             join_handle: Some(join_handle),
         },
-        alert_port,
+        alert_rx,
     ))
 }
 
@@ -166,7 +166,7 @@ struct Engine {
 
     /// The port on which other entities in the engine, or the API consumer
     /// sends the engine commands.
-    port: Receiver,
+    cmd_rx: Receiver,
 
     /// The disk channel.
     disk: DiskHandle,
@@ -191,19 +191,19 @@ struct TorrentEntry {
 impl Engine {
     /// Creates a new engine, spawning the disk task.
     fn new(conf: Conf, alert_tx: AlertSender) -> Result<(Self, Sender)> {
-        let (tx, port) = mpsc::unbounded_channel();
-        let (disk_join_handle, disk) = disk::spawn(tx.clone())?;
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        let (disk_join_handle, disk) = disk::spawn(cmd_tx.clone())?;
 
         Ok((
             Self {
                 torrents: HashMap::new(),
-                port,
+                cmd_rx,
                 disk,
                 disk_join_handle: Some(disk_join_handle),
                 alert_tx,
                 conf,
             },
-            tx,
+            cmd_tx,
         ))
     }
 
@@ -212,7 +212,7 @@ impl Engine {
     async fn run(&mut self) -> Result<()> {
         log::info!("Starting engine");
 
-        while let Some(cmd) = self.port.next().await {
+        while let Some(cmd) = self.cmd_rx.next().await {
             match cmd {
                 Command::CreateTorrent { id, params } => {
                     self.create_torrent(id, params).await?;
