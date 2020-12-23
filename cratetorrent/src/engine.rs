@@ -299,7 +299,7 @@ impl Engine {
         // write or disk read immediatey.
         self.disk_tx.send(disk::Command::NewTorrent {
             id,
-            storage_info: storage_info.clone(),
+            storage_info,
             piece_hashes: params.metainfo.pieces,
             torrent_tx: torrent_tx.clone(),
         })?;
