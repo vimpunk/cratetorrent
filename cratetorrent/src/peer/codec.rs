@@ -58,8 +58,7 @@ pub(crate) const PROTOCOL_STRING: &str = "BitTorrent protocol";
 /// receive and send buffers.
 pub(crate) struct HandshakeCodec;
 
-impl Encoder for HandshakeCodec {
-    type Item = Handshake;
+impl Encoder<Handshake> for HandshakeCodec {
     type Error = io::Error;
 
     fn encode(
@@ -284,13 +283,12 @@ impl BlockInfo {
 /// handshake).
 pub(crate) struct PeerCodec;
 
-impl Encoder for PeerCodec {
-    type Item = Message;
+impl Encoder<Message> for PeerCodec {
     type Error = io::Error;
 
     fn encode(
         &mut self,
-        msg: Self::Item,
+        msg: Message,
         buf: &mut BytesMut,
     ) -> io::Result<()> {
         use Message::*;
