@@ -142,8 +142,7 @@ impl StorageInfo {
         log::trace!("Returning files intersecting piece {}", index);
         let piece_offset = index as u64 * self.piece_len as u64;
         let piece_end = piece_offset + self.piece_len(index) as u64;
-        let files = self.files_intersecting_bytes(piece_offset..piece_end);
-        files
+        self.files_intersecting_bytes(piece_offset..piece_end)
     }
 
     /// Returns the files that overlap with the given left-inclusive range of
