@@ -22,7 +22,7 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 pub struct Args {
     /// Whether to 'seed' or 'download' the torrent.
     #[structopt(
-        short, long,
+        long,
         parse(from_str = parse_mode),
         default_value = "Mode::Download { seeds: Vec::new() }",
     )]
