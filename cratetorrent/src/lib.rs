@@ -165,17 +165,15 @@ pub mod storage_info;
 pub mod torrent;
 mod tracker;
 
-/// Each torrent gets a randomly assigned ID that is unique within the
-/// engine. This id is used in engine APIs to interact with torrents.
+/// Each torrent gets a randomly assigned ID that is globally unique.
+/// This id is used in engine APIs to interact with torrents.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Ord, PartialOrd, Hash)]
 pub struct TorrentId(u32);
 
 impl TorrentId {
-    /// Produces a new unique torrent id per process.
+    /// Produces a new unique torrent id.
     pub(crate) fn new() -> Self {
-        lazy_static::lazy_static! {
-            static ref TORRENT_ID: AtomicU32 = AtomicU32::new(0);
-        }
+        static TORRENT_ID: AtomicU32 = AtomicU32::new(0);
 
         // the atomic is not used to synchronize data access around it so
         // relaxed ordering is fine for our purposes
