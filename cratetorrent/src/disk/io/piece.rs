@@ -5,13 +5,16 @@ use std::{
 };
 
 use sha1::{Digest, Sha1};
+use cfg_if::cfg_if;
 
 use crate::{
     block_count, block_len,
     disk::{error::*, io::file::TorrentFile},
-    iovecs::IoVec,
     CachedBlock, FileIndex, Sha1Hash,
 };
+
+#[cfg(target_os = "linux")]
+use crate::iovecs::IoVec;
 
 /// An in-progress piece download that keeps in memory the so far downloaded
 /// blocks and the expected hash of the piece.
@@ -88,15 +91,49 @@ impl Piece {
         torrent_piece_offset: u64,
         files: &[sync::RwLock<TorrentFile>],
     ) -> Result<(), WriteError> {
-        // convert the blocks to IO slices that the underlying
-        // systemcall can deal with
-        let mut blocks: Vec<_> = self
-            .blocks
-            .values()
-            .map(|b| IoVec::from_slice(&b))
-            .collect();
-        // the actual slice of blocks being worked on
-        let mut bufs = blocks.as_mut_slice();
+        cfg_if! {
+            if #[cfg(target_os = "linux")] {
+                // convert the blocks to IO slices that the underlying
+                // pwritev syscall can deal with
+                let mut blocks: Vec<_> = self
+                    .blocks
+                    .values()
+                    .map(|b| IoVec::from_slice(&b))
+                    .collect();
+                // the actual slice of blocks being worked on
+                let mut bufs = blocks.as_mut_slice();
+            } else {
+                // (the same situation is in the `read` method below)
+                //
+                // We don't have pwritev The Convenient. Instead, we have two options:
+                //
+                // 1. Coalesce the slices to a continuous preallocated memory buffer and
+                //    write it at once.
+                // 2. Iterate through the slices and issue a separate write call for each.
+                //
+                // The first option implies preallocating a short-living buffer
+                // and destroying it shortly after. The second option
+                // implies issuing a big number of writes, and possibly disk I/O operations.
+                //
+                // We've chosen the first option. Piece size is commonly less than 1MB
+                // which is less than the page size, so the (re)allocation should be fast enough.
+                // Careful benchmarking, while necessary when the project gets to the optimization phase,
+                // is something I don't feel like doing just yet, and thus left as TODO
+                // and an exercise to the reader.
+                //
+                // (another potential optimization is to preserve the buffer between `Piece::write` calls,
+                // storing it in a `thread_local!` storage, but then the function will cease to be reentrant)
+                let len = self.blocks.values().map(|s|s.len()).sum();
+                let mut buffer = self
+                    .blocks
+                    .values()
+                    .fold(Vec::with_capacity(len), |mut buf, slice| {
+                        buf.extend_from_slice(slice);
+                        buf
+                    });
+                let mut buffer = &buffer;
+            }
+        }
 
         // loop through all files piece overlaps with and write that part of
         // piece to file
@@ -119,18 +156,24 @@ impl Piece {
             // an empty file slice shouldn't occur as it would mean that piece
             // was thought to span fewer files than it actually does
             debug_assert!(file_slice.len > 0);
-            // the write buffer should still contain bytes to write
-            debug_assert!(!bufs.is_empty());
-            debug_assert!(!bufs[0].as_slice().is_empty());
 
-            // write to file
-            let tail = file.write(file_slice, bufs)?;
+            cfg_if! {
+                if #[cfg(target_os = "linux")] {
+                    // the write buffer should still contain bytes to write
+                    debug_assert!(!bufs.is_empty());
+                    debug_assert!(!bufs[0].as_slice().is_empty());
 
-            // `write_vectored_at` only writes at most `slice.len` bytes of
-            // `bufs` to disk and returns the portion that wasn't
-            // written, which we can use to set the write buffer for the next
-            // round
-            bufs = tail;
+                    // write to file
+                    // `write_*` only writes at most `slice.len` bytes of
+                    // `bufs` to disk and returns the portion that wasn't
+                    // written, which we can use to set the write buffer for the next
+                    // round
+                    bufs = file.write_vectored(file_slice, bufs)?;
+                } else {
+                    debug_assert!(!buffer.is_empty());
+                    buffer = file.write(file_slice, buffer)?;
+                }
+            }
 
             torrent_write_offset += file_slice.len as u64;
             total_write_count += file_slice.len;
@@ -167,23 +210,30 @@ pub(super) fn read(
     let mut blocks = Vec::with_capacity(block_count);
     for i in 0..block_count {
         let block_len = block_len(len, i);
-        let mut buf = Vec::new();
-        buf.resize(block_len as usize, 0u8);
+        let mut buf = vec![0u8; block_len as usize];
         blocks.push(Arc::new(buf))
     }
 
-    // convert the blocks to IO slices that the underlying
-    // systemcall can deal with
-    let mut iovecs: Vec<IoVec<&mut [u8]>> =
-        blocks
-            .iter_mut()
-            .map(|b| {
-                IoVec::from_mut_slice(Arc::get_mut(b).expect(
-                    "cannot get mut ref to buffer only used by this thread",
-                ).as_mut_slice())
-            })
-            .collect();
-    let mut bufs = iovecs.as_mut_slice();
+    cfg_if! {
+        if #[cfg(target_os = "linux")] {
+            // convert the blocks to IO slices that the underlying
+            // systemcall can deal with
+            let mut iovecs: Vec<IoVec<&mut [u8]>> =
+                blocks
+                    .iter_mut()
+                    .map(|b| {
+                        IoVec::from_mut_slice(Arc::get_mut(b).expect(
+                            "cannot get mut ref to buffer only used by this thread",
+                        ).as_mut_slice())
+                    })
+                    .collect();
+            let mut bufs = iovecs.as_mut_slice();
+        } else {
+            // See the comment above (in the `write` method) if curious what's happening.
+            let buffer = Vec::with_capacity(len as usize);
+            let buffer_mut = &mut buffer;
+        }
+    }
 
     // loop through all files piece overlaps with and read that part of
     // file
@@ -209,7 +259,13 @@ pub(super) fn read(
         debug_assert!(file_slice.len > 0);
 
         // read data
-        bufs = file.read(file_slice, bufs)?;
+        cfg_if! {
+            if #[cfg(target_os = "linux")] {
+                bufs = file.read_vectored(file_slice, bufs)?;
+            } else {
+                buffer_mut = file.read(file_slice, buffer_mut)?;
+            }
+        }
 
         torrent_read_offset += file_slice.len as u64;
         total_read_count += file_slice.len;
@@ -217,6 +273,20 @@ pub(super) fn read(
 
     // we should have read in the whole piece
     debug_assert_eq!(total_read_count, len);
+
+    // we work with one linear buffer,
+    // so let's copy contents from it to block buffers
+    cfg_if! {
+        if #[cfg(target_os = "linux")] {
+            // preadv did everything for us
+        } else {
+            for (i, (block, data)) in blocks.iter_mut().zip(buffer.chunks()).enumerate() {
+                let block_len = block_len(len, i);
+                debug_assert_eq!(block_len, data.len());
+                block.copy_from_slice(data);
+            }
+        }
+    }
 
     Ok(blocks)
 }

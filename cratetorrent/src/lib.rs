@@ -6,10 +6,7 @@
 //!
 //! # Caveats
 //!
-//! The engine currently only supports Linux. This is expected to change in the
-//! future, however.
-//!
-//! It also lacks most features present in battle-hardened torrent engines, such
+//! The engine lacks most features present in battle-hardened torrent engines, such
 //! as [libtorrent](https://github.com/arvidn/libtorrent). These include: DHT
 //! for peer exchange, magnet links, stream encryption, UDP trackers, and many
 //! more.
@@ -156,7 +153,6 @@ mod disk;
 mod download;
 pub mod engine;
 pub mod error;
-pub mod iovecs;
 pub mod metainfo;
 pub mod peer;
 mod piece_picker;
@@ -164,6 +160,10 @@ pub mod prelude;
 pub mod storage_info;
 pub mod torrent;
 mod tracker;
+
+#[cfg(target_os = "linux")]
+pub mod iovecs;
+
 
 /// Each torrent gets a randomly assigned ID that is unique within the
 /// engine. This id is used in engine APIs to interact with torrents.
