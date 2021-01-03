@@ -46,6 +46,12 @@ pub(crate) enum WriteError {
     Io(std::io::Error),
 }
 
+impl From<std::io::Error> for WriteError {
+    fn from(e: std::io::Error) -> Self {
+        Self::Io(e)
+    }
+}
+
 impl fmt::Display for WriteError {
     fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
         match self {
@@ -70,6 +76,12 @@ pub(crate) enum ReadError {
     MissingData,
     /// An IO error ocurred.
     Io(std::io::Error),
+}
+
+impl From<std::io::Error> for ReadError {
+    fn from(e: std::io::Error) -> Self {
+        Self::Io(e)
+    }
 }
 
 impl fmt::Display for ReadError {

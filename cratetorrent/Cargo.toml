@@ -20,7 +20,6 @@ hex = "0.4"
 lazy_static = "1.4"
 log = "0.4"
 lru = "0.6"
-nix = "0.19"
 percent-encoding = "2.1"
 reqwest = "0.10"
 serde = "1.0"
@@ -32,6 +31,10 @@ sha-1 = "0.9"
 tokio = { version = "0.2", features = ["blocking", "macros", "rt-threaded", "stream", "sync", "tcp", "time"] }
 tokio-util = { version = "0.3", features = ["codec"] }
 url = "2.2"
+cfg-if = "1.0"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+nix = "0.19"
 
 [dev-dependencies]
 mockito = "0.28"
