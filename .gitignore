@@ -2,3 +2,5 @@
 Cargo.lock
 scratch*
 tests/assets
+flamegraph*
+perf*

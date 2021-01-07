@@ -90,9 +90,9 @@ struct ThreadContext {
     /// Both of these are very short lived and shouldn't bog down the reactor by
     /// too much.
     ///
-    /// An improvement would be to use a concurrent LRU cache, or one whose
-    /// cache bookkeeping happens via internal mutability so that it may be
-    /// locked in a read-write lock.
+    /// TODO: An improvement might be to use a concurrent LRU cache or to
+    /// not update the cache state on reads but to periodically do so via a
+    /// timer or similar.
     read_cache: sync::Mutex<LruCache<PieceIndex, Vec<CachedBlock>>>,
 
     /// Handles of all files in torrent, opened in advance during torrent
