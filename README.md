@@ -30,9 +30,10 @@ lessons were learned when I first wrote my torrent engine in C++.
 - Get peers from HTTP trackers.
 - Basic per-torrent configurability.
 - Decent performance:
-  > On my fairly slow internet connection with peak download rates of about 9 MBps,
-  Ubuntu 20.04 LTS (~2.8 GB) is downloaded in about 5 minutes at a download rate
-  of 8-9 MPbs, that is, almost fully utilizing the link.
+  > On my fairly slow internet connection with peak download rates of about 9
+  MBps, Ubuntu 20.04 LTS (~2.8 GB) is downloaded in about 5 minutes at a
+  download rate of 8-9 MBps, that is, almost fully utilizing the link. When
+  testing on localhost, the thruput rate goes up to 270 MBps.
 
 Features are continuously added, see the [project
 milestones](https://github.com/mandreyel/cratetorrent/issues/26).
