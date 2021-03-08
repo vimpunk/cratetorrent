@@ -1,13 +1,19 @@
 use std::{
+    convert::TryInto,
     fmt,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     time::Duration,
 };
 
-use bytes::Buf;
+use bytes::{Buf, BufMut, BytesMut};
+
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC};
+use rand::prelude::random;
 use reqwest::{Client, Url};
 use serde::de;
+
+use tokio::net::UdpSocket;
+use tokio::time::timeout;
 
 use crate::{metainfo::BencodeError, PeerId, Sha1Hash};
 
@@ -23,6 +29,8 @@ pub enum TrackerError {
     Bencode(BencodeError),
     /// HTTP related errors when contacting the tracker.
     Http(HttpError),
+    ///UDP Specific: The transaction id received doesn't match the one sent
+    NonMatchingTransactionId,
 }
 
 impl From<BencodeError> for TrackerError {
@@ -42,6 +50,7 @@ impl fmt::Display for TrackerError {
         match self {
             Self::Bencode(e) => e.fmt(f),
             Self::Http(e) => e.fmt(f),
+            Self::NonMatchingTransactionId => self.fmt(f),
         }
     }
 }
@@ -140,6 +149,79 @@ pub(crate) struct Tracker {
     client: Client,
     /// The URL of the tracker.
     url: Url,
+}
+
+pub(crate) struct UdpTracker {
+    /// The URL of the tracker
+    url: Url,
+}
+
+impl UdpTracker {
+    pub fn new(url: Url) -> Self {
+        Self { url }
+    }
+
+    ///https://www.bittorrent.org/beps/bep_0015.html
+    async fn connect(
+        ip_addr: SocketAddr,
+    ) -> Result<u64, crate::error::TrackerError> {
+        //Bind to a random port
+        let mut sock =
+            UdpSocket::bind(SocketAddr::from(([0, 0, 0, 0], random())))
+                .await
+                .unwrap();
+
+        //The magic protocol id number
+        let protocol_id: u64 = 0x41727101980;
+        let action: u32 = 0;
+        let transaction_id: u32 = random();
+
+        let mut bytes_to_send = BytesMut::with_capacity(16);
+        bytes_to_send.put_u64(protocol_id);
+        bytes_to_send.put_u32(action);
+        bytes_to_send.put_u32(transaction_id);
+
+        let bytes_to_send = &bytes_to_send;
+
+        let mut response_buf: [u8; 16] = [0; 16];
+
+        //The number of connection attempts code is done according to bep_0015
+        let mut num_of_connection_attempts: u64 = 0;
+
+        //Keep sending the UDP data until they respond
+        while response_buf == [0; 16] {
+            if num_of_connection_attempts <= 8 {
+                sock.send_to(bytes_to_send, ip_addr).await.unwrap();
+                let wait_time =
+                    Duration::from_secs(15 * 2 ^ num_of_connection_attempts);
+
+                match timeout(wait_time, sock.recv_from(&mut response_buf))
+                    .await
+                {
+                    Ok(_) => (),
+                    Err(_) => (),
+                };
+
+                num_of_connection_attempts += 1;
+            } else {
+                num_of_connection_attempts = 0;
+            }
+        }
+
+        let transaction_id_recv: u32 =
+            u32::from_be_bytes((&response_buf[4..8]).try_into().unwrap());
+
+        let result = if &transaction_id == &transaction_id_recv {
+            let connection_id: u64 =
+                u64::from_be_bytes((&response_buf[8..]).try_into().unwrap());
+
+            Ok(connection_id)
+        } else {
+            Err(crate::error::TrackerError::NonMatchingTransactionId)
+        };
+
+        result
+    }
 }
 
 impl Tracker {
