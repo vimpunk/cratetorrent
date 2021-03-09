@@ -222,18 +222,21 @@ impl UdpTracker {
 
         result
     }
-    
-    pub async fn announce(&self, params: Announce) {
+
+    pub async fn announce(
+        &self,
+        params: Announce,
+    ) -> Result<[u8; 30], crate::error::TrackerError> {
         let mut sock =
-        UdpSocket::bind(SocketAddr::from(([0, 0, 0, 0], random())))
-            .await
-            .unwrap();
-    
+            UdpSocket::bind(SocketAddr::from(([0, 0, 0, 0], random())))
+                .await
+                .unwrap();
+
         let connection_id: u64 = UdpTracker::connect(self.url).await.unwrap();
         let action: u32 = 1;
         let transaction_id: u32 = random();
         let key: u32 = random();
-        
+
         let mut bytes_to_send = BytesMut::with_capacity(98);
         bytes_to_send.put_u64(connection_id);
         bytes_to_send.put_u32(action);
@@ -242,69 +245,76 @@ impl UdpTracker {
         bytes_to_send.put(&params.peer_id[..]);
         bytes_to_send.put_u64(params.downloaded);
         bytes_to_send.put_u64(params.left);
-        bytes_to_send.put_u32(
-            match params.event {
-                Some(val) => match val {
-                    crate::tracker::Event::Completed => 1,
-                    crate::tracker::Event::Started => 2,
-                    crate::tracker::Event::Stopped => 3,
-                },
-                None => 0
-            }
-        );
-            match params.ip {
-                Some(ip) => {
-                    match ip {
-                        IpAddr::V4(ip) => {
-                            bytes_to_send.put(&(ip.octets()[..]));
-                        },
-                        
-                        //The IP address field must be 32 bits wide, so if the IP given is v6, the field must be set to 0
-                        IpAddr::V6(_) => {
-                            bytes_to_send.put_u32(0);
-                        },
+        bytes_to_send.put_u32(match params.event {
+            Some(val) => match val {
+                crate::tracker::Event::Completed => 1,
+                crate::tracker::Event::Started => 2,
+                crate::tracker::Event::Stopped => 3,
+            },
+            None => 0,
+        });
+        match params.ip {
+            Some(ip) => {
+                match ip {
+                    IpAddr::V4(ip) => {
+                        bytes_to_send.put(&(ip.octets()[..]));
                     }
-                },
-                None => {bytes_to_send.put_u32(0);},
+
+                    //The IP address field must be 32 bits wide, so if the IP given is v6, the field must be set to 0
+                    IpAddr::V6(_) => {
+                        bytes_to_send.put_u32(0);
+                    }
+                }
             }
-            
+            None => {
+                bytes_to_send.put_u32(0);
+            }
+        }
+
         bytes_to_send.put_u32(key);
         bytes_to_send.put_i32(match params.peer_count {
             Some(num) => num.try_into().unwrap(),
             None => -1,
         });
         bytes_to_send.put_u16(params.port);
-        
+
         let bytes_to_send = &bytes_to_send;
-        
-    let mut response_buf: [u8; 30] = [0; 30];
 
-    //The number of connection attempts code is done according to bep_0015
-    let mut num_of_connection_attempts: u64 = 0;
-        
-    //Keep sending the UDP data until they respond
-    while response_buf == [0; 30] {
-        if num_of_connection_attempts <= 8 {
-            sock.send_to(bytes_to_send, self.url).await.unwrap();
-            let wait_time =
-                Duration::from_secs(15 * 2 ^ num_of_connection_attempts);
+        let mut response_buf: [u8; 30] = [0; 30];
 
-            match timeout(wait_time, sock.recv_from(&mut response_buf))
-                .await
-            {
-                Ok(_) => (),
-                Err(_) => (),
-            };
+        //The number of connection attempts code is done according to bep_0015
+        let mut num_of_connection_attempts: u64 = 0;
 
-            num_of_connection_attempts += 1;
-        } else {
-            num_of_connection_attempts = 0;
+        //Keep sending the UDP data until they respond
+        while response_buf == [0; 30] {
+            if num_of_connection_attempts <= 8 {
+                sock.send_to(bytes_to_send, self.url).await.unwrap();
+                let wait_time =
+                    Duration::from_secs(15 * 2 ^ num_of_connection_attempts);
+
+                match timeout(wait_time, sock.recv_from(&mut response_buf))
+                    .await
+                {
+                    Ok(_) => (),
+                    Err(_) => (),
+                };
+
+                num_of_connection_attempts += 1;
+            } else {
+                num_of_connection_attempts = 0;
+            }
         }
-    }
-        
-        
-        
-        
+
+        let transaction_id_recv: u32 =
+            u32::from_be_bytes((&response_buf[4..8]).try_into().unwrap());
+
+        let result = if &transaction_id == &transaction_id_recv {
+            Ok(response_buf)
+        } else {
+            Err(crate::error::TrackerError::NonMatchingTransactionId)
+        };
+
+        result
     }
 }
 
