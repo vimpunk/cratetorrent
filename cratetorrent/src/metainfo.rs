@@ -81,7 +81,8 @@ pub struct Metainfo {
     /// The trackers that we can announce to.
     /// The tier information is not currently present in this field as
     /// cratetorrent doesn't use it. In the future it may be added.
-    pub trackers: Vec<Url>,
+    /// The boolean is whether said tracker uses UDP or not
+    pub trackers: Vec<(Url, bool)>,
 }
 
 impl Metainfo {
@@ -171,7 +172,7 @@ impl Metainfo {
             return Err(MetainfoError::InvalidMetainfo);
         }
 
-        let mut trackers = Vec::new();
+        let mut trackers: Vec<(Url, bool)> = Vec::new();
         if !metainfo.announce_list.is_empty() {
             let tracker_count = metainfo
                 .announce_list
@@ -186,14 +187,18 @@ impl Metainfo {
                     let url = Url::parse(&tracker)?;
                     // the tracker may be over UDP, which we don't support (yet)
                     if url.scheme() == "http" || url.scheme() == "https" {
-                        trackers.push(url);
+                        trackers.push((url, false));
+                    } else if url.scheme() == "udp" {
+                        trackers.push((url, true));
                     }
                 }
             }
         } else if let Some(tracker) = &metainfo.announce {
             let url = Url::parse(&tracker)?;
             if url.scheme() == "http" || url.scheme() == "https" {
-                trackers.push(url);
+                trackers.push((url, false));
+            } else if url.scheme() == "udp" {
+                trackers.push((url, true));
             }
         }
 
