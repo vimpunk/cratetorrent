@@ -15,7 +15,10 @@ use serde::de;
 use tokio::net::UdpSocket;
 use tokio::time::timeout;
 
-use crate::{metainfo::BencodeError, PeerId, Sha1Hash};
+use crate::{
+    metainfo::{BencodeError, TrackerUrl},
+    PeerId, Sha1Hash,
+};
 
 pub use reqwest::Error as HttpError;
 
@@ -153,25 +156,22 @@ pub(crate) struct Tracker {
 }
 
 impl Tracker {
-    pub fn new(url_udp: (Url, bool)) -> Self {
+    pub fn new(url_udp: TrackerUrl) -> Self {
         Self {
             client: Client::new(),
-            url: url_udp.0,
-            udp: url_udp.1,
+            url: url_udp.url,
+            udp: url_udp.is_udp,
         }
     }
-    
+
     ///https://www.bittorrent.org/beps/bep_0015.html
-    async fn connect_udp(
-        ip_addr: SocketAddr,
-    ) -> Option<u64> {
+    async fn connect_udp(ip_addr: SocketAddr) -> Option<u64> {
         //Bind to a random port
         let port = thread_rng().gen_range(1025..u16::MAX);
-        
-        let mut sock =
-            UdpSocket::bind(SocketAddr::from(([0, 0, 0, 0], port)))
-                .await
-                .unwrap();
+
+        let mut sock = UdpSocket::bind(SocketAddr::from(([0, 0, 0, 0], port)))
+            .await
+            .unwrap();
 
         //The magic protocol id number
         let protocol_id: u64 = 0x41727101980;
@@ -190,15 +190,17 @@ impl Tracker {
         sock.send_to(bytes_to_send, ip_addr).await.unwrap();
         let wait_time = Duration::from_secs(3);
 
-        let could_connect = match timeout(wait_time, sock.recv_from(&mut response_buf)).await {
-            Ok(_) => true,
-            Err(_) => false,
-        };
-        
+        let could_connect =
+            match timeout(wait_time, sock.recv_from(&mut response_buf)).await {
+                Ok(_) => true,
+                Err(_) => false,
+            };
+
         let transaction_id_recv: u32 =
             u32::from_be_bytes((&response_buf[4..8]).try_into().unwrap());
-            
-        let result = if &transaction_id == &transaction_id_recv && could_connect {
+
+        let result = if &transaction_id == &transaction_id_recv && could_connect
+        {
             let connection_id: u64 =
                 u64::from_be_bytes((&response_buf[8..]).try_into().unwrap());
 
@@ -216,7 +218,7 @@ impl Tracker {
             false => self.announce_http(params).await,
         }
     }
-    
+
     /// Sends an announce request to the tracker with the specified parameters.
     ///
     /// This may be used by a torrent to request peers to download from and to
@@ -295,48 +297,41 @@ impl Tracker {
         let resp = serde_bencode::from_bytes(&resp)?;
         Ok(resp)
     }
-    
-    pub async fn announce_udp(
-        &self,
-        params: Announce,
-    ) -> Result<Response> {
+
+    pub async fn announce_udp(&self, params: Announce) -> Result<Response> {
         let port = thread_rng().gen_range(1025..u16::MAX);
-        let mut sock =
-            UdpSocket::bind(SocketAddr::from(([0, 0, 0, 0], port)))
-                .await
-                .unwrap();
-                
-        let mut addr = self.url.socket_addrs(|| None).unwrap_or(
-        {
+        let mut sock = UdpSocket::bind(SocketAddr::from(([0, 0, 0, 0], port)))
+            .await
+            .unwrap();
+
+        let mut addr = self.url.socket_addrs(|| None).unwrap_or({
             let mut addr_vec = Vec::new();
             addr_vec.push(SocketAddr::from(([127, 0, 0, 1], random())));
             addr_vec
-        }
-        );
-        
+        });
+
         addr.shuffle(&mut thread_rng());
-        
+
         let addr = {
             let mut addr_to_ret = SocketAddr::from(([127, 0, 0, 1], random()));
-            
+
             for a in addr {
                 if a.is_ipv4() {
                     addr_to_ret = a;
                     break;
                 }
             }
-            
+
             addr_to_ret
         };
-        
-        
+
         let mut failure_reason = None;
-        
+
         let connection_id: u64 = match Tracker::connect_udp(addr).await {
             Some(id) => id,
             None => 0,
         };
-        
+
         let action: u32 = 1;
         let transaction_id: u32 = random();
         let key: u32 = random();
@@ -383,78 +378,82 @@ impl Tracker {
         bytes_to_send.put_u16(params.port);
 
         let bytes_to_send = &bytes_to_send;
-        
+
         const MAX_NUM_PEERS: usize = 2048;
-                
+
         //Supporting around a few hundred peers, just for the test
-        
+
         let mut response_buf: [u8; MAX_NUM_PEERS] = [0; MAX_NUM_PEERS];
 
         sock.send_to(bytes_to_send, addr).await.unwrap();
         let wait_time = match connection_id {
-            0 =>Duration::from_secs(0),
+            0 => Duration::from_secs(0),
             _ => Duration::from_secs(3),
         };
-        
+
         match timeout(wait_time, sock.recv_from(&mut response_buf)).await {
             Ok(_) => (),
-            Err(_) => {failure_reason = Some(String::from("Couldn't announce to tracker"))},
+            Err(_) => {
+                failure_reason =
+                    Some(String::from("Couldn't announce to tracker"))
+            }
         };
 
         let transaction_id_recv: u32 =
             u32::from_be_bytes((&response_buf[4..8]).try_into().unwrap());
-            
+
         let leechers: u32 =
             u32::from_be_bytes((&response_buf[12..16]).try_into().unwrap());
         let seeders: u32 =
             u32::from_be_bytes((&response_buf[16..20]).try_into().unwrap());
-                    
+
         let mut peer_vec: Vec<SocketAddr> = Vec::new();
-        
+
         let mut index: usize = 20;
-    
+
         while index <= response_buf.len() - 6 {
-            let peer_ip_bytes: [u8; 4] = response_buf[index.. index + 4].try_into().unwrap(); 
-            let peer_port_bytes: [u8; 2] = response_buf[index + 4.. index + 6].try_into().unwrap();
-            
+            let peer_ip_bytes: [u8; 4] =
+                response_buf[index..index + 4].try_into().unwrap();
+            let peer_port_bytes: [u8; 2] =
+                response_buf[index + 4..index + 6].try_into().unwrap();
+
             if peer_ip_bytes != [0; 4] && peer_port_bytes != [0; 2] {
                 let peer_ipv4 = Ipv4Addr::from(peer_ip_bytes);
                 let peer_string = peer_ipv4.to_string();
-                let peer_port_bytes: [u8; 2] = response_buf[index + 4.. index + 6].try_into().unwrap();
+                let peer_port_bytes: [u8; 2] =
+                    response_buf[index + 4..index + 6].try_into().unwrap();
                 let peer_port: u16 = u16::from_be_bytes(peer_port_bytes);
                 let peer_string = format!("{}:{}", peer_string, peer_port);
                 let peer_sock: SocketAddr = peer_string.parse().unwrap();
-                
+
                 peer_vec.push(peer_sock);
-                
+
                 index += 6;
             } else {
                 break;
             }
-            
         }
-                
+
         if &transaction_id != &transaction_id_recv {
-           failure_reason = Some(String::from("Transaction ID's did not match"));
+            failure_reason =
+                Some(String::from("Transaction ID's did not match"));
         }
 
         let response = Response {
             tracker_id: Some(transaction_id_recv.to_string()),
-            failure_reason: failure_reason,
+            failure_reason,
             warning_message: None,
             min_interval: None,
             interval: Some(Duration::from_secs(9)),
             leecher_count: Some(leechers.try_into().unwrap()),
             seeder_count: Some(seeders.try_into().unwrap()),
-            peers: peer_vec
-            
+            peers: peer_vec,
         };
-        if connection_id != 0 && response_buf != [0; MAX_NUM_PEERS]{
+        if connection_id != 0 && response_buf != [0; MAX_NUM_PEERS] {
             println!("{:?}", response);
         }
         Ok(response)
     }
-    
 }
 
 impl fmt::Display for Tracker {
