@@ -191,19 +191,25 @@ impl Metainfo {
                 for tracker in tier.iter() {
                     let url = Url::parse(&tracker)?;
                     // the tracker may be over UDP, which we don't support (yet)
-                    if url.scheme() == "http" || url.scheme() == "https" {
-                        trackers.push(TrackerUrl { url, is_udp: false });
-                    } else if url.scheme() == "udp" {
-                        trackers.push(TrackerUrl { url, is_udp: true });
+                    match url.scheme() {
+                        "http" | "https" => {
+                            trackers.push(TrackerUrl { url, is_udp: false })
+                        }
+                        "udp" => {
+                            trackers.push(TrackerUrl { url, is_udp: true })
+                        }
+                        _ => {}
                     }
                 }
             }
         } else if let Some(tracker) = &metainfo.announce {
             let url = Url::parse(&tracker)?;
-            if url.scheme() == "http" || url.scheme() == "https" {
-                trackers.push(TrackerUrl { url, is_udp: false });
-            } else if url.scheme() == "udp" {
-                trackers.push(TrackerUrl { url, is_udp: true });
+            match url.scheme() {
+                "http" | "https" => {
+                    trackers.push(TrackerUrl { url, is_udp: false })
+                }
+                "udp" => trackers.push(TrackerUrl { url, is_udp: true }),
+                _ => {}
             }
         }
 
