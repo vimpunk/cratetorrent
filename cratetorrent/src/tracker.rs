@@ -16,7 +16,7 @@ use tokio::net::UdpSocket;
 use tokio::time::timeout;
 
 use crate::{
-    metainfo::{BencodeError, TrackerUrl},
+    metainfo::{BencodeError, TrackerUrl, NetProtocol},
     PeerId, Sha1Hash,
 };
 
@@ -152,20 +152,20 @@ pub(crate) struct Tracker {
     client: Client,
     /// The URL of the tracker.
     url: Url,
-    udp: bool,
+    protocol: NetProtocol,
 }
 
 impl Tracker {
-    pub fn new(url_udp: TrackerUrl) -> Self {
+    pub fn new(url: TrackerUrl) -> Self {
         Self {
             client: Client::new(),
-            url: url_udp.url,
-            udp: url_udp.is_udp,
+            url: url.url,
+            protocol: url.protocol,
         }
     }
 
     ///https://www.bittorrent.org/beps/bep_0015.html
-    async fn connect_udp(ip_addr: SocketAddr) -> Option<u64> {
+    async fn connect_udp(ip_addr: SocketAddr) -> Option<i64> {
         //Bind to a random port
         let port = thread_rng().gen_range(1025..u16::MAX);
 
@@ -174,53 +174,50 @@ impl Tracker {
             .unwrap();
 
         //The magic protocol id number
-        let protocol_id: u64 = 0x41727101980;
-        let action: u32 = 0;
-        let transaction_id: u32 = random();
+        const PROTOCOL_ID: i64 = 0x41727101980;
+        const ACTION: i32 = 0;
+        let transaction_id: i32 = random();
 
         let mut bytes_to_send = BytesMut::with_capacity(16);
-        bytes_to_send.put_u64(protocol_id);
-        bytes_to_send.put_u32(action);
-        bytes_to_send.put_u32(transaction_id);
+        bytes_to_send.put_i64(PROTOCOL_ID);
+        bytes_to_send.put_i32(ACTION);
+        bytes_to_send.put_i32(transaction_id.try_into().unwrap());
 
         let bytes_to_send = &bytes_to_send;
 
         let mut response_buf: [u8; 16] = [0; 16];
 
         sock.send_to(bytes_to_send, ip_addr).await.unwrap();
+        
         let wait_time = Duration::from_secs(3);
+        let mut attempts: u8 = 0;
 
-        let could_connect =
-            match timeout(wait_time, sock.recv_from(&mut response_buf)).await {
-                Ok(_) => true,
-                Err(_) => false,
-            };
+        let mut could_connect = false;
 
-        let transaction_id_recv: u32 =
-            u32::from_be_bytes((&response_buf[4..8]).try_into().unwrap());
+        while response_buf == [0; 16] && attempts < 5 {
+            could_connect =
+                match timeout(wait_time, sock.recv_from(&mut response_buf)).await {
+                    Ok(_) => true,
+                    Err(_) => false,
+                };
 
-        let result = if &transaction_id == &transaction_id_recv && could_connect
-        {
-            let connection_id: u64 =
-                u64::from_be_bytes((&response_buf[8..]).try_into().unwrap());
+            attempts += 1;
 
-            Some(connection_id)
-        } else {
-            None
-        };
-
-        result
-    }
-
-    pub async fn announce(&self, params: Announce) -> Result<Response> {
-        match &self.udp {
-            true => self.announce_udp(params).await,
-            false => self.announce_http(params).await,
         }
+
+        let transaction_id_recv: i32 =
+            i32::from_be_bytes((&response_buf[4..8]).try_into().unwrap());
+
+        match could_connect && transaction_id == transaction_id_recv {
+            true => Some(i64::from_be_bytes((&response_buf[8..]).try_into().unwrap())),
+            false => None
+
+        }
+
     }
 
     /// Sends an announce request to the tracker with the specified parameters.
-    ///
+    /// 
     /// This may be used by a torrent to request peers to download from and to
     /// report statistics to the tracker.
     ///
@@ -228,6 +225,13 @@ impl Tracker {
     ///
     /// The tracker may not be contacted more often than the minimum interval
     /// returned in the first announce response.
+    pub async fn announce(&self, params: Announce) -> Result<Response> {
+        match &self.protocol {
+            NetProtocol::UDP => self.announce_udp(params).await,
+            NetProtocol::HTTP => self.announce_http(params).await,
+        }
+    }
+
     async fn announce_http(&self, params: Announce) -> Result<Response> {
         // announce parameters are built up in the query string, see:
         // https://www.bittorrent.org/beps/bep_0003.html trackers section
@@ -298,53 +302,43 @@ impl Tracker {
         Ok(resp)
     }
 
-    pub async fn announce_udp(&self, params: Announce) -> Result<Response> {
+    async fn announce_udp(&self, params: Announce) -> Result<Response> {
         let port = thread_rng().gen_range(1025..u16::MAX);
         let mut sock = UdpSocket::bind(SocketAddr::from(([0, 0, 0, 0], port)))
             .await
             .unwrap();
 
-        let mut addr = self.url.socket_addrs(|| None).unwrap_or({
-            let mut addr_vec = Vec::new();
-            addr_vec.push(SocketAddr::from(([127, 0, 0, 1], random())));
-            addr_vec
-        });
+        // All of the potential addressese of a URL
+        let mut addrs = self.url.socket_addrs(|| None).unwrap();
+        // Shuffle the list
+        addrs.shuffle(&mut thread_rng());
 
-        addr.shuffle(&mut thread_rng());
-
-        let addr = {
-            let mut addr_to_ret = SocketAddr::from(([127, 0, 0, 1], random()));
-
-            for a in addr {
-                if a.is_ipv4() {
-                    addr_to_ret = a;
-                    break;
-                }
-            }
-
-            addr_to_ret
-        };
+        //TODO: Make an error for not finding an actual IPV4 address
+        let addr = *addrs.iter().find(|a| a.is_ipv4()).unwrap();
 
         let mut failure_reason = None;
 
-        let connection_id: u64 = match Tracker::connect_udp(addr).await {
-            Some(id) => id,
-            None => 0,
-        };
+        let connection_id: i64 = Tracker::connect_udp(addr).await.unwrap();
 
-        let action: u32 = 1;
-        let transaction_id: u32 = random();
+        const ACTION: i32 = 1;
+        let transaction_id: i32 = random();
         let key: u32 = random();
 
         let mut bytes_to_send = BytesMut::with_capacity(150);
-        bytes_to_send.put_u64(connection_id);
-        bytes_to_send.put_u32(action);
-        bytes_to_send.put_u32(transaction_id);
+        bytes_to_send.put_i64(connection_id);
+        bytes_to_send.put_i32(ACTION);
+        bytes_to_send.put_i32(transaction_id);
+
+        debug_assert_eq!(params.info_hash.len(), 20);
+        debug_assert_eq!(params.peer_id.len(), 20);
+
         bytes_to_send.put(&params.info_hash[..]);
         bytes_to_send.put(&params.peer_id[..]);
-        bytes_to_send.put_u64(params.downloaded);
-        bytes_to_send.put_u64(params.left);
-        bytes_to_send.put_u32(match params.event {
+        bytes_to_send.put_i64(params.downloaded.try_into().unwrap());
+        bytes_to_send.put_i64(params.left.try_into().unwrap());
+        bytes_to_send.put_i64(params.uploaded.try_into().unwrap());
+
+        bytes_to_send.put_i32(match params.event {
             Some(val) => match val {
                 crate::tracker::Event::Completed => 1,
                 crate::tracker::Event::Started => 2,
@@ -361,12 +355,12 @@ impl Tracker {
 
                     //The IP address field must be 32 bits wide, so if the IP given is v6, the field must be set to 0
                     IpAddr::V6(_) => {
-                        bytes_to_send.put_u32(0);
+                        bytes_to_send.put_i32(0);
                     }
                 }
             }
             None => {
-                bytes_to_send.put_u32(0);
+                bytes_to_send.put_i32(0);
             }
         };
 
@@ -399,13 +393,13 @@ impl Tracker {
             }
         };
 
-        let transaction_id_recv: u32 =
-            u32::from_be_bytes((&response_buf[4..8]).try_into().unwrap());
+        let transaction_id_recv: i32 =
+            i32::from_be_bytes((&response_buf[4..8]).try_into().unwrap());
 
-        let leechers: u32 =
-            u32::from_be_bytes((&response_buf[12..16]).try_into().unwrap());
-        let seeders: u32 =
-            u32::from_be_bytes((&response_buf[16..20]).try_into().unwrap());
+        let leechers: i32 =
+            i32::from_be_bytes((&response_buf[12..16]).try_into().unwrap());
+        let seeders: i32 =
+            i32::from_be_bytes((&response_buf[16..20]).try_into().unwrap());
 
         let mut peer_vec: Vec<SocketAddr> = Vec::new();
 
@@ -431,10 +425,11 @@ impl Tracker {
                 index += 6;
             } else {
                 break;
+
             }
         }
 
-        if &transaction_id != &transaction_id_recv {
+        if transaction_id != transaction_id_recv {
             failure_reason =
                 Some(String::from("Transaction ID's did not match"));
         }
@@ -449,9 +444,7 @@ impl Tracker {
             seeder_count: Some(seeders.try_into().unwrap()),
             peers: peer_vec,
         };
-        if connection_id != 0 && response_buf != [0; MAX_NUM_PEERS] {
-            println!("{:?}", response);
-        }
+
         Ok(response)
     }
 }

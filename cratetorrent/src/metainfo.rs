@@ -14,10 +14,18 @@ pub use serde_bencode::Error as BencodeError;
 
 pub(crate) type Result<T> = crate::error::Result<T, MetainfoError>;
 
+/// The protocol that the tracker is using
+#[derive(Clone)]
+pub enum NetProtocol {
+    UDP,
+    HTTP,
+}
+
+
 #[derive(Clone)]
 pub struct TrackerUrl {
     pub url: Url,
-    pub is_udp: bool,
+    pub protocol: NetProtocol,
 }
 
 #[derive(Debug)]
@@ -190,15 +198,14 @@ impl Metainfo {
             for tier in metainfo.announce_list.iter() {
                 for tracker in tier.iter() {
                     let url = Url::parse(&tracker)?;
-                    // the tracker may be over UDP, which we don't support (yet)
                     match url.scheme() {
                         "http" | "https" => {
-                            trackers.push(TrackerUrl { url, is_udp: false })
+                            trackers.push(TrackerUrl { url, protocol: NetProtocol::HTTP })
                         }
                         "udp" => {
-                            trackers.push(TrackerUrl { url, is_udp: true })
+                            trackers.push(TrackerUrl { url, protocol: NetProtocol::UDP })
                         }
-                        _ => {}
+                        _ => {unimplemented!()}
                     }
                 }
             }
@@ -206,9 +213,11 @@ impl Metainfo {
             let url = Url::parse(&tracker)?;
             match url.scheme() {
                 "http" | "https" => {
-                    trackers.push(TrackerUrl { url, is_udp: false })
+                    trackers.push(TrackerUrl { url, protocol: NetProtocol::HTTP })
                 }
-                "udp" => trackers.push(TrackerUrl { url, is_udp: true }),
+                "udp" => {
+                    trackers.push(TrackerUrl { url, protocol: NetProtocol::UDP })
+                }
                 _ => {}
             }
         }
