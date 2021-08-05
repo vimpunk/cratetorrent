@@ -97,17 +97,6 @@ impl Decoder for HandshakeCodec {
             return Ok(None);
         }
 
-        // hack:
-        // `get_*` integer extractors consume the message bytes by advancing
-        // buf's internal cursor. However, we don't want to do this as at this
-        // point we aren't sure we have the full message in the buffer, and thus
-        // we just want to peek at this value.
-        //
-        // However, this is not supported by the `bytes` crate API
-        // (https://github.com/tokio-rs/bytes/issues/382), so we need to work
-        // this around by getting a reference to the underlying buffer and
-        // performing the message length extraction on the returned slice, which
-        // won't advance `buf`'s cursor
         let prot_len = if let Some(prot_len) = buf.first() {
             let prot_len = *prot_len as usize;
             if prot_len != PROTOCOL_STRING.as_bytes().len() {
@@ -417,17 +406,6 @@ impl Decoder for PeerCodec {
             return Ok(None);
         }
 
-        // hack:
-        // `get_*` integer extractors consume the message bytes by advancing
-        // buf's internal cursor. However, we don't want to do this as at this
-        // point we aren't sure we have the full message in the buffer, and thus
-        // we just want to peek at this value.
-        //
-        // However, this is not supported by the `bytes` crate API
-        // (https://github.com/tokio-rs/bytes/issues/382), so we need to work
-        // this around by getting a reference to the underlying buffer and
-        // performing the message length extraction on the returned slice, which
-        // won't advance `buf`'s cursor
         let msg_len = if let Some(len_bytes) = buf.get(0..4) {
             if len_bytes.len() < 4 {
                 return Ok(None);
