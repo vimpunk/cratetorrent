@@ -10,11 +10,11 @@ edition = "2018"
 
 [dependencies]
 cratetorrent = { path = "../cratetorrent" }
-flexi_logger = "0.18.0"
-futures = "0.3.15"
-hex = "0.4.3"
-log = "0.4.14"
-structopt = "0.3.22"
-termion = "1.5.6"
-tokio = { version = "1.9.0", features = ["full"] }
-tui = "0.15.0"
+flexi_logger = "0.18"
+futures = "0.3"
+hex = "0.4"
+log = "0.4"
+structopt = "0.3"
+termion = "1.5"
+tokio = { version = "1.9", features = ["macros", "rt-multi-thread", "io-std", "fs"] }
+tui = "0.15"
