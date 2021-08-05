@@ -19,7 +19,6 @@ use std::{
     net::{Ipv4Addr, SocketAddr},
 };
 
-use futures::stream::StreamExt;
 use tokio::{
     sync::mpsc::{self, UnboundedReceiver, UnboundedSender},
     task,
@@ -212,7 +211,7 @@ impl Engine {
     async fn run(&mut self) -> Result<()> {
         log::info!("Starting engine");
 
-        while let Some(cmd) = self.cmd_rx.next().await {
+        while let Some(cmd) = self.cmd_rx.recv().await {
             match cmd {
                 Command::CreateTorrent { id, params } => {
                     self.create_torrent(id, params).await?;

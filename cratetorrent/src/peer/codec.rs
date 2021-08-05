@@ -108,14 +108,18 @@ impl Decoder for HandshakeCodec {
         // this around by getting a reference to the underlying buffer and
         // performing the message length extraction on the returned slice, which
         // won't advance `buf`'s cursor
-        let mut tmp_buf = buf.bytes();
-        let prot_len = tmp_buf.get_u8() as usize;
-        if prot_len != PROTOCOL_STRING.as_bytes().len() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "Handshake must have the string \"BitTorrent protocol\"",
-            ));
-        }
+        let prot_len = if let Some(prot_len) = buf.first() {
+            let prot_len = *prot_len as usize;
+            if prot_len != PROTOCOL_STRING.as_bytes().len() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "Handshake must have the string \"BitTorrent protocol\"",
+                ));
+            }
+            prot_len
+        } else {
+            return Ok(None);
+        };
 
         // check that we got the full payload in the buffer (NOTE: we need to
         // add the message length prefix's byte count to msg_len since the
@@ -286,11 +290,7 @@ pub(crate) struct PeerCodec;
 impl Encoder<Message> for PeerCodec {
     type Error = io::Error;
 
-    fn encode(
-        &mut self,
-        msg: Message,
-        buf: &mut BytesMut,
-    ) -> io::Result<()> {
+    fn encode(&mut self, msg: Message, buf: &mut BytesMut) -> io::Result<()> {
         use Message::*;
         match msg {
             KeepAlive => {
@@ -428,8 +428,16 @@ impl Decoder for PeerCodec {
         // this around by getting a reference to the underlying buffer and
         // performing the message length extraction on the returned slice, which
         // won't advance `buf`'s cursor
-        let mut tmp_buf = buf.bytes();
-        let msg_len = tmp_buf.get_u32() as usize;
+        let msg_len = if let Some(len_bytes) = buf.get(0..4) {
+            if len_bytes.len() < 4 {
+                return Ok(None);
+            }
+            let mut result = [0; 4];
+            result.copy_from_slice(len_bytes);
+            u32::from_be_bytes(result) as usize
+        } else {
+            return Ok(None);
+        };
 
         // check that we got the full payload in the buffer (NOTE: we need to
         // add the message length prefix's byte count to msg_len since the
