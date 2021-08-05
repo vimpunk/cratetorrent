@@ -10,7 +10,6 @@ use cratetorrent::{
     torrent::stats::{Channel, Peers, PieceStats, Thruput, TorrentStats},
     FileInfo, TorrentId,
 };
-use futures::stream::{Fuse, StreamExt};
 
 use crate::{Args, Result};
 
@@ -18,7 +17,7 @@ use crate::{Args, Result};
 pub struct App {
     pub download_dir: PathBuf,
     pub engine: EngineHandle,
-    pub alert_rx: Fuse<AlertReceiver>,
+    pub alert_rx: AlertReceiver,
     pub torrents: HashMap<TorrentId, Torrent>,
 }
 
@@ -27,7 +26,6 @@ impl App {
         // start engine
         let conf = Conf::new(download_dir.clone());
         let (engine, alert_rx) = cratetorrent::engine::spawn(conf)?;
-        let alert_rx = alert_rx.fuse();
 
         Ok(Self {
             download_dir,
