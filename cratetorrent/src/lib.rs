@@ -92,7 +92,7 @@
 //!     })?;
 //!
 //!     // listen to alerts from the engine
-//!     while let Some(alert) = alert_rx.next().await {
+//!     while let Some(alert) = alert_rx.recv().await {
 //!         match alert {
 //!             Alert::TorrentStats { id, stats } => {
 //!                 println!("{}: {:#?}", id, stats);
