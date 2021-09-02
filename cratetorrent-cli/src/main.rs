@@ -1,7 +1,7 @@
 use std::{io, net::SocketAddr, path::PathBuf};
 
 use cratetorrent::prelude::*;
-use futures::{select, stream::StreamExt};
+use flexi_logger::FileSpec;
 use structopt::StructOpt;
 use termion::{
     input::MouseTerminal, raw::IntoRawMode, screen::AlternateScreen,
@@ -57,9 +57,8 @@ fn parse_mode(s: &str) -> Mode {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    flexi_logger::Logger::with_env()
-        .log_to_file()
-        .directory("/tmp/cratetorrent")
+    flexi_logger::Logger::try_with_env()?
+        .log_to_file(FileSpec::default().directory("/tmp/cratetorrent"))
         .start()?;
 
     // parse cli args
@@ -92,13 +91,13 @@ async fn main() -> Result<()> {
     // wait for stdin input and alerts from the engine
     let mut run = true;
     while run {
-        select! {
-            key = keys.rx.select_next_some() => {
+        tokio::select! {
+            Some(key) = keys.rx.recv() => {
                 if key == key::EXIT_KEY {
                     run = false;
                 }
             }
-            alert = app.alert_rx.select_next_some() => {
+            Some(alert) = app.alert_rx.recv() => {
                 match alert {
                     Alert::TorrentStats { id, stats } => {
                         app.update_torrent_state(id, *stats);
