@@ -1,6 +1,6 @@
 [package]
 name = "cratetorrent-cli"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["mandreyel <mandreyel@protonmail.com>"]
 description = "A simple BitTorrent V1 CLI client"
 license = "MIT OR Apache-2.0"
