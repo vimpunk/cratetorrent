@@ -406,16 +406,16 @@ impl Decoder for PeerCodec {
             return Ok(None);
         }
 
-        let msg_len = if let Some(len_bytes) = buf.get(0..4) {
-            if len_bytes.len() < 4 {
-                return Ok(None);
-            }
-            let mut result = [0; 4];
-            result.copy_from_slice(len_bytes);
-            u32::from_be_bytes(result) as usize
-        } else {
-            return Ok(None);
-        };
+        // hack:
+        // `get_*` integer extractors consume the message bytes by advancing
+        // buf's internal cursor. However, we don't want to do this as at this
+        // point we aren't sure we have the full message in the buffer, and thus
+        // we just want to peek at this value.
+        // Hence, we wrap the buf in a cursor and rewind back it's position after peeking.
+        let mut tmp_buf = io::Cursor::new(&buf);
+        let msg_len = tmp_buf.get_u32() as usize;
+
+        tmp_buf.set_position(0);
 
         // check that we got the full payload in the buffer (NOTE: we need to
         // add the message length prefix's byte count to msg_len since the
