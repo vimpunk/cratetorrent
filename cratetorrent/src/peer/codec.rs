@@ -412,6 +412,8 @@ impl Decoder for PeerCodec {
         let mut tmp_buf = Cursor::new(&buf);
         let msg_len = tmp_buf.get_u32() as usize;
 
+        tmp_buf.set_position(0);
+
         // check that we got the full payload in the buffer (NOTE: we need to
         // add the message length prefix's byte count to msg_len since the
         // buffer cursor was not advanced and thus we need to consider the
