@@ -97,25 +97,18 @@ impl Decoder for HandshakeCodec {
             return Ok(None);
         }
 
-        // hack:
-        // `get_*` integer extractors consume the message bytes by advancing
-        // buf's internal cursor. However, we don't want to do this as at this
-        // point we aren't sure we have the full message in the buffer, and thus
-        // we just want to peek at this value.
-        //
-        // However, this is not supported by the `bytes` crate API
-        // (https://github.com/tokio-rs/bytes/issues/382), so we need to work
-        // this around by getting a reference to the underlying buffer and
-        // performing the message length extraction on the returned slice, which
-        // won't advance `buf`'s cursor
-        let mut tmp_buf = buf.bytes();
-        let prot_len = tmp_buf.get_u8() as usize;
-        if prot_len != PROTOCOL_STRING.as_bytes().len() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "Handshake must have the string \"BitTorrent protocol\"",
-            ));
-        }
+        let prot_len = if let Some(prot_len) = buf.first() {
+            let prot_len = *prot_len as usize;
+            if prot_len != PROTOCOL_STRING.as_bytes().len() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "Handshake must have the string \"BitTorrent protocol\"",
+                ));
+            }
+            prot_len
+        } else {
+            return Ok(None);
+        };
 
         // check that we got the full payload in the buffer (NOTE: we need to
         // add the message length prefix's byte count to msg_len since the
@@ -286,11 +279,7 @@ pub(crate) struct PeerCodec;
 impl Encoder<Message> for PeerCodec {
     type Error = io::Error;
 
-    fn encode(
-        &mut self,
-        msg: Message,
-        buf: &mut BytesMut,
-    ) -> io::Result<()> {
+    fn encode(&mut self, msg: Message, buf: &mut BytesMut) -> io::Result<()> {
         use Message::*;
         match msg {
             KeepAlive => {
@@ -422,14 +411,11 @@ impl Decoder for PeerCodec {
         // buf's internal cursor. However, we don't want to do this as at this
         // point we aren't sure we have the full message in the buffer, and thus
         // we just want to peek at this value.
-        //
-        // However, this is not supported by the `bytes` crate API
-        // (https://github.com/tokio-rs/bytes/issues/382), so we need to work
-        // this around by getting a reference to the underlying buffer and
-        // performing the message length extraction on the returned slice, which
-        // won't advance `buf`'s cursor
-        let mut tmp_buf = buf.bytes();
+        // Hence, we wrap the buf in a cursor and rewind back it's position after peeking.
+        let mut tmp_buf = io::Cursor::new(&buf);
         let msg_len = tmp_buf.get_u32() as usize;
+
+        tmp_buf.set_position(0);
 
         // check that we got the full payload in the buffer (NOTE: we need to
         // add the message length prefix's byte count to msg_len since the

@@ -1,6 +1,5 @@
 use std::io;
 
-use futures::stream::{Fuse, StreamExt};
 use termion::{event::Key, input::TermRead};
 use tokio::{
     sync::mpsc::{self, UnboundedReceiver},
@@ -14,7 +13,7 @@ pub const EXIT_KEY: Key = Key::Char('q');
 /// used to drive the application.
 pub struct Keys {
     /// Input keys are sent to this channel.
-    pub rx: Fuse<UnboundedReceiver<Key>>,
+    pub rx: UnboundedReceiver<Key>,
 }
 
 impl Keys {
@@ -34,6 +33,6 @@ impl Keys {
                 }
             }
         });
-        Self { rx: rx.fuse() }
+        Self { rx }
     }
 }

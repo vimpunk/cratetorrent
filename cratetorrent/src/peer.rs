@@ -15,11 +15,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use futures::{
-    select,
-    stream::{Fuse, SplitSink},
-    SinkExt, StreamExt,
-};
+use futures::{stream::SplitSink, SinkExt, StreamExt};
 use tokio::{
     net::TcpStream,
     sync::{
@@ -117,7 +113,7 @@ pub(crate) struct PeerSession {
     /// need to pass a copy of the sender with each block read to the disk task.
     cmd_tx: Sender,
     /// The port on which peer session receives commands.
-    cmd_rx: Fuse<Receiver>,
+    cmd_rx: Receiver,
 
     /// Information about the peer.
     peer: PeerInfo,
@@ -209,7 +205,7 @@ impl PeerSession {
             Self {
                 torrent,
                 cmd_tx: cmd_tx.clone(),
-                cmd_rx: cmd_rx.fuse(),
+                cmd_rx,
                 peer: PeerInfo {
                     addr,
                     pieces: Bitfield::repeat(false, piece_count),
@@ -395,8 +391,7 @@ impl PeerSession {
 
         // split the sink and stream so that we can pass the sink while holding
         // a reference to the stream in the loop
-        let (mut sink, stream) = socket.split();
-        let mut stream = stream.fuse();
+        let (mut sink, mut stream) = socket.split();
 
         // This is the beginning of the session, which is the only time
         // a peer is allowed to advertise their pieces. If we have pieces
@@ -412,16 +407,16 @@ impl PeerSession {
         }
 
         // used for collecting session stats every second
-        let mut tick_timer = time::interval(Duration::from_secs(1)).fuse();
+        let mut tick_timer = time::interval(Duration::from_secs(1));
 
         // start the loop for receiving messages from peer and commands from
         // other parts of the engine
         loop {
-            select! {
-                now = tick_timer.select_next_some() => {
+            tokio::select! {
+                now = tick_timer.tick() => {
                     self.tick(&mut sink, now.into_std()).await?;
                 }
-                msg = stream.select_next_some() => {
+                Some(msg) = stream.next() => {
                     let msg = msg?;
 
                     // handle bitfield message separately as it may only be
@@ -465,7 +460,7 @@ impl PeerSession {
                         self.handle_msg(&mut sink, msg).await?;
                     }
                 }
-                cmd = self.cmd_rx.select_next_some() => {
+                Some(cmd) = self.cmd_rx.recv() => {
                     match cmd {
                         Command::Block(block)=> {
                             self.send_block(&mut sink, block).await?;

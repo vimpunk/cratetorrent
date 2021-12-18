@@ -1,6 +1,6 @@
 [package]
 name = "cratetorrent-cli"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["mandreyel <mandreyel@protonmail.com>"]
 description = "A simple BitTorrent V1 CLI client"
 license = "MIT OR Apache-2.0"
@@ -10,11 +10,11 @@ edition = "2018"
 
 [dependencies]
 cratetorrent = { path = "../cratetorrent" }
-flexi_logger = "0.16"
+flexi_logger = "0.18"
 futures = "0.3"
 hex = "0.4"
 log = "0.4"
 structopt = "0.3"
 termion = "1.5"
-tokio = { version = "0.2", features = ["fs", "io-std", "macros", "rt-threaded"] }
-tui = "0.13"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-std", "fs"] }
+tui = "0.15"

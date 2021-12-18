@@ -5,10 +5,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use futures::{
-    select,
-    stream::{Fuse, StreamExt},
-};
 use tokio::{
     net::{TcpListener, TcpStream},
     sync::{
@@ -158,7 +154,7 @@ pub(crate) struct Torrent {
     ///
     /// The channel has to be wrapped in a `stream::Fuse` so that we can
     /// `select!` on it in the torrent event loop.
-    cmd_rx: Fuse<Receiver>,
+    cmd_rx: Receiver,
     /// The trackers we can announce to.
     trackers: Vec<TrackerEntry>,
 
@@ -224,7 +220,6 @@ impl Torrent {
 
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let piece_picker = PiecePicker::new(own_pieces);
-        let cmd_rx = cmd_rx.fuse();
         let trackers = trackers.into_iter().map(TrackerEntry::new).collect();
         let completed_pieces = if conf.alerts.completed_pieces {
             Some(Vec::new())
@@ -309,34 +304,26 @@ impl Torrent {
 
     /// Starts the torrent and runs until an error is encountered.
     async fn run(&mut self) -> Result<()> {
-        let mut tick_timer = time::interval(Duration::from_secs(1)).fuse();
+        let mut tick_timer = time::interval(Duration::from_secs(1));
         let mut last_tick_time = None;
 
-        let mut listener = TcpListener::bind(&self.listen_addr).await?;
+        let listener = TcpListener::bind(&self.listen_addr).await?;
         // the bind port may have been 0, so we need to get the actual port in
         // use
         self.listen_addr = listener.local_addr()?;
-        let mut incoming = listener.incoming().fuse();
 
         // the torrent loop is triggered every second by the loop timer and by
         // disk IO events
         loop {
-            select! {
-                tick_time = tick_timer.select_next_some() => {
+            tokio::select! {
+                tick_time = tick_timer.tick() => {
                     self.tick(&mut last_tick_time, tick_time.into_std()).await?;
                 }
-                peer_conn_result = incoming.select_next_some() => {
-                    let socket = match peer_conn_result {
-                        Ok(socket) => socket,
+                peer_conn_result = listener.accept() => {
+                    let (socket, addr) = match peer_conn_result {
+                        Ok((socket, addr)) => (socket, addr),
                         Err(e) => {
                             log::info!("Error accepting peer connection: {}", e);
-                            continue;
-                        }
-                    };
-                    let addr = match socket.peer_addr() {
-                        Ok(addr) => addr,
-                        Err(e) => {
-                            log::info!("Error getting socket address of peer: {}", e);
                             continue;
                         }
                     };
@@ -349,7 +336,7 @@ impl Torrent {
                     );
                     self.peers.insert(addr, PeerSessionEntry::start_inbound(socket, session, tx));
                 }
-                cmd = self.cmd_rx.select_next_some() => {
+                Some(cmd) = self.cmd_rx.recv() => {
                     match cmd {
                         Command::PeerConnected { addr, id } => {
                             if let Some(peer) = self.peers.get_mut(&addr) {
