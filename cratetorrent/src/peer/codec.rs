@@ -1,6 +1,6 @@
 use std::{
     convert::{TryFrom, TryInto},
-    io,
+    io::{self, Cursor},
 };
 
 use bytes::{Buf, BufMut, BytesMut};
@@ -97,18 +97,18 @@ impl Decoder for HandshakeCodec {
             return Ok(None);
         }
 
-        let prot_len = if let Some(prot_len) = buf.first() {
-            let prot_len = *prot_len as usize;
-            if prot_len != PROTOCOL_STRING.as_bytes().len() {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "Handshake must have the string \"BitTorrent protocol\"",
-                ));
-            }
-            prot_len
-        } else {
-            return Ok(None);
-        };
+        // `get_*` integer extractors consume the message bytes by advancing
+        // buf's internal cursor. However, we don't want to do this as at this
+        // point we aren't sure we have the full message in the buffer, and thus
+        // we just want to peek at this value.
+        let mut tmp_buf = Cursor::new(&buf);
+        let prot_len = tmp_buf.get_u8() as usize;
+        if prot_len != PROTOCOL_STRING.as_bytes().len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Handshake must have the string \"BitTorrent protocol\"",
+            ));
+        }
 
         // check that we got the full payload in the buffer (NOTE: we need to
         // add the message length prefix's byte count to msg_len since the
@@ -291,14 +291,13 @@ impl Encoder<Message> for PeerCodec {
             Bitfield(bitfield) => {
                 // message length prefix: 1 byte message id and n byte bitfield
                 //
-                // NOTE: take the length of the underlying storage to get the number
-                // of _bytes_, as `bitfield.len()` returns the number of _bits_
-                let msg_len = 1 + bitfield.as_slice().len();
+                // NOTE: `bitfield.len()` returns the number of _bits_
+                let msg_len = 1 + bitfield.len() / 8;
                 buf.put_u32(msg_len as u32);
                 // message id
                 buf.put_u8(MessageId::Bitfield as u8);
                 // payload
-                buf.extend_from_slice(bitfield.as_slice());
+                buf.extend_from_slice(bitfield.as_raw_slice());
             }
             Choke => {
                 // message length prefix: 1 byte message id
@@ -406,13 +405,11 @@ impl Decoder for PeerCodec {
             return Ok(None);
         }
 
-        // hack:
         // `get_*` integer extractors consume the message bytes by advancing
         // buf's internal cursor. However, we don't want to do this as at this
         // point we aren't sure we have the full message in the buffer, and thus
         // we just want to peek at this value.
-        // Hence, we wrap the buf in a cursor and rewind back it's position after peeking.
-        let mut tmp_buf = io::Cursor::new(&buf);
+        let mut tmp_buf = Cursor::new(&buf);
         let msg_len = tmp_buf.get_u32() as usize;
 
         tmp_buf.set_position(0);
@@ -869,15 +866,14 @@ mod tests {
         let encoded = {
             // 1 byte message id and n byte f bitfield
             //
-            // NOTE: take the length of the underlying storage to get the number
-            // of _bytes_, as `bitfield.len()` returns the number of _bits_
-            let msg_len = 1 + bitfield.as_slice().len();
+            // NOTE: `bitfield.len()` returns the number of _bits_
+            let msg_len = 1 + bitfield.len() / 8;
             // 4 byte message length prefix and message length
             let buf_len = 4 + msg_len;
             let mut buf = BytesMut::with_capacity(buf_len);
             buf.put_u32(msg_len as u32);
             buf.put_u8(MessageId::Bitfield as u8);
-            buf.extend_from_slice(bitfield.as_slice());
+            buf.extend_from_slice(bitfield.as_raw_slice());
             buf
         };
         let msg = Message::Bitfield(bitfield);
