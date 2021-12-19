@@ -582,7 +582,7 @@ mod tests {
         let blocks_len: usize = blocks.iter().map(Vec::len).sum();
 
         let mut bufs: Vec<_> =
-            blocks.iter().map(|buf| IoVec::from_slice(&buf)).collect();
+            blocks.iter().map(|buf| IoVec::from_slice(buf)).collect();
         let iovecs = IoVecs::bounded(&mut bufs, file_len);
 
         // we should have both buffers
@@ -625,7 +625,7 @@ mod tests {
         let blocks_len: usize = blocks.iter().map(Vec::len).sum();
 
         let mut bufs: Vec<_> =
-            blocks.iter().map(|buf| IoVec::from_slice(&buf)).collect();
+            blocks.iter().map(|buf| IoVec::from_slice(buf)).collect();
         let iovecs = IoVecs::bounded(&mut bufs, file_len);
 
         // we should have both buffers
@@ -668,7 +668,7 @@ mod tests {
             vec![(0..16).collect::<Vec<u8>>(), (16..32).collect::<Vec<u8>>()];
 
         let mut bufs: Vec<_> =
-            blocks.iter().map(|buf| IoVec::from_slice(&buf)).collect();
+            blocks.iter().map(|buf| IoVec::from_slice(buf)).collect();
         let iovecs = IoVecs::bounded(&mut bufs, file_len);
 
         // we should have both buffers
@@ -720,7 +720,7 @@ mod tests {
         ];
 
         let mut bufs: Vec<_> =
-            blocks.iter().map(|buf| IoVec::from_slice(&buf)).collect();
+            blocks.iter().map(|buf| IoVec::from_slice(buf)).collect();
         let iovecs = IoVecs::bounded(&mut bufs, file_len);
 
         // we should have only the first two buffers
@@ -768,7 +768,7 @@ mod tests {
         ];
 
         let mut bufs: Vec<_> =
-            blocks.iter().map(|buf| IoVec::from_slice(&buf)).collect();
+            blocks.iter().map(|buf| IoVec::from_slice(buf)).collect();
         let mut iovecs = IoVecs::bounded(&mut bufs, file_len);
 
         // advance past the first buffer (less then the whole write buffer/file
@@ -821,7 +821,7 @@ mod tests {
         ];
 
         let mut bufs: Vec<_> =
-            blocks.iter().map(|buf| IoVec::from_slice(&buf)).collect();
+            blocks.iter().map(|buf| IoVec::from_slice(buf)).collect();
         let mut iovecs = IoVecs::bounded(&mut bufs, file_len);
 
         // 1st advance past the first buffer
@@ -851,13 +851,9 @@ mod tests {
         iovecs.advance(advance_count);
 
         // the first half of the split should be empty
-        let first_half: Vec<_> = iovecs
-            .as_slice()
-            .iter()
-            .map(IoVec::as_slice)
-            .flatten()
-            .collect();
-        assert!(first_half.is_empty());
+        let mut first_half =
+            iovecs.as_slice().iter().map(IoVec::as_slice).flatten();
+        assert!(first_half.next().is_none());
 
         // restore the second half of the split buffer, which shouldn't be
         // affected by the above advances
@@ -888,7 +884,7 @@ mod tests {
         ];
 
         let mut bufs: Vec<_> =
-            blocks.iter().map(|buf| IoVec::from_slice(&buf)).collect();
+            blocks.iter().map(|buf| IoVec::from_slice(buf)).collect();
         let mut iovecs = IoVecs::bounded(&mut bufs, file_len);
 
         // advance past the first two buffers, onto the iovecs bound
@@ -896,13 +892,9 @@ mod tests {
         iovecs.advance(advance_count);
 
         // the first half of the split should be empty
-        let first_half: Vec<_> = iovecs
-            .as_slice()
-            .iter()
-            .map(IoVec::as_slice)
-            .flatten()
-            .collect();
-        assert!(first_half.is_empty());
+        let mut first_half =
+            iovecs.as_slice().iter().map(IoVec::as_slice).flatten();
+        assert!(first_half.next().is_none());
 
         // restore the second half of the split buffer, which shouldn't be
         // affected by the above advance
@@ -932,7 +924,7 @@ mod tests {
         ];
 
         let mut bufs: Vec<_> =
-            blocks.iter().map(|buf| IoVec::from_slice(&buf)).collect();
+            blocks.iter().map(|buf| IoVec::from_slice(buf)).collect();
         let mut iovecs = IoVecs::bounded(&mut bufs, file_len);
 
         let advance_count = file_len + 5;
@@ -1002,11 +994,7 @@ mod tests {
         // should trim everything
         let n = 9;
         let iovecs = advance(&mut iovecs, n);
-        let actual: Vec<_> = iovecs
-            .iter()
-            .map(|b| b.as_slice().to_vec())
-            .flatten()
-            .collect();
-        assert!(actual.is_empty());
+        let mut actual = iovecs.iter().map(|b| b.as_slice().to_vec()).flatten();
+        assert!(actual.next().is_none());
     }
 }

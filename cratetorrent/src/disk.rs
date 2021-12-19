@@ -274,10 +274,7 @@ mod tests {
         let alert = rx.recv().await.unwrap();
         assert!(matches!(
             alert,
-            engine::Command::TorrentAllocation {
-                result: Ok(()),
-                ..
-            }
+            engine::Command::TorrentAllocation { result: Ok(()), .. }
         ));
 
         // check that file was created on disk
@@ -334,8 +331,7 @@ mod tests {
         rx.recv().await.expect("cannot allocate torrent");
 
         // write all pieces to disk
-        for index in 0..pieces.len() {
-            let piece = &pieces[index];
+        for (index, piece) in pieces.iter().enumerate() {
             for_each_block(index, piece.len() as u32, |block| {
                 let block_end = block.offset + block.len;
                 let data = &piece[block.offset as usize..block_end as usize];
@@ -356,9 +352,9 @@ mod tests {
             {
                 // piece is complete so it should be hashed and valid
                 assert_eq!(piece.index, index);
-                assert_eq!(piece.is_valid, true);
+                assert!(piece.is_valid);
             } else {
-                assert!(false, "Piece could not be written to disk");
+                panic!("Piece could not be written to disk");
             }
         }
 
@@ -420,9 +416,9 @@ mod tests {
             torrent_rx.recv().await
         {
             assert_eq!(piece.index, index);
-            assert_eq!(piece.is_valid, false);
+            assert!(!piece.is_valid);
         } else {
-            assert!(false, "piece could not be written to disk");
+            panic!("piece could not be written to disk");
         }
     }
 
@@ -502,7 +498,7 @@ mod tests {
             if let Some(peer::Command::Block(block)) = rx.recv().await {
                 assert_eq!(block.info(), block_info);
             } else {
-                assert!(false, "block could not be read from disk");
+                panic!("block could not be read from disk");
             }
 
             // increment offset for next piece
@@ -588,7 +584,7 @@ mod tests {
             // build up expected piece hashes
             let mut piece_hashes = Vec::with_capacity(pieces.len() * 20);
             for piece in pieces.iter() {
-                let hash = Sha1::digest(&piece);
+                let hash = Sha1::digest(piece);
                 piece_hashes.extend(hash.as_slice());
             }
             assert_eq!(piece_hashes.len(), pieces.len() * 20);

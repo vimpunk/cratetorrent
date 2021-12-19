@@ -638,10 +638,8 @@ impl Torrent {
         let missing_piece_count =
             self.ctx.piece_picker.read().await.missing_piece_count();
         let piece_count = self.ctx.storage.piece_count;
-        let completed_pieces = self
-            .completed_pieces
-            .as_mut()
-            .map(|p| std::mem::replace(p, Vec::new()));
+        let completed_pieces =
+            self.completed_pieces.as_mut().map(std::mem::take);
         let peers = if self.conf.alerts.peers {
             let peers = self
                 .peers
