@@ -75,10 +75,14 @@ pub(crate) struct Announce {
 
     /// If previously received from the tracker, we must send it with each
     /// announce.
+    // TODO: use field
+    #[allow(dead_code)]
     pub tracker_id: Option<String>,
 
     /// Only need be set during the special events defined in [`Event`].
     /// Otherwise when just requesting peers, no event needs to be set.
+    // TODO: use field
+    #[allow(dead_code)]
     pub event: Option<Event>,
 }
 
@@ -502,7 +506,7 @@ mod tests {
 
     fn encode_compact_peers_list(peers: &[(Ipv4Addr, u16)]) -> Vec<u8> {
         let encoded_peers: Vec<_> = peers
-            .into_iter()
+            .iter()
             .map(|(ip, port)| {
                 ip.octets()
                     .iter()

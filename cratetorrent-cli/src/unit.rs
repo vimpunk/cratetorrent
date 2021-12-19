@@ -61,7 +61,7 @@ mod tests {
                 assert_eq!(u, 1011);
             }
             _ => {
-                assert!(false, "unit should remain in bytes");
+                panic!("unit should remain in bytes");
             }
         }
     }
@@ -69,51 +69,21 @@ mod tests {
     #[test]
     fn should_convert_bytes_to_kib() {
         let unit = Unit::new(5_460);
-        // we should ideally test at least the first 2 decimal places too, but
-        // this should do for the time being...
-        match unit {
-            KiB(u) => {
-                assert_eq!(u.trunc(), 5.0);
-            }
-            _ => {
-                assert!(false, "unit should be in KiB");
-            }
-        }
+        assert_eq!("5.33 KiB", unit.to_string());
     }
 
     #[test]
     fn should_convert_bytes_to_mib() {
         let unit = Unit::new(32_123_962);
-        match unit {
-            MiB(u) => {
-                assert_eq!(u.trunc(), 30.0);
-            }
-            _ => {
-                assert!(false, "unit should be in MiB");
-            }
-        }
+        assert_eq!("30.64 MiB", unit.to_string());
     }
 
     #[test]
     fn should_convert_bytes_to_gib() {
         let unit = Unit::new(2_229_863_925);
-        match unit {
-            GiB(u) => {
-                assert_eq!(u.trunc(), 2.0);
-            }
-            _ => {
-                assert!(false, "unit should be in GiB");
-            }
-        }
+        assert_eq!("2.08 GiB", unit.to_string());
 
-        let unit = Unit::new(12_262_129_863_925);
-        match unit {
-            GiB(u) => {
-                assert_eq!(u.trunc(), 11_419.0);
-            }
-            _ => {
-                assert!(false, "unit should be in GiB");
-            }
-        }
+        let unit = Unit::new(12262129863925);
+        assert_eq!("11420.00 GiB", unit.to_string());
     }
 }

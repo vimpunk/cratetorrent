@@ -196,7 +196,7 @@ impl App {
             ]
             .iter_mut()
             {
-                history.update(&curr, HISTORY_LIMIT);
+                history.update(curr, HISTORY_LIMIT);
             }
         }
     }

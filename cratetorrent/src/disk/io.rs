@@ -52,7 +52,7 @@ mod tests {
         let mut iovecs: Vec<_> = piece
             .blocks
             .values()
-            .map(|b| IoVec::from_slice(&b))
+            .map(|b| IoVec::from_slice(b))
             .collect();
         let tail = file
             .write(file_slice, &mut iovecs)
@@ -328,11 +328,11 @@ mod tests {
     /// Creates a piece for testing that has 4 blocks of length `BLOCK_LEN`.
     fn make_piece(files: Range<FileIndex>) -> Piece {
         let blocks = vec![
-            (0 * BLOCK_LEN..1 * BLOCK_LEN)
+            (0..BLOCK_LEN)
                 .map(|b| b % u8::MAX as u32)
                 .map(|b| b as u8)
                 .collect::<Vec<u8>>(),
-            (1 * BLOCK_LEN..2 * BLOCK_LEN)
+            (BLOCK_LEN..2 * BLOCK_LEN)
                 .map(|b| b % u8::MAX as u32)
                 .map(|b| b as u8)
                 .collect::<Vec<u8>>(),

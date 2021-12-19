@@ -353,7 +353,7 @@ impl Engine {
             .expect("Disk task has panicked")
             .map_err(Error::from)?;
 
-        return Ok(());
+        Ok(())
     }
 }
 

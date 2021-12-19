@@ -21,15 +21,13 @@ impl Keys {
         let (tx, rx) = mpsc::unbounded_channel();
         task::spawn(async move {
             let stdin = io::stdin();
-            for key in stdin.keys() {
-                if let Ok(key) = key {
-                    if let Err(e) = tx.send(key) {
-                        eprintln!("{}", e);
-                        return;
-                    }
-                    if key == exit_key {
-                        return;
-                    }
+            for key in stdin.keys().flatten() {
+                if let Err(e) = tx.send(key) {
+                    eprintln!("{}", e);
+                    return;
+                }
+                if key == exit_key {
+                    return;
                 }
             }
         });

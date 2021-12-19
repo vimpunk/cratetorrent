@@ -183,7 +183,7 @@ impl Metainfo {
 
             for tier in metainfo.announce_list.iter() {
                 for tracker in tier.iter() {
-                    let url = Url::parse(&tracker)?;
+                    let url = Url::parse(tracker)?;
                     // the tracker may be over UDP, which we don't support (yet)
                     if url.scheme() == "http" || url.scheme() == "https" {
                         trackers.push(url);
@@ -191,7 +191,7 @@ impl Metainfo {
                 }
             }
         } else if let Some(tracker) = &metainfo.announce {
-            let url = Url::parse(&tracker)?;
+            let url = Url::parse(tracker)?;
             if url.scheme() == "http" || url.scheme() == "https" {
                 trackers.push(url);
             }

@@ -553,7 +553,7 @@ mod tests {
         let mut read_buf = BytesMut::with_capacity(msgs_len);
         read_buf.extend_from_slice(&encoded_handshake);
         for (_, encoded) in &msgs {
-            read_buf.extend_from_slice(&encoded);
+            read_buf.extend_from_slice(encoded);
         }
 
         // decode messages one by one from the byte stream in the same order as

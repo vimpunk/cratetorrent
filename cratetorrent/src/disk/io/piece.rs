@@ -90,11 +90,8 @@ impl Piece {
     ) -> Result<(), WriteError> {
         // convert the blocks to IO slices that the underlying
         // systemcall can deal with
-        let mut blocks: Vec<_> = self
-            .blocks
-            .values()
-            .map(|b| IoVec::from_slice(&b))
-            .collect();
+        let mut blocks: Vec<_> =
+            self.blocks.values().map(|b| IoVec::from_slice(b)).collect();
         // the actual slice of blocks being worked on
         let mut bufs = blocks.as_mut_slice();
 
