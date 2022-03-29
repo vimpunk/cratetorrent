@@ -27,10 +27,10 @@ pub(crate) struct Piece {
     ///
     /// This is to prevent picking the same piece we are already downloading in
     /// the scenario in which we want to pick a new piece before the already
-    /// downloadng piece finishes. Not having this check would lead us to always
+    /// downloading piece finishes. Not having this check would lead us to always
     /// pick this piece until we tell the piece picker that we have it and thus
     /// wouldn't be able to download multiple pieces simultaneously (an
-    /// important optimizaiton step).
+    /// important optimization step).
     pub is_pending: bool,
 }
 
@@ -93,7 +93,7 @@ impl PiecePicker {
         None
     }
 
-    /// Registers the avilability of a peer's pieces and returns whether we're
+    /// Registers the availability of a peer's pieces and returns whether we're
     /// interested in peer's pieces.
     ///
     /// # Panics

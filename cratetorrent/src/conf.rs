@@ -96,7 +96,7 @@ impl Default for TorrentConf {
             // This value is mostly picked for performance while keeping in mind
             // not to overwhelm the host.
             max_connected_peer_count: 50,
-            // needs teting
+            // needs testing
             announce_interval: Duration::from_secs(60 * 60),
             // needs testing
             tracker_error_threshold: 15,

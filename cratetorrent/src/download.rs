@@ -130,7 +130,7 @@ impl PieceDownload {
         ));
 
         // TODO(https://github.com/mandreyel/cratetorrent/issues/9): record
-        // rount trip time for this block
+        // round trip time for this block
 
         let block = &mut self.blocks[block.index_in_piece()];
         let prev_status = *block;
