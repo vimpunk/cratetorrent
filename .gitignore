@@ -1,4 +1,5 @@
 /target
+/tests/cli/target
 Cargo.lock
 scratch*
 tests/assets
