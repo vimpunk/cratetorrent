@@ -501,13 +501,14 @@ impl Torrent {
         let left = self.ctx.storage.download_len - downloaded;
 
         // skip trackers that errored too often
-        // TODO: introduce a retry timeout
         let tracker_error_threshold = self.conf.tracker_error_threshold;
-        for tracker in self
-            .trackers
-            .iter_mut()
-            .filter(|t| t.error_count < tracker_error_threshold)
-        {
+        let tracker_error_timeout = self.conf.tracker_error_timeout;
+        for tracker in self.trackers.iter_mut().filter(|t| {
+            match t.error_threshold_reached_time {
+                Some(instant) => instant.elapsed() > tracker_error_timeout,
+                None => true,
+            }
+        }) {
             // Check if the torrent's peer count has fallen below the minimum.
             // But don't request new peers otherwise or if we're about to stop
             // torrent.
@@ -618,6 +619,14 @@ impl Torrent {
                             e
                         );
                         tracker.error_count += 1;
+                        tracker.error_count_since_timeout += 1;
+                        if tracker.error_count_since_timeout
+                            > tracker_error_threshold
+                        {
+                            tracker.error_count_since_timeout = 0;
+                            tracker.error_threshold_reached_time =
+                                Some(Instant::now());
+                        }
                         self.ctx.alert_tx.send(Alert::Error(
                             Error::Tracker {
                                 id: self.ctx.id,
@@ -906,6 +915,10 @@ struct TrackerEntry {
     /// Each time we fail to requet from tracker, this counter is incremented.
     /// If it fails too often, we stop requesting from tracker.
     error_count: usize,
+
+    error_count_since_timeout: usize,
+
+    error_threshold_reached_time: Option<Instant>,
 }
 
 impl TrackerEntry {
@@ -917,6 +930,8 @@ impl TrackerEntry {
             interval: None,
             min_interval: None,
             error_count: 0,
+            error_count_since_timeout: 0,
+            error_threshold_reached_time: None,
         }
     }
 
