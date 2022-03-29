@@ -262,7 +262,7 @@ impl Torrent {
 
         self.available_peers.extend_from_slice(peers);
 
-        // record the torrent starttime
+        // record the torrent start time
         self.start_time = Some(Instant::now());
 
         // if the torrent is a seed, don't send the started event, just an
@@ -393,7 +393,7 @@ impl Torrent {
     /// to perform periodic updates.
     ///
     /// This is when we update statistics and report them to the user, when new
-    /// peers are connected, and when perioric announces are made.
+    /// peers are connected, and when periodic announces are made.
     async fn tick(
         &mut self,
         last_tick_time: &mut Option<Instant>,
@@ -488,7 +488,7 @@ impl Torrent {
         }
     }
 
-    /// Chacks whether we need to announce to any trackers of if we need to request
+    /// Checks whether we need to announce to any trackers or if we need to request
     /// peers.
     async fn announce_to_trackers(
         &mut self,
@@ -520,14 +520,14 @@ impl Torrent {
             } else {
                 debug_assert!(self.conf.max_connected_peer_count >= peer_count);
                 let needed = self.conf.max_connected_peer_count - peer_count;
-                // Download at least this numbe of peers, even if we don't need
+                // Download at least this number of peers, even if we don't need
                 // as many. This is because later we may be able to connect to
                 // more peers and in that case we don't want to wait till the
                 // next tracker request.
                 Some(self.conf.min_requested_peer_count.max(needed))
             };
 
-            // we can override the normal annoucne interval if we need peers or
+            // we can override the normal announce interval if we need peers or
             // if we have an event to announce
             if event.is_some()
                 || (needed_peer_count > Some(0)
@@ -550,7 +550,7 @@ impl Torrent {
                 // here waiting on the tracker response. Instead, poll the
                 // future in the event loop select call, or spawn the tracker
                 // announce on a separate task and return the result as
-                // an mpsc message.
+                // a mpsc message.
                 match tracker.client.announce(params).await {
                     Ok(resp) => {
                         log::info!(
@@ -903,7 +903,7 @@ struct TrackerEntry {
     /// The absolute minimum interval at which we can contact tracker.
     /// This is set after the first announce request.
     min_interval: Option<Duration>,
-    /// Each time we fail to requet from tracker, this counter is incremented.
+    /// Each time we fail to request from tracker, this counter is incremented.
     /// If it fails too often, we stop requesting from tracker.
     error_count: usize,
 }

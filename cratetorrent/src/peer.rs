@@ -740,7 +740,7 @@ impl PeerSession {
             Message::Interested => {
                 if !self.ctx.state.is_peer_interested {
                     // TODO(https://github.com/mandreyel/cratetorrent/issues/60):
-                    // we currently unchkoe peer unconditionally, but we should
+                    // we currently unchoke peer unconditionally, but we should
                     // implement the proper unchoke algorithm in `Torrent`
                     log::info!(target: &self.ctx.log_target, "Peer became interested");
                     log::info!(target: &self.ctx.log_target, "Unchoking peer");

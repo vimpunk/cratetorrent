@@ -15,7 +15,7 @@ pub use reqwest::Error as HttpError;
 
 pub(crate) type Result<T, E = TrackerError> = crate::error::Result<T, E>;
 
-/// The possible errors that may occur when contating the tracker.
+/// The possible errors that may occur when contacting the tracker.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum TrackerError {
@@ -54,7 +54,7 @@ pub(crate) struct Announce {
     /// The port on which we are listening.
     pub port: u16,
     /// True IP address of the client in dotted quad format. This is only necessary if
-    /// the IP addresss from which the HTTP request originated is not the same as the
+    /// the IP addresses from which the HTTP request originated is not the same as the
     /// client's host address. This happens if the client is communicating through a
     /// proxy, or when the tracker is on the same NAT'd subnet as peer (in which case it
     /// is necessary that tracker not give out an unroutable address to peer).
@@ -69,7 +69,7 @@ pub(crate) struct Announce {
 
     /// The number of peers the client wishes to receive from the tracker. If omitted and
     /// the tracker is UDP, -1 is sent to signal the tracker to determine the number of
-    /// peers, and if it's ommitted and the tracker is HTTP, this is typically swapped
+    /// peers, and if it's omitted and the tracker is HTTP, this is typically swapped
     /// for a value between 30 and 50.
     pub peer_count: Option<usize>,
 

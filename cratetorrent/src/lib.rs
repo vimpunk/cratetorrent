@@ -207,7 +207,7 @@ pub type Sha1Hash = [u8; 20];
 
 /// The bitfield represents the piece availability of a peer.
 ///
-/// It is a compact bool vector of most significant bits to least significants
+/// It is a compact bool vector of most significant bits to least significant
 /// bits, that is, where the first highest bit represents the first piece, the
 /// second highest element the second piece, and so on (e.g. `0b1100_0001` would
 /// mean that we have pieces 0, 1, and 7). A truthy boolean value of a piece's
@@ -229,7 +229,7 @@ impl Default for Side {
 }
 
 /// This is the only block length we're dealing with (except for possibly the
-/// last block).  It is the widely used and accepted 16 KiB.
+/// last block). It is the widely used and accepted 16 KiB.
 pub(crate) const BLOCK_LEN: u32 = 0x4000;
 
 /// A block is a fixed size chunk of a piece, which in turn is a fixed size
@@ -271,7 +271,7 @@ impl fmt::Display for BlockInfo {
 /// Returns the length of the block at the index in piece.
 ///
 /// If the piece is not a multiple of the default block length, the returned
-/// value is smalled.
+/// value is smaller.
 ///
 /// # Panics
 ///
