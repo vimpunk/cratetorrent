@@ -60,6 +60,9 @@ pub struct TorrentConf {
     /// After this many attempts, the torrent stops announcing to a tracker.
     pub tracker_error_threshold: usize,
 
+    /// Timeout duration after error threshold is reached.
+    pub tracker_error_timeout: Duration,
+
     /// Specifies which optional alerts to send, besides the default periodic
     /// stats update.
     pub alerts: TorrentAlertConf,
@@ -96,10 +99,12 @@ impl Default for TorrentConf {
             // This value is mostly picked for performance while keeping in mind
             // not to overwhelm the host.
             max_connected_peer_count: 50,
-            // needs teting
+            // TODO: needs testing
             announce_interval: Duration::from_secs(60 * 60),
-            // needs testing
+            // TODO: needs testing
             tracker_error_threshold: 15,
+            // TODO: needs testing
+            tracker_error_timeout: Duration::from_secs(60 * 60),
             alerts: Default::default(),
         }
     }
